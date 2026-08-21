@@ -8,15 +8,13 @@ services:
     restart: unless-stopped
     ports:
       - "8191:8191"
-    shm_size: '2gb' # Recommended 1gb-2gb for Chromium/Camoufox multi-worker rendering
+    shm_size: '2gb' # Recommended 1gb-2gb for Camoufox multi-worker rendering
     environment:
       - PORT=8191
       - HOST=0.0.0.0
       - LOG_LEVEL=INFO
       - MAX_BROWSER_WORKERS=auto # Auto-scales across CPU cores, clamped to what host RAM supports (DXP4800 Pro is 6c/8t + 8GB DDR5 stock -> auto lands well below 8)
-      - BROWSER_MAX_OLD_SPACE_SIZE=2048
       - HEADLESS=true
-      - ENABLE_GPU=true
       - ENABLE_FAST_TLS=true
       - COOKIE_CACHE_TTL=7200
       # - PUID=1000                      # Optional: run as this user ID (must be set with PGID)
@@ -27,10 +25,6 @@ services:
       # - CAPTCHA_SOLVER_API_KEY=          # Optional 2Captcha/CapSolver key for paid image challenge escalation
     volumes:
       - ./data:/app/data
-    # Optional hardware GPU acceleration passthrough on UGREEN / Linux NAS (Intel Iris Xe / QuickSync)
-    # Uncomment the devices block below if your NAS host supports /dev/dri:
-    # devices:
-    #   - /dev/dri:/dev/dri
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8191/health"]
       interval: 30s

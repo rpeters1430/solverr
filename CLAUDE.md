@@ -22,7 +22,8 @@ python -m unittest tests.test_engine.EngineTests.test_specific_case
 Local run:
 ```
 pip install -r requirements.txt
-playwright install chromium
+playwright install-deps firefox
+python -m camoufox fetch
 python -m app.main
 ```
 
@@ -50,17 +51,21 @@ Quick manual checks:
 
 ## Architecture: 4.5-Tier Adaptive Solving Pipeline
 
-1. **Tier 1 — Fast TLS path** (`app/solver/fast_tls.py`): Uses `curl_cffi` with Chrome/Firefox JA3/TLS impersonation to make direct requests in 30ms–150ms without launching a browser. Rotates between matched TLS-target/User-Agent profiles per-domain (`FAST_TLS_ROTATE`) — target and UA must always be from the same profile pair, since a mismatched pair (e.g. Firefox JA3 with a Chrome UA header) is itself a bot signal.
+Camoufox is the only browser engine — there is no Chromium fallback (removed in v1.5; see below).
+
+1. **Tier 1 — Fast TLS path** (`app/solver/fast_tls.py`): Uses `curl_cffi` with Firefox JA3/TLS impersonation to make direct requests in 30ms–150ms without launching a browser. Rotates between matched TLS-target/User-Agent profiles per-domain (`FAST_TLS_ROTATE`) — target and UA must always be from the same profile pair, since a mismatched pair is itself a bot signal.
 2. **Tier 2 — Clearance Cookie Cache** (`app/solver/cache.py`): Reuses valid `cf_clearance` tokens and domain cookie jars. Supports zero-dependency local disk JSON storage (writes are debounced/throttled off the request hot path) or distributed Redis via `REDIS_URL`.
-3. **Tier 3 — Multi-WAF Stealth Browser** (`app/solver/browser.py` + `app/solver/stealth.py` + `app/solver/human_cursor.py`): Camoufox (Stealth Firefox) & Chromium pool with cubic Bézier human mouse curves to defeat Turnstile, reCAPTCHA v2, hCaptcha, GeeTest, and Imperva. Camoufox instances run through `CamoufoxPool` — a bounded pool of warm, no-proxy browser processes reused across solves (a fresh context per request, not a fresh process) and recycled after `CAMOUFOX_POOL_RECYCLE_USES`/`_SECONDS`. A request carrying its own proxy or an explicit `userAgent` bypasses the pool and gets an ephemeral instance instead, since Camoufox ties its fingerprint/geo derivation to the proxy at launch time.
+3. **Tier 3 — Multi-WAF Stealth Browser** (`app/solver/browser.py` + `app/solver/human_cursor.py`): Camoufox (Stealth Firefox) with cubic Bézier human mouse curves to defeat Turnstile, reCAPTCHA v2, hCaptcha, GeeTest, and Imperva. `BrowserPool.solve()` tries a warm pooled instance first (`CamoufoxPool` — a bounded pool of warm, no-proxy browser processes reused across solves, a fresh context per request rather than a fresh process, recycled after `CAMOUFOX_POOL_RECYCLE_USES`/`_SECONDS`), then always retries once on a fresh ephemeral Camoufox instance (new randomly generated fingerprint) before giving up — either as the pooled path's retry, or as the only attempt for requests carrying their own proxy or an explicit `userAgent` (which bypass the pool entirely, since Camoufox ties fingerprint/geo derivation to the proxy at launch time).
 3.5. **Tier 3.5 — Paid Captcha-Solver Escalation** (`app/solver/captcha_solver.py`): Optional, off unless `CAPTCHA_SOLVER_API_KEY` is set. Only triggered after Tier 3's free click-based loop has exhausted its full timeout without clearing — extracts the widget's `data-sitekey`/`data-callback`, submits to a 2Captcha-protocol-compatible service, and injects the solved token back into the page. Covers interactive image challenges (hCaptcha puzzle grids, reCAPTCHA image selection) a checkbox click alone can't solve.
-4. **Tier 4 — Fallback Proxy Escalation** (`app/solver/engine.py`): Escalates to residential or fallback proxies (`FALLBACK_PROXY_URL`) if direct solves fail.
+4. **Tier 4 — Fallback Proxy Escalation** (`app/solver/engine.py`): Escalates to residential or fallback proxies (`FALLBACK_PROXY_URL`) if direct solves fail — this re-enters `BrowserPool.solve()` with the fallback proxy set, so it's itself a fresh-Camoufox-with-alternate-proxy attempt, not a distinct engine.
 
 In-flight request deduplication is handled in `app/solver/engine.py` via `HybridSolverEngine._inflight` futures. Sessions (`app/solver/sessions.py`) follow the same dual-mode pattern as the cookie cache — in-memory by default, Redis-backed (surviving restarts, shared across replicas) when `REDIS_URL` is set. See the README's "Horizontal Scaling" section for running multiple replicas behind a shared Redis.
 
+**v1.5 removed Chromium entirely** (previously a Tier 3/4 fallback engine). Chromium's crashpad crash-reporter handler crashes outright when the process runs as a non-root `PUID`/`PGID` user — reproduced even under `--privileged` with every capability added, so it wasn't fixable via permissions. Camoufox has no such issue. `app/solver/stealth.py` (a Chrome-specific `navigator.webdriver`/`window.chrome` JS spoofing script only ever injected into the old Chromium context) was deleted along with it — repurposing it for a Firefox/Camoufox context would be counterproductive, since a Firefox page reporting a `window.chrome` object is itself a tell.
+
 ## Module layout
 
-- `app/main.py` — FastAPI app, lifespan (browser pool init, periodic session cleanup), request-logging/auth middleware, `/health` and `/metrics`.
+- `app/main.py` — FastAPI app, lifespan (periodic session cleanup; the Camoufox pool itself warms up lazily on first solve, not at startup), request-logging/auth middleware, `/health` and `/metrics`.
 - `app/api/flaresolverr.py` — `/v1`, `/v2`, `/scrape`, `/proxy` route handlers.
 - `app/api/dashboard.py` — `/api/*` dashboard endpoints (stats, cookies, sessions, test).
 - `app/models/flaresolverr.py` — Pydantic request/response models shared by the API routes.
@@ -73,12 +78,12 @@ Optional `X-Api-Key` auth (`API_KEY` env var) is enforced in `app/main.py`'s mid
 
 `Dockerfile` is a two-stage build on `python:3.14-slim-bookworm`, `linux/amd64` only (matches the CI publish target and the UGREEN/NAS deployment targets called out in the README):
 
-1. **`deps` stage** — creates a venv, `pip install -r requirements.txt`, then pre-fetches browser engines (`playwright install chromium` and `python -m camoufox fetch`) so they're baked into the image rather than downloaded at container start.
-2. **`runtime` stage** — copies the venv and pre-fetched browsers from `deps`, installs `tini`, `curl`, `ca-certificates`, `gosu`, and Playwright's OS-level Chromium/Firefox deps, then copies in `app/` and `docker-entrypoint.sh`.
+1. **`deps` stage** — creates a venv, `pip install -r requirements.txt`, then pre-fetches the Camoufox browser engine (`python -m camoufox fetch`) so it's baked into the image rather than downloaded at container start.
+2. **`runtime` stage** — copies the venv and pre-fetched Camoufox browser from `deps`, installs `tini`, `curl`, `ca-certificates`, `gosu`, and Playwright's OS-level Firefox deps (`playwright install-deps firefox` — the shared libs Camoufox's Firefox binary also needs), then copies in `app/` and `docker-entrypoint.sh`.
 
-Container startup: `tini` is PID 1 (`ENTRYPOINT`), invoking `docker-entrypoint.sh`, which then `exec`s `python -m app.main` (the `CMD`). The container runs as **root by default** — set `PUID`/`PGID` together (both required, both must be numeric) to have the entrypoint `chown` `/app/data` and `/app/.cache` to that UID/GID and re-exec the process under it via `gosu`. Setting only one of the pair fails the container at startup by design.
+Container startup: `tini` is PID 1 (`ENTRYPOINT`), invoking `docker-entrypoint.sh`, which then `exec`s `python -m app.main` (the `CMD`). The container runs as **root by default** — set `PUID`/`PGID` together (both required, both must be numeric) to have the entrypoint `chown` `/app/data` and `/app/.cache` to that UID/GID and re-exec the process under it via `gosu`. Setting only one of the pair fails the container at startup by design. The entrypoint also registers a matching `/etc/passwd`/`/etc/group` entry for an unrecognized PUID/PGID before dropping privileges, since `gosu` derives `$HOME` from the target UID's passwd entry (ignoring any exported `HOME`) — an unregistered UID would otherwise resolve to `HOME=/`, which is read-only for a non-root user and breaks Camoufox's config/cache directories.
 
-`HEALTHCHECK` and the compose `healthcheck:` block both poll `curl -f http://localhost:8191/health`; `/health` in `app/main.py` reports `503` only when a Chromium fallback browser was launched and then died — an unused/lazy pool is healthy.
+`HEALTHCHECK` and the compose `healthcheck:` block both poll `curl -f http://localhost:8191/health`; `/health` in `app/main.py` reports `503` only when the Camoufox import itself failed (`CAMOUFOX_AVAILABLE` is False) — there's no other engine left to service Tier 3 in that case. An unused/lazy pool (nothing solved yet) is healthy.
 
 Build and publish is automated by `.github/workflows/docker-publish.yml`: runs `python -m unittest discover -s tests` first, then (on push to `main`, version tags, or manual dispatch — not on pull requests) builds and pushes `linux/amd64` to `ghcr.io/rpeters1430/solverr` tagged `latest` (default branch only), the branch/ref name, semver, and short SHA. To reproduce that image locally: `docker build --platform linux/amd64 -t solverr .`
 

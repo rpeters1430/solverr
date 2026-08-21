@@ -18,7 +18,7 @@ def generate_prometheus_metrics() -> str:
     stats = metrics.to_dict()
 
     from app.solver.browser import CAMOUFOX_AVAILABLE
-    stealth_engine = "camoufox" if (settings.USE_CAMOUFOX and CAMOUFOX_AVAILABLE) else "playwright_chromium"
+    stealth_engine = "camoufox" if CAMOUFOX_AVAILABLE else "unavailable"
 
     lines = [
         "# HELP solverr_info Build and version metadata about the Solverr engine instance",

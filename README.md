@@ -9,7 +9,7 @@
 - **⚡ 4-Tier Adaptive Solver Pipeline**:
   - **Tier 1 (Fast TLS)**: Level 1 & 2 JA3 / TLS Impersonation (`curl_cffi`) solves requests in **30ms – 120ms** without browser overhead.
   - **Tier 2 (Clearance Cache)**: Instant `cf_clearance` & domain cookie jar reuse (**< 50ms**).
-  - **Tier 3 (Stealth Browser)**: Camoufox (Stealth Firefox) & Chromium pool with Bézier human mouse curves for hard challenges.
+  - **Tier 3 (Stealth Browser)**: Warm Camoufox (Stealth Firefox) pool with Bézier human mouse curves for hard challenges, escalating to a fresh Camoufox instance (new fingerprint) if the pooled attempt fails.
   - **Tier 4 (Fallback Proxy)**: Automatic residential / fallback proxy escalation for rate-limited indexers.
 - **🛡️ Multi-WAF & CAPTCHA Solver Suite**: Automated solving for **Cloudflare Turnstile**, **Cloudflare 5s Interstitial**, **Google reCAPTCHA v2 / Enterprise**, **hCaptcha**, **GeeTest**, and **Imperva / Incapsula**.
 - **🧩 Optional Paid Solver Escalation (Tier 3.5)**: When the free click-based solver can't clear an interactive image challenge, Solverr can escalate to a 2Captcha-compatible service (2Captcha, CapSolver, etc.) via `CAPTCHA_SOLVER_API_KEY` - fully optional, zero network calls unless configured.
@@ -27,7 +27,7 @@
 
 | Feature / Metric | Traditional FlareSolverr | TRAWL (`germondai/trawl`) | **Solverr** |
 | :--- | :--- | :--- | :--- |
-| **Engine** | Full Selenium Chrome | Camoufox | **Hybrid (Fast TLS + Camoufox + Playwright)** |
+| **Engine** | Full Selenium Chrome | Camoufox | **Hybrid (Fast TLS + Camoufox)** |
 | **Response Latency** | 10s – 18s | ~500ms (cached) / 4–12s (solve) | **30ms – 100ms** (Fast) / **~1.8s** (Browser) |
 | **RAM Usage** | ~600MB – 1.2GB | ~150MB – 300MB | **~75MB – 140MB** |
 | **Challenge Solvers** | Basic Cloudflare | Turnstile, reCAPTCHA, hCaptcha, GeeTest | **Turnstile, reCAPTCHA v2, hCaptcha, GeeTest, Imperva, Akamai** |
@@ -56,23 +56,19 @@ services:
     restart: unless-stopped
     ports:
       - "8191:8191"
-    shm_size: '2gb' # Recommended 1gb-2gb for Chromium/Camoufox multi-worker rendering
+    shm_size: '2gb' # Recommended 1gb-2gb for Camoufox multi-worker rendering
     environment:
       - PORT=8191
       - HOST=0.0.0.0
       - LOG_LEVEL=INFO
       - MAX_BROWSER_WORKERS=auto # Auto-scales across CPU cores, clamped to available RAM (see Environment Configuration below)
-      - BROWSER_MAX_OLD_SPACE_SIZE=2048
       - HEADLESS=true
-      - ENABLE_GPU=true
       - ENABLE_FAST_TLS=true
       - COOKIE_CACHE_TTL=7200
       # - PUID=1000 # Optional: run container process as this UID (must be set with PGID)
       # - PGID=1000 # Optional: run container process as this GID (must be set with PUID)
     volumes:
       - /volume1/docker/solverr/data:/app/data
-    devices:
-      - /dev/dri:/dev/dri # Intel UHD Graphics / QuickSync passthrough - only affects the Chromium fallback engine, not the primary Camoufox pool (see ENABLE_GPU below)
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8191/health"]
       interval: 30s
@@ -97,10 +93,8 @@ docker run -d \
   --restart unless-stopped \
   -p 8191:8191 \
   --shm-size=2g \
-  --device /dev/dri:/dev/dri \
   -v /volume1/docker/solverr/data:/app/data \
   -e MAX_BROWSER_WORKERS=auto \
-  -e ENABLE_GPU=true \
   -e PUID=1000 \
   -e PGID=1000 \
   ghcr.io/rpeters1430/solverr:latest
@@ -124,8 +118,6 @@ services:
       - HOST=0.0.0.0
       - LOG_LEVEL=INFO
       - MAX_BROWSER_WORKERS=auto
-      - BROWSER_MAX_OLD_SPACE_SIZE=2048
-      - ENABLE_GPU=true
       - ENABLE_FAST_TLS=true
       - COOKIE_CACHE_TTL=7200
       # - PUID=1000 # Optional: run container process as this UID (must be set with PGID)
@@ -148,7 +140,7 @@ services:
 
 ## 💻 Native Host Execution (Windows / Linux / macOS)
 
-Running Solverr natively directly on your host computer gives **100% native CPU & GPU performance**, zero Docker virtualization overhead, and unconstrained access to system RAM.
+Running Solverr natively directly on your host computer gives **100% native CPU performance**, zero Docker virtualization overhead, and unconstrained access to system RAM.
 
 ### Quick Start:
 
@@ -227,10 +219,8 @@ http://localhost:8191/metrics
 | `MAX_BROWSER_WORKERS` | `auto` | Max concurrent browser workers, and Camoufox pool size (`auto` matches CPU cores, then clamps to a RAM-based cap - see `RAM_PER_WORKER_GB`/`RAM_RESERVED_GB`) |
 | `RAM_PER_WORKER_GB` | `1.0` | RAM budgeted per browser worker when auto-tuning `MAX_BROWSER_WORKERS` |
 | `RAM_RESERVED_GB` | `2.0` | RAM reserved for the OS/other containers and excluded from auto-tuning's worker budget |
-| `ENABLE_GPU` | `true` | Enables Chromium's `--enable-gpu-rasterization` flag (Chromium fallback engine only - the primary Camoufox engine gets no GPU flags, so `/dev/dri` passthrough mainly helps if you force `USE_CAMOUFOX=false`) |
 | `ENABLE_FAST_TLS` | `true` | Enables 50ms TLS impersonation fast path |
 | `FAST_TLS_ROTATE` | `true` | Rotate the TLS/UA fingerprint per-domain across a matched profile pool instead of one fixed fingerprint |
-| `USE_CAMOUFOX` | `true` | Use Camoufox stealth Firefox engine |
 | `CAMOUFOX_POOL_ENABLED` | `true` | Reuse warm Camoufox processes across no-proxy solves instead of spawning one per request |
 | `CAMOUFOX_POOL_RECYCLE_USES` | `40` | Recycle a pooled browser instance after this many solves |
 | `CAMOUFOX_POOL_RECYCLE_SECONDS` | `1800` | Recycle a pooled browser instance after this many seconds, whichever comes first |

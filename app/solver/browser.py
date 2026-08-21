@@ -7,10 +7,9 @@ import logging
 import time
 from urllib.parse import urlparse
 from typing import Dict, List, Optional, Tuple, Any
-from playwright.async_api import async_playwright, Playwright, Browser, BrowserContext, Page
+from playwright.async_api import Page
 from app.config import settings
 from app.models.flaresolverr import CookieModel, SolutionModel
-from app.solver.stealth import STEALTH_INIT_SCRIPT
 from app.solver.human_cursor import human_click, human_mouse_move
 from app.solver.captcha_solver import captcha_solver
 from app.logging_config import sanitize_proxy_url
@@ -262,62 +261,12 @@ SOLVE_WALLCLOCK_GRACE_SECONDS = 15
 
 class BrowserPool:
     def __init__(self):
-        self.playwright: Optional[Playwright] = None
-        self.browser: Optional[Browser] = None
         self.semaphore = asyncio.Semaphore(settings.MAX_BROWSER_WORKERS)
-        self._lock = asyncio.Lock()
         self.camoufox_pool: Optional[CamoufoxPool] = (
             CamoufoxPool(settings.MAX_BROWSER_WORKERS)
-            if (settings.USE_CAMOUFOX and CAMOUFOX_AVAILABLE and settings.CAMOUFOX_POOL_ENABLED)
+            if (CAMOUFOX_AVAILABLE and settings.CAMOUFOX_POOL_ENABLED)
             else None
         )
-
-    async def initialize(self):
-        async with self._lock:
-            if not self.playwright or not self.browser or not self.browser.is_connected():
-                logger.info("Initializing Chromium Playwright Engine...")
-                if self.browser:
-                    try:
-                        await self.browser.close()
-                    except Exception:
-                        pass
-                if self.playwright:
-                    try:
-                        await self.playwright.stop()
-                    except Exception:
-                        pass
-                
-                self.playwright = await async_playwright().start()
-                
-                launch_args = [
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--no-first-run",
-                    "--disable-blink-features=AutomationControlled",
-                    "--window-size=1920,1080",
-                    f"--js-flags=--max-old-space-size={settings.BROWSER_MAX_OLD_SPACE_SIZE}",
-                    "--enable-features=NetworkService,NetworkServiceInProcess",
-                    "--disable-background-networking",
-                    "--disable-component-update"
-                ]
-                
-                if not settings.ENABLE_GPU:
-                    launch_args.extend(["--disable-gpu", "--disable-accelerated-2d-canvas"])
-                else:
-                    launch_args.extend(["--enable-gpu-rasterization"])
-                
-                self.browser = await self.playwright.chromium.launch(
-                    headless=settings.HEADLESS,
-                    channel="chromium",
-                    ignore_default_args=["--enable-automation"],
-                    args=launch_args
-                )
-                tuning_mode = "Auto-Tuned" if getattr(settings, "WORKER_AUTO_TUNED", False) else "Custom"
-                logger.info(f"Chromium Browser Engine active ({tuning_mode}): {settings.MAX_BROWSER_WORKERS} workers | JS Heap: {settings.BROWSER_MAX_OLD_SPACE_SIZE}MB")
-            
-            if settings.USE_CAMOUFOX and CAMOUFOX_AVAILABLE:
-                logger.info(f"Camoufox Stealth Firefox Engine active: {settings.MAX_BROWSER_WORKERS} worker semaphore limit")
 
     async def close(self):
         if self.camoufox_pool:
@@ -325,24 +274,7 @@ class BrowserPool:
                 await self.camoufox_pool.close()
             except Exception as e:
                 logger.warning(f"[CamoufoxPool] Shutdown notice: {e}")
-        async with self._lock:
-            if self.browser:
-                try:
-                    await self.browser.close()
-                except Exception as e:
-                    # e.g. "Connection closed while reading from the driver" -
-                    # the Playwright Node driver subprocess can die before
-                    # this runs (Ctrl+C kills the whole process group), which
-                    # must never abort the rest of shutdown.
-                    logger.warning(f"Chromium browser close notice: {e}")
-                self.browser = None
-            if self.playwright:
-                try:
-                    await self.playwright.stop()
-                except Exception as e:
-                    logger.warning(f"Playwright driver stop notice: {e}")
-                self.playwright = None
-            logger.info("Browser Pool stopped.")
+        logger.info("Browser Pool stopped.")
 
     async def solve(
         self,
@@ -366,134 +298,65 @@ class BrowserPool:
                 pw_proxy = {"server": proxy["url"]}
                 logger.info(f"[BrowserPool] Routing request through proxy: {sanitize_proxy_url(proxy['url'])}")
 
+            if not CAMOUFOX_AVAILABLE:
+                raise RuntimeError(
+                    "Camoufox stealth engine is not available (import failed) - "
+                    "no browser engine can service this request."
+                )
+
             tier_timeout = (timeout_ms / 1000.0) + SOLVE_WALLCLOCK_GRACE_SECONDS
 
-            if settings.USE_CAMOUFOX and CAMOUFOX_AVAILABLE:
-                # Pooled path: reuse a warm browser process (no per-request UA
-                # override, since Camoufox ties navigator.userAgent to the
-                # fingerprint it generated when that process launched - the
-                # HTTP UA header and JS-visible UA must match). Only usable
-                # when there's no proxy and no explicit user_agent request.
-                use_pool = self.camoufox_pool is not None and not pw_proxy and not user_agent
-                if use_pool:
-                    try:
-                        sol = await asyncio.wait_for(
-                            self._solve_with_pooled_camoufox(
-                                url=url, method=method, post_data=post_data, cookies=cookies, timeout_ms=timeout_ms,
-                                headers=headers, start_time=start_time, wait_selector=wait_selector,
-                                wait_delay_ms=wait_delay_ms, capture_screenshot=capture_screenshot
-                            ),
-                            timeout=tier_timeout
-                        )
-                        if sol and sol.status < 400:
-                            return sol
-                        else:
-                            logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve incomplete (Status {sol.status if sol else 'N/A'}). Retrying with a fresh ephemeral Camoufox instance...")
-                    except Exception as e:
-                        logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve notice/fallback: {e}. Retrying with a fresh ephemeral Camoufox instance...")
+            # Pooled path: reuse a warm browser process (no per-request UA
+            # override, since Camoufox ties navigator.userAgent to the
+            # fingerprint it generated when that process launched - the
+            # HTTP UA header and JS-visible UA must match). Only usable
+            # when there's no proxy and no explicit user_agent request.
+            use_pool = self.camoufox_pool is not None and not pw_proxy and not user_agent
+            last_error: Optional[BaseException] = None
 
-                    # A pooled instance can fail for reasons specific to that
-                    # warm process (stale fingerprint, wedged page) that a
-                    # fresh process won't hit - retry once on an ephemeral
-                    # Camoufox before falling all the way to Chromium, since
-                    # Chromium's crashpad handler crashes outright when this
-                    # process is running as a non-root PUID/PGID user (its
-                    # crash-reporter subprocess assumes it can run as root),
-                    # while Camoufox is unaffected and already proven to work
-                    # non-root.
-                    try:
-                        sol = await asyncio.wait_for(
-                            self._solve_with_ephemeral_camoufox(
-                                url=url, method=method, post_data=post_data, cookies=cookies, pw_proxy=pw_proxy,
-                                user_agent=user_agent, timeout_ms=timeout_ms, active_ua=active_ua, headers=headers,
-                                start_time=start_time, wait_selector=wait_selector, wait_delay_ms=wait_delay_ms,
-                                capture_screenshot=capture_screenshot
-                            ),
-                            timeout=tier_timeout
-                        )
-                        if sol and sol.status < 400:
-                            return sol
-                        else:
-                            logger.warning(f"[CamoufoxEngine] Ephemeral Camoufox retry incomplete (Status {sol.status if sol else 'N/A'}). Escalating fallback to Chromium engine...")
-                    except Exception as e:
-                        logger.warning(f"[CamoufoxEngine] Ephemeral Camoufox retry notice/fallback: {e}. Falling back to Chromium engine...")
-                else:
-                    try:
-                        sol = await asyncio.wait_for(
-                            self._solve_with_ephemeral_camoufox(
-                                url=url, method=method, post_data=post_data, cookies=cookies, pw_proxy=pw_proxy,
-                                user_agent=user_agent, timeout_ms=timeout_ms, active_ua=active_ua, headers=headers,
-                                start_time=start_time, wait_selector=wait_selector, wait_delay_ms=wait_delay_ms,
-                                capture_screenshot=capture_screenshot
-                            ),
-                            timeout=tier_timeout
-                        )
-                        if sol and sol.status < 400:
-                            return sol
-                        else:
-                            logger.warning(f"[CamoufoxEngine] Camoufox solve incomplete (Status {sol.status if sol else 'N/A'}). Escalating fallback to Chromium engine...")
-                    except Exception as e:
-                        logger.warning(f"[CamoufoxEngine] Camoufox solve notice/fallback: {e}. Falling back to Chromium engine...")
+            if use_pool:
+                try:
+                    sol = await asyncio.wait_for(
+                        self._solve_with_pooled_camoufox(
+                            url=url, method=method, post_data=post_data, cookies=cookies, timeout_ms=timeout_ms,
+                            headers=headers, start_time=start_time, wait_selector=wait_selector,
+                            wait_delay_ms=wait_delay_ms, capture_screenshot=capture_screenshot
+                        ),
+                        timeout=tier_timeout
+                    )
+                    if sol and sol.status < 400:
+                        return sol
+                    last_error = RuntimeError(f"Pooled Camoufox solve incomplete (status {sol.status if sol else 'N/A'})")
+                    logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve incomplete (Status {sol.status if sol else 'N/A'}). Retrying with a fresh ephemeral Camoufox instance...")
+                except Exception as e:
+                    last_error = e
+                    logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve notice/fallback: {e}. Retrying with a fresh ephemeral Camoufox instance...")
 
-            # Ensure Chromium engine is initialized for fallback
-            if not self.browser or not self.browser.is_connected():
-                await self.initialize()
-
-            req_headers = {
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Sec-Ch-Ua": '"Chromium";v="146", "Not?A_Brand";v="24", "Google Chrome";v="146"',
-                "Sec-Ch-Ua-Mobile": "?0",
-                "Sec-Ch-Ua-Platform": '"Windows"',
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-                "Upgrade-Insecure-Requests": "1"
-            }
-            if headers:
-                req_headers.update(headers)
-
-            context = await self.browser.new_context(
-                user_agent=active_ua,
-                viewport={"width": 1920, "height": 1080},
-                proxy=pw_proxy,
-                extra_http_headers=req_headers,
-                ignore_https_errors=True
-            )
-            page = None
-
+            # Fresh-fingerprint escalation: a brand-new Camoufox process with
+            # its own randomly generated fingerprint (and its own proxy
+            # binding, if one was requested) - either the pooled path's
+            # retry after a warm-process-specific failure, or the only
+            # attempt for proxy/custom-UA requests that can't share the
+            # warm pool to begin with.
             try:
-                await context.add_init_script(STEALTH_INIT_SCRIPT)
-                page = await context.new_page()
-                return await asyncio.wait_for(
-                    self._execute_solve_flow(
-                        context=context,
-                        page=page,
-                        url=url,
-                        method=method,
-                        post_data=post_data,
-                        cookies=cookies,
-                        timeout_ms=timeout_ms,
-                        active_ua=active_ua,
-                        headers=headers,
-                        start_time=start_time,
-                        wait_selector=wait_selector,
-                        wait_delay_ms=wait_delay_ms,
+                sol = await asyncio.wait_for(
+                    self._solve_with_ephemeral_camoufox(
+                        url=url, method=method, post_data=post_data, cookies=cookies, pw_proxy=pw_proxy,
+                        user_agent=user_agent, timeout_ms=timeout_ms, active_ua=active_ua, headers=headers,
+                        start_time=start_time, wait_selector=wait_selector, wait_delay_ms=wait_delay_ms,
                         capture_screenshot=capture_screenshot
                     ),
                     timeout=tier_timeout
                 )
-            finally:
-                if page:
-                    try:
-                        await page.close()
-                    except Exception:
-                        pass
-                try:
-                    await context.close()
-                except Exception:
-                    pass
+                if sol and sol.status < 400:
+                    return sol
+                last_error = RuntimeError(f"Ephemeral Camoufox solve incomplete (status {sol.status if sol else 'N/A'})")
+                logger.warning(f"[CamoufoxEngine] Ephemeral Camoufox solve incomplete (Status {sol.status if sol else 'N/A'}).")
+            except Exception as e:
+                last_error = e
+                logger.warning(f"[CamoufoxEngine] Ephemeral Camoufox solve notice/fallback: {e}.")
+
+            raise last_error or RuntimeError(f"Camoufox solve failed for {url}")
 
     async def _solve_with_pooled_camoufox(
         self,

@@ -38,17 +38,13 @@ async def lifespan(app: FastAPI):
     logger.info(f"Initializing Solverr Engine v{settings.VERSION}...")
     logger.info(f"Configuration | Host: {settings.HOST}:{settings.PORT} | Log Level: {settings.LOG_LEVEL.upper()} | Workers: {settings.MAX_BROWSER_WORKERS} | Fast TLS: {settings.ENABLE_FAST_TLS}")
     cleanup_task = asyncio.create_task(periodic_session_cleanup())
-    camoufox_primary = settings.USE_CAMOUFOX and CAMOUFOX_AVAILABLE
-    if camoufox_primary:
-        # Chromium is only a fallback engine when Camoufox is primary - defer
-        # its (memory/time-costly) launch until a solve actually needs it,
-        # instead of paying that cost on every process start.
-        logger.info("Camoufox is the primary stealth engine; Chromium fallback will initialize lazily on first use.")
+    if CAMOUFOX_AVAILABLE:
+        # The warm Camoufox pool launches its instances lazily on first
+        # solve (see CamoufoxPool.acquire), instead of paying that cost on
+        # every process start.
+        logger.info("Camoufox stealth engine ready; the warm browser pool launches lazily on first solve.")
     else:
-        try:
-            await browser_pool.initialize()
-        except Exception as e:
-            logger.warning(f"Browser pool initialization notice: {e}")
+        logger.error("Camoufox stealth engine is not available (import failed) - Tier 3 browser-based solving will fail for every request until this is fixed.")
     yield
     logger.info("Shutting down Solverr Engine...")
     cleanup_task.cancel()
@@ -135,26 +131,19 @@ async def dashboard_index():
 
 @app.get("/health")
 async def health_check():
-    camoufox_primary = settings.USE_CAMOUFOX and CAMOUFOX_AVAILABLE
-    stealth_engine = "Camoufox Firefox" if camoufox_primary else "Playwright Chromium"
-
     # Camoufox launches lazily on first solve (see lifespan) and its pool
-    # instances are also lazy, so "not yet used" is healthy, not degraded.
-    # Only a Chromium browser that was launched and then died is unhealthy.
-    chromium_ready = browser_pool.browser is not None and browser_pool.browser.is_connected()
-    chromium_launched = browser_pool.browser is not None
-    if camoufox_primary:
-        ready = (not chromium_launched) or chromium_ready
-    else:
-        ready = chromium_ready
+    # instances are also lazy, so "not yet used" is healthy - the only
+    # unhealthy state is the Camoufox import itself having failed, since
+    # there's no other engine left to service Tier 3 requests.
+    ready = CAMOUFOX_AVAILABLE
 
     body = {
         "status": "ok" if ready else "degraded",
         "version": settings.VERSION,
-        "stealth_engine": stealth_engine,
+        "stealth_engine": "Camoufox Firefox",
         "workers": settings.MAX_BROWSER_WORKERS,
         "camoufox_pool_active_instances": browser_pool.camoufox_pool._created if browser_pool.camoufox_pool else 0,
-        "chromium_fallback_initialized": chromium_launched
+        "camoufox_available": CAMOUFOX_AVAILABLE
     }
     return JSONResponse(status_code=200 if ready else 503, content=body)
 

@@ -13,10 +13,9 @@ class Settings:
     
     # Worker Auto-Tuning: "auto" or 0 calculates based on host hardware cores
     # (min 4, max 16), then clamps to what host RAM can actually support.
-    # Each worker is a warm Camoufox (Firefox) process plus, in the worst
-    # case, a live Chromium context - budget ~1GB/worker and always leave
-    # ~2GB of host RAM for the OS, the container runtime, and any other
-    # services (Sonarr/Radarr/Prowlarr, etc.) sharing the same box.
+    # Each worker is a warm Camoufox (Firefox) process - budget ~1GB/worker
+    # and always leave ~2GB of host RAM for the OS, the container runtime,
+    # and any other services (Sonarr/Radarr/Prowlarr, etc.) sharing the box.
     RAM_PER_WORKER_GB: float = float(os.getenv("RAM_PER_WORKER_GB", "1.0"))
     RAM_RESERVED_GB: float = float(os.getenv("RAM_RESERVED_GB", "2.0"))
 
@@ -41,11 +40,8 @@ class Settings:
             WORKER_AUTO_TUNED: bool = True
 
     HEADLESS: bool = os.getenv("HEADLESS", "true").lower() in ("true", "1", "yes")
-    ENABLE_GPU: bool = os.getenv("ENABLE_GPU", "true").lower() in ("true", "1", "yes")
-    BROWSER_MAX_OLD_SPACE_SIZE: int = int(os.getenv("BROWSER_MAX_OLD_SPACE_SIZE", "2048"))
     BROWSER_TIMEOUT_MS: int = int(os.getenv("BROWSER_TIMEOUT", "30000"))
     ENABLE_FAST_TLS: bool = os.getenv("ENABLE_FAST_TLS", "true").lower() in ("true", "1", "yes")
-    USE_CAMOUFOX: bool = os.getenv("USE_CAMOUFOX", "true").lower() in ("true", "1", "yes")
     FALLBACK_PROXY_URL: Optional[str] = os.getenv("FALLBACK_PROXY_URL", None)
     
     # Caching: Dual-Mode (Disk JSON + Optional Redis)
@@ -54,17 +50,16 @@ class Settings:
     COOKIE_CACHE_TTL: int = int(os.getenv("COOKIE_CACHE_TTL", "7200"))
     CACHE_FILE: str = os.getenv("CACHE_FILE", "data/cookies_cache.json")
     
-    # Impersonation & User-Agent
+    # Impersonation & User-Agent - Firefox profile, matching Camoufox's
+    # Firefox-based fingerprint (the only browser engine Solverr launches).
     # NOTE: target and UA must be for the *same* browser version - a JA3/JA4
     # fingerprint claiming Firefox 147 next to a "Firefox/135.0" UA header is
     # itself a mismatch signal that WAFs can key off. Keep these in sync, or
     # rely on FAST_TLS_ROTATE (app/solver/fast_tls.py) to pick a matched pair.
-    FAST_TLS_TARGET: str = os.getenv("FAST_TLS_TARGET", "firefox147" if os.getenv("USE_CAMOUFOX", "true").lower() in ("true", "1", "yes") else "chrome146")
+    FAST_TLS_TARGET: str = os.getenv("FAST_TLS_TARGET", "firefox147")
     DEFAULT_USER_AGENT: str = os.getenv(
         "DEFAULT_USER_AGENT",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0"
-        if os.getenv("USE_CAMOUFOX", "true").lower() in ("true", "1", "yes")
-        else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
     )
     # Rotate the TLS/UA pair per-domain (sticky) across a small pool of
     # matched profiles in the configured target's browser family, instead of
@@ -98,6 +93,6 @@ class Settings:
     PROMETHEUS_ENABLED: bool = os.getenv("PROMETHEUS_ENABLED", "true").lower() in ("true", "1", "yes")
 
     # API Version
-    VERSION: str = "v1.4.0-ultra"
+    VERSION: str = "v1.5.0-ultra"
 
 settings = Settings()

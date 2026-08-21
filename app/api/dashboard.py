@@ -20,7 +20,7 @@ async def get_stats():
     cpu_percent = psutil.cpu_percent(interval=None)
 
     from app.solver.browser import CAMOUFOX_AVAILABLE
-    stealth_engine_name = "Camoufox Stealth Firefox" if (settings.USE_CAMOUFOX and CAMOUFOX_AVAILABLE) else "Playwright Chromium"
+    stealth_engine_name = "Camoufox Stealth Firefox" if CAMOUFOX_AVAILABLE else "Unavailable"
 
     data = metrics.to_dict()
     data.update({
@@ -34,8 +34,6 @@ async def get_stats():
         "total_cpu_cores": settings.TOTAL_CPU_CORES,
         "total_ram_gb": settings.TOTAL_RAM_GB,
         "worker_auto_tuned": getattr(settings, "WORKER_AUTO_TUNED", False),
-        "js_heap_mb": settings.BROWSER_MAX_OLD_SPACE_SIZE,
-        "gpu_enabled": settings.ENABLE_GPU,
         "version": settings.VERSION,
         "stealth_engine": stealth_engine_name,
         "tls_impersonation": fast_tls_engine.impersonate_target

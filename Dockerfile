@@ -14,7 +14,6 @@ ENV PYTHONUNBUFFERED=1 \
     HOST=0.0.0.0 \
     LOG_LEVEL=INFO \
     MAX_BROWSER_WORKERS=auto \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     XDG_CACHE_HOME=/app/.cache
 
 # ---- Stage 1: Install Python dependencies + fetch browser engines ----
@@ -28,8 +27,8 @@ COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-cache-dir -r requirements.txt
 
-# Download Playwright Chromium and Camoufox stealth browser binaries
-RUN playwright install chromium && python -m camoufox fetch
+# Fetch the Camoufox stealth Firefox browser binary
+RUN python -m camoufox fetch
 
 # ---- Stage 2: Final minimal runtime image ----
 FROM base AS runtime
@@ -39,17 +38,16 @@ WORKDIR /app
 COPY --from=deps /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Install OS libraries for Chromium & Firefox/Camoufox, curl for healthchecks, and tini for PID 1 zombie reaping
+# Install OS libraries for Firefox/Camoufox, curl for healthchecks, and tini for PID 1 zombie reaping
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update \
     && apt-get install -y --no-install-recommends tini curl ca-certificates gosu \
-    && playwright install-deps chromium firefox \
+    && playwright install-deps firefox \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Copy pre-downloaded browser engines
-COPY --from=deps /ms-playwright /ms-playwright
+# Copy the pre-fetched Camoufox browser engine
 COPY --from=deps /app/.cache/camoufox /app/.cache/camoufox
 
 # Copy application source
@@ -57,7 +55,7 @@ COPY app ./app
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN mkdir -p data /app/.cache \
     && chmod +x /usr/local/bin/docker-entrypoint.sh \
-    && chmod -R a+rX /ms-playwright /app/.cache/camoufox
+    && chmod -R a+rX /app/.cache/camoufox
 
 EXPOSE 8191
 
