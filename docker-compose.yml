@@ -1,0 +1,60 @@
+services:
+  solverr:
+    image: ghcr.io/rpeters1430/solverr:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: solverr
+    restart: unless-stopped
+    ports:
+      - "8191:8191"
+    shm_size: '2gb' # Recommended 1gb-2gb for Chromium/Camoufox multi-worker rendering
+    environment:
+      - PORT=8191
+      - HOST=0.0.0.0
+      - LOG_LEVEL=INFO
+      - MAX_BROWSER_WORKERS=auto # Auto-scales across CPU cores (ideal for DXP4800 Pro 10c/12t)
+      - BROWSER_MAX_OLD_SPACE_SIZE=2048
+      - HEADLESS=true
+      - ENABLE_GPU=true
+      - ENABLE_FAST_TLS=true
+      - COOKIE_CACHE_TTL=7200
+      # - TZ=Etc/UTC
+      # - REDIS_URL=redis://redis:6379/0  # Shared cookie cache for horizontal scaling (see profile below)
+      # - API_KEY=change-me                # Optional API key authentication for all endpoints
+      # - CAPTCHA_SOLVER_API_KEY=          # Optional 2Captcha/CapSolver key for paid image challenge escalation
+    volumes:
+      - ./data:/app/data
+    # Optional hardware GPU acceleration passthrough on UGREEN / Linux NAS (Intel Iris Xe / QuickSync)
+    # Uncomment the devices block below if your NAS host supports /dev/dri:
+    # devices:
+    #   - /dev/dri:/dev/dri
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8191/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional shared Redis cache for multi-replica horizontal scaling
+  # Run with: docker compose --profile distributed up -d --scale solverr=3
+  redis:
+    image: redis:7-alpine
+    container_name: solverr-redis
+    restart: unless-stopped
+    profiles: ["distributed"]
+    volumes:
+      - solverr_redis_data:/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+volumes:
+  solverr_redis_data:

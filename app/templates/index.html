@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Solverr | Next-Gen Fast FlareSolverr &amp; Trawl Replacement</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="brand">
+                <div class="brand-icon">⚡</div>
+                <div class="brand-text">
+                    <h1>SOLVERR</h1>
+                    <span class="version-tag" id="val-version-tag">v1.4.0-ultra</span>
+                </div>
+            </div>
+
+            <nav class="nav-menu">
+                <button class="nav-item active" data-tab="overview">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                    <span>Overview &amp; Stats</span>
+                </button>
+                <button class="nav-item" data-tab="tester">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                    <span>Live URL Tester</span>
+                </button>
+                <button class="nav-item" data-tab="cookies">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+                    <span>Cookie Store</span>
+                </button>
+                <button class="nav-item" data-tab="setup">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+                    <span>Synology NAS Guide</span>
+                </button>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div class="status-indicator online">
+                    <span class="dot"></span>
+                    <span class="status-text">Engine Ready</span>
+                </div>
+                <div class="port-info">API: <code>POST http://[NAS-IP]:8191/v1</code></div>
+                <div class="port-info" style="margin-top: 4px;"><a href="/metrics" target="_blank" style="color: var(--accent-cyan); text-decoration: none;">📊 Prometheus /metrics</a></div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <!-- Header Bar -->
+            <header class="top-bar">
+                <div class="page-title">
+                    <h2 id="current-tab-title">Overview &amp; Stats</h2>
+                    <p class="subtitle">Ultra-fast Cloudflare, Turnstile &amp; CAPTCHA challenge solver &amp; HTTP proxy</p>
+                </div>
+                <div class="header-actions">
+                    <a href="/metrics" target="_blank" class="btn btn-secondary" style="text-decoration: none; display: inline-flex; align-items: center; gap: 6px;">
+                        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+                        Metrics
+                    </a>
+                    <button class="btn btn-secondary" id="btn-refresh-stats">
+                        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                        Refresh
+                    </button>
+                </div>
+            </header>
+
+            <!-- TAB 1: OVERVIEW -->
+            <section id="tab-overview" class="tab-page active">
+                <div class="metrics-grid">
+                    <div class="metric-card glow-cyan">
+                        <div class="card-header">
+                            <span class="label">Total Solved Requests</span>
+                            <span class="icon">🚀</span>
+                        </div>
+                        <div class="card-value" id="val-total-reqs">0</div>
+                        <div class="card-foot" id="foot-failed">0 failed</div>
+                    </div>
+
+                    <div class="metric-card glow-emerald">
+                        <div class="card-header">
+                            <span class="label">Fast TLS Hit Rate</span>
+                            <span class="icon">⚡</span>
+                        </div>
+                        <div class="card-value" id="val-fast-rate">0%</div>
+                        <div class="card-foot"><span id="val-fast-hits">0</span> requests bypassed browser</div>
+                    </div>
+
+                    <div class="metric-card glow-purple">
+                        <div class="card-header">
+                            <span class="label">Avg Fast TLS Latency</span>
+                            <span class="icon">⏱️</span>
+                        </div>
+                        <div class="card-value" id="val-fast-ms">0<span class="unit">ms</span></div>
+                        <div class="card-foot">Vs Browser: <span id="val-browser-ms">0</span>ms</div>
+                    </div>
+
+                    <div class="metric-card glow-amber">
+                        <div class="card-header">
+                            <span class="label">RAM Usage</span>
+                            <span class="icon">🧠</span>
+                        </div>
+                        <div class="card-value" id="val-ram">0<span class="unit">MB</span></div>
+                        <div class="card-foot">CPU: <span id="val-cpu">0%</span></div>
+                    </div>
+                </div>
+
+                <!-- 4-Tier Execution Pipeline Breakdown -->
+                <div class="panel" style="margin-bottom: 24px;">
+                    <div class="panel-header">
+                        <h3>4-Tier Adaptive Solver Pipeline</h3>
+                        <p>Requests automatically escalate through lightweight tiers before spinning up full browser engines.</p>
+                    </div>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;">
+                        <div style="background: rgba(6, 182, 212, 0.08); border: 1px solid rgba(6, 182, 212, 0.2); border-radius: 8px; padding: 14px;">
+                            <div style="font-size: 0.8rem; color: var(--accent-cyan); font-weight: 600;">TIER 1 (FAST TLS)</div>
+                            <div style="font-size: 1.5rem; font-weight: 700; margin: 4px 0;" id="val-tier1-hits">0</div>
+                            <div style="font-size: 0.75rem; color: var(--text-muted);">curl_cffi JA3 impersonation (~50-150ms)</div>
+                        </div>
+                        <div style="background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.2); border-radius: 8px; padding: 14px;">
+                            <div style="font-size: 0.8rem; color: var(--accent-emerald); font-weight: 600;">TIER 2 (COOKIE CACHE)</div>
+                            <div style="font-size: 1.5rem; font-weight: 700; margin: 4px 0;" id="val-tier2-hits">0</div>
+                            <div style="font-size: 0.75rem; color: var(--text-muted);">Saved cf_clearance reuse (~30-80ms)</div>
+                        </div>
+                        <div style="background: rgba(168, 85, 247, 0.08); border: 1px solid rgba(168, 85, 247, 0.2); border-radius: 8px; padding: 14px;">
+                            <div style="font-size: 0.8rem; color: var(--accent-purple); font-weight: 600;">TIER 3 (STEALTH BROWSER)</div>
+                            <div style="font-size: 1.5rem; font-weight: 700; margin: 4px 0;" id="val-tier3-hits">0</div>
+                            <div style="font-size: 0.75rem; color: var(--text-muted);">Camoufox / Playwright solver (~1.8-3s)</div>
+                        </div>
+                        <div style="background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.2); border-radius: 8px; padding: 14px;">
+                            <div style="font-size: 0.8rem; color: var(--accent-amber); font-weight: 600;">TIER 4 (FALLBACK PROXY)</div>
+                            <div style="font-size: 1.5rem; font-weight: 700; margin: 4px 0;" id="val-tier4-hits">0</div>
+                            <div style="font-size: 0.75rem; color: var(--text-muted);">Residential / Fallback proxy routing</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="content-row">
+                    <div class="panel flex-2">
+                        <div class="panel-header">
+                            <h3>Architecture Speed Comparison</h3>
+                        </div>
+                        <div class="comparison-container">
+                            <div class="comp-item">
+                                <div class="comp-label">Traditional FlareSolverr (Full Selenium Chrome)</div>
+                                <div class="bar-bg">
+                                    <div class="bar-fill legacy" style="width: 95%;">10s - 18s / ~600MB RAM</div>
+                                </div>
+                            </div>
+                            <div class="comp-item">
+                                <div class="comp-label">Solverr - Level 3 (Stealth Browser Fallback)</div>
+                                <div class="bar-bg">
+                                    <div class="bar-fill browser-level" style="width: 35%;">1.8s / ~120MB RAM</div>
+                                </div>
+                            </div>
+                            <div class="comp-item">
+                                <div class="comp-label">Solverr - Level 1 &amp; 2 (Fast TLS Impersonation &amp; Clearance Cache)</div>
+                                <div class="bar-bg">
+                                    <div class="bar-fill fast-level" style="width: 8%;">60ms / ~0MB Extra RAM</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="panel flex-1">
+                        <div class="panel-header">
+                            <h3>Engine Status</h3>
+                        </div>
+                        <ul class="status-list">
+                            <li>
+                                <span class="key">API Compatibility</span>
+                                <span class="badge badge-success">v1, v2 &amp; /scrape</span>
+                            </li>
+                            <li>
+                                <span class="key">TLS Impersonation</span>
+                                <span class="badge badge-primary" id="val-tls-impersonation">Loading...</span>
+                            </li>
+                            <li>
+                                <span class="key">Stealth Engine</span>
+                                <span class="badge badge-primary" id="val-stealth-engine">Camoufox Stealth Firefox</span>
+                            </li>
+                            <li>
+                                <span class="key">Cache Backend</span>
+                                <span class="badge badge-neutral" id="val-cache-backend">Local JSON Cache</span>
+                            </li>
+                            <li>
+                                <span class="key">Browser Max Workers</span>
+                                <span class="badge badge-neutral" id="val-max-workers">Auto Workers</span>
+                            </li>
+                            <li>
+                                <span class="key">Host Hardware</span>
+                                <span class="badge badge-primary" id="val-host-hardware">Detecting...</span>
+                            </li>
+                            <li>
+                                <span class="key">Cached Domains</span>
+                                <span class="badge badge-neutral" id="val-cached-domains">0 Domains</span>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 2: LIVE TESTER -->
+            <section id="tab-tester" class="tab-page">
+                <div class="panel">
+                    <div class="panel-header">
+                        <h3>Interactive Challenge Solver Test Bench</h3>
+                        <p>Test any Cloudflare, Turnstile, or CAPTCHA-protected URL live and inspect response headers &amp; captured <code>cf_clearance</code> tokens.</p>
+                    </div>
+
+                    <form id="tester-form" class="tester-form">
+                        <div class="form-row">
+                            <div class="form-group flex-3">
+                                <label for="test-url">Target URL</label>
+                                <input type="url" id="test-url" placeholder="https://nowsecure.nl" required value="https://nowsecure.nl">
+                            </div>
+                            <div class="form-group flex-1">
+                                <label for="test-method">HTTP Method</label>
+                                <select id="test-method">
+                                    <option value="GET">GET</option>
+                                    <option value="POST">POST</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="form-row hidden" id="post-data-container">
+                            <div class="form-group flex-1">
+                                <label for="test-postdata">POST Body Data (JSON / Form encoded)</label>
+                                <textarea id="test-postdata" rows="2" placeholder='{"key": "value"}' style="width: 100%; background: var(--bg-card); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; padding: 8px; font-family: 'JetBrains Mono', monospace;"></textarea>
+                            </div>
+                        </div>
+
+                        <div class="form-row options-row">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="test-force-browser">
+                                <span>Force Full Browser Solve (Skip Fast TLS)</span>
+                            </label>
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="test-use-cache" checked>
+                                <span>Use Cookie &amp; Clearance Cache</span>
+                            </label>
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="test-screenshot">
+                                <span>Capture Debug Screenshot</span>
+                            </label>
+                            <button type="submit" class="btn btn-primary" id="btn-run-test">
+                                <span id="test-btn-text">Run Solver Test ⚡</span>
+                                <div class="spinner hidden" id="test-spinner"></div>
+                            </button>
+                        </div>
+                    </form>
+                </div>
+
+                <div id="test-results" class="panel hidden">
+                    <div class="panel-header">
+                        <h3>Execution Results</h3>
+                        <span id="test-status-badge" class="badge">200 OK</span>
+                    </div>
+
+                    <div class="results-tabs">
+                        <button class="res-tab active" data-res-tab="cookies">Captured Cookies (<span id="res-cookie-count">0</span>)</button>
+                        <button class="res-tab" data-res-tab="headers">Headers</button>
+                        <button class="res-tab" data-res-tab="html">HTML Snippet</button>
+                        <button class="res-tab hidden" id="tab-btn-screenshot" data-res-tab="screenshot">Screenshot Preview</button>
+                    </div>
+
+                    <div id="res-content-cookies" class="res-pane active">
+                        <div class="table-responsive">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Name</th>
+                                        <th>Value</th>
+                                        <th>Domain</th>
+                                        <th>Path</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="res-cookies-body"></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div id="res-content-headers" class="res-pane">
+                        <pre class="code-block" id="res-headers-code"></pre>
+                    </div>
+
+                    <div id="res-content-html" class="res-pane">
+                        <pre class="code-block" id="res-html-code"></pre>
+                    </div>
+
+                    <div id="res-content-screenshot" class="res-pane">
+                        <div style="text-align: center; padding: 12px; background: rgba(0,0,0,0.3); border-radius: 8px;">
+                            <img id="res-screenshot-img" src="" alt="Solve Screenshot" style="max-width: 100%; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);">
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 3: COOKIES -->
+            <section id="tab-cookies" class="tab-page">
+                <div class="panel">
+                    <div class="panel-header">
+                        <div>
+                            <h3>Domain Cookie Cache</h3>
+                            <p>Active <code>cf_clearance</code> tokens and session cookies saved for instant fast-path reuse.</p>
+                        </div>
+                        <button class="btn btn-danger" id="btn-clear-cookies">Clear All Cache</button>
+                    </div>
+
+                    <div id="cookie-domains-container" class="cookie-domains-list">
+                        <!-- Dynamic content -->
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 4: SYNOLOGY NAS GUIDE -->
+            <section id="tab-setup" class="tab-page">
+                <div class="panel">
+                    <div class="panel-header">
+                        <h3>Deploying Solverr on Synology NAS &amp; Docker</h3>
+                    </div>
+                    <div class="guide-content">
+                        <h4>Method 1: Synology Container Manager (GUI)</h4>
+                        <ol class="setup-steps">
+                            <li>Open <strong>Container Manager</strong> on your Synology NAS DSM.</li>
+                            <li>Go to <strong>Project</strong> &rarr; Click <strong>Create</strong>.</li>
+                            <li>Set Project Name: <code>solverr</code>.</li>
+                            <li>Choose path or create a folder: <code>/docker/solverr</code>.</li>
+                            <li>Select <strong>Create docker-compose.yml</strong> and paste the following snippet:</li>
+                        </ol>
+
+                        <pre class="code-block"><code>version: '3.8'
+services:
+  solverr:
+    image: solverr:latest  # or build locally
+    container_name: solverr
+    restart: unless-stopped
+    ports:
+      - "8191:8191"
+    environment:
+      - PORT=8191
+      - MAX_BROWSER_WORKERS=auto
+      - ENABLE_FAST_TLS=true
+      - COOKIE_CACHE_TTL=7200
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8191/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3</code></pre>
+
+                        <h4>Prowlarr / Jackett / Sonarr Integration</h4>
+                        <p>In Prowlarr or Jackett settings:</p>
+                        <ul>
+                            <li><strong>FlareSolverr Server URL:</strong> <code>http://YOUR-NAS-IP:8191</code></li>
+                            <li><strong>Tags:</strong> <code>flaresolverr</code> (or leave default)</li>
+                            <li>Click <strong>Test</strong> and save. Enjoy 10x-50x faster indexer search speeds!</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="/static/app.js?v=1.4.0"></script>
+</body>
+</html>
