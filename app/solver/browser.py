@@ -113,10 +113,16 @@ class CamoufoxPool:
         )
 
     async def _launch_instance(self) -> _PooledCamoufox:
+        # os="linux" pins fingerprint generation to Linux only (Camoufox
+        # otherwise randomizes across windows/macos/linux per launch). This
+        # container always runs on Linux, so claiming Linux avoids any
+        # OS/host mismatch leaking through elsewhere, and lets the Dockerfile
+        # ship only the Linux font set instead of all three (~890MB smaller).
         cm = AsyncCamoufox(
             headless=settings.HEADLESS,
             humanize=True,
             disable_coop=True,
+            os="linux",
             config={'forceScopeAccess': True},
             i_know_what_im_doing=True
         )
@@ -438,6 +444,7 @@ class BrowserPool:
             proxy=pw_proxy,
             humanize=True,
             disable_coop=True,
+            os="linux",
             config={'forceScopeAccess': True},
             i_know_what_im_doing=True
         ) as browser_instance:
