@@ -13,7 +13,7 @@ services:
       - PORT=8191
       - HOST=0.0.0.0
       - LOG_LEVEL=INFO
-      - MAX_BROWSER_WORKERS=auto # Auto-scales across CPU cores (ideal for DXP4800 Pro 10c/12t)
+      - MAX_BROWSER_WORKERS=auto # Auto-scales across CPU cores, clamped to what host RAM supports (DXP4800 Pro is 6c/8t + 8GB DDR5 stock -> auto lands well below 8)
       - BROWSER_MAX_OLD_SPACE_SIZE=2048
       - HEADLESS=true
       - ENABLE_GPU=true

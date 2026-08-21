@@ -11,17 +11,33 @@ class Settings:
     TOTAL_CPU_CORES: int = os.cpu_count() or 4
     TOTAL_RAM_GB: float = round(psutil.virtual_memory().total / (1024**3), 1) if hasattr(psutil, "virtual_memory") else 8.0
     
-    # Worker Auto-Tuning: "auto" or 0 calculates based on host hardware cores (min 4, max 16)
+    # Worker Auto-Tuning: "auto" or 0 calculates based on host hardware cores
+    # (min 4, max 16), then clamps to what host RAM can actually support.
+    # Each worker is a warm Camoufox (Firefox) process plus, in the worst
+    # case, a live Chromium context - budget ~1GB/worker and always leave
+    # ~2GB of host RAM for the OS, the container runtime, and any other
+    # services (Sonarr/Radarr/Prowlarr, etc.) sharing the same box.
+    RAM_PER_WORKER_GB: float = float(os.getenv("RAM_PER_WORKER_GB", "1.0"))
+    RAM_RESERVED_GB: float = float(os.getenv("RAM_RESERVED_GB", "2.0"))
+
+    _cpu_based_workers: int = min(16, max(4, TOTAL_CPU_CORES))
+    _usable_ram_gb: float = TOTAL_RAM_GB - RAM_RESERVED_GB
+    _ram_based_workers: int = (
+        max(1, int(_usable_ram_gb // RAM_PER_WORKER_GB))
+        if _usable_ram_gb > 0 and RAM_PER_WORKER_GB > 0 else 1
+    )
+    _auto_worker_count: int = min(_cpu_based_workers, _ram_based_workers)
+
     _raw_workers: str = os.getenv("MAX_BROWSER_WORKERS", "auto").strip()
     if _raw_workers.lower() == "auto" or _raw_workers == "0":
-        MAX_BROWSER_WORKERS: int = min(16, max(4, TOTAL_CPU_CORES))
+        MAX_BROWSER_WORKERS: int = _auto_worker_count
         WORKER_AUTO_TUNED: bool = True
     else:
         try:
             MAX_BROWSER_WORKERS: int = int(_raw_workers)
             WORKER_AUTO_TUNED: bool = False
         except ValueError:
-            MAX_BROWSER_WORKERS: int = min(16, max(4, TOTAL_CPU_CORES))
+            MAX_BROWSER_WORKERS: int = _auto_worker_count
             WORKER_AUTO_TUNED: bool = True
 
     HEADLESS: bool = os.getenv("HEADLESS", "true").lower() in ("true", "1", "yes")

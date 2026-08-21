@@ -77,15 +77,35 @@ class CamoufoxPool:
             await self._close_instance(inst)
             async with self._lock:
                 self._created -= 1
-            try:
-                async with self._lock:
-                    fresh = await self._launch_instance()
+                fresh = await self._relaunch_with_retry()
+                if fresh is not None:
                     self._created += 1
+            if fresh is not None:
                 self._idle.put_nowait(fresh)
-            except Exception as e:
-                logger.warning(f"[CamoufoxPool] Failed to relaunch recycled instance: {e}")
             return
         self._idle.put_nowait(inst)
+
+    async def _relaunch_with_retry(self, attempts: int = 3, backoff_seconds: float = 1.0) -> Optional[_PooledCamoufox]:
+        """Retry a recycled instance's relaunch a few times before giving up.
+
+        A bare launch failure (transient resource pressure - exactly what's
+        likely on a small NAS) used to permanently drop this slot from the
+        pool with no retry, which could also strand a concurrent waiter
+        blocked on `_idle.get()` since nothing else replenishes it.
+        """
+        for attempt in range(1, attempts + 1):
+            try:
+                return await self._launch_instance()
+            except Exception as e:
+                if attempt == attempts:
+                    logger.error(
+                        f"[CamoufoxPool] Failed to relaunch recycled instance after {attempts} attempt(s) "
+                        f"({e}). Pool capacity reduced by 1 until a future acquire() replenishes it."
+                    )
+                    return None
+                logger.warning(f"[CamoufoxPool] Relaunch attempt {attempt}/{attempts} failed ({e}); retrying in {backoff_seconds}s...")
+                await asyncio.sleep(backoff_seconds)
+        return None
 
     def _should_recycle(self, inst: _PooledCamoufox) -> bool:
         return (
@@ -232,6 +252,14 @@ async def inject_captcha_token(page: Page, response_field_names: List[str], toke
     except Exception as e:
         logger.debug(f"[CaptchaSolver] Token injection notice: {e}")
 
+# Wall-clock safety net layered on top of each solve tier's own internal
+# timeouts (navigation waits, selector waits, etc). If a Playwright/Camoufox
+# call hangs on something that doesn't respect its own timeout=, this forces
+# the tier to give up and release its browser/pool slot rather than pinning
+# it (and, on a small worker count, a meaningful fraction of total capacity)
+# indefinitely.
+SOLVE_WALLCLOCK_GRACE_SECONDS = 15
+
 class BrowserPool:
     def __init__(self):
         self.playwright: Optional[Playwright] = None
@@ -338,6 +366,8 @@ class BrowserPool:
                 pw_proxy = {"server": proxy["url"]}
                 logger.info(f"[BrowserPool] Routing request through proxy: {sanitize_proxy_url(proxy['url'])}")
 
+            tier_timeout = (timeout_ms / 1000.0) + SOLVE_WALLCLOCK_GRACE_SECONDS
+
             if settings.USE_CAMOUFOX and CAMOUFOX_AVAILABLE:
                 # Pooled path: reuse a warm browser process (no per-request UA
                 # override, since Camoufox ties navigator.userAgent to the
@@ -347,10 +377,13 @@ class BrowserPool:
                 use_pool = self.camoufox_pool is not None and not pw_proxy and not user_agent
                 if use_pool:
                     try:
-                        sol = await self._solve_with_pooled_camoufox(
-                            url=url, method=method, post_data=post_data, cookies=cookies, timeout_ms=timeout_ms,
-                            headers=headers, start_time=start_time, wait_selector=wait_selector,
-                            wait_delay_ms=wait_delay_ms, capture_screenshot=capture_screenshot
+                        sol = await asyncio.wait_for(
+                            self._solve_with_pooled_camoufox(
+                                url=url, method=method, post_data=post_data, cookies=cookies, timeout_ms=timeout_ms,
+                                headers=headers, start_time=start_time, wait_selector=wait_selector,
+                                wait_delay_ms=wait_delay_ms, capture_screenshot=capture_screenshot
+                            ),
+                            timeout=tier_timeout
                         )
                         if sol and sol.status < 400:
                             return sol
@@ -360,41 +393,19 @@ class BrowserPool:
                         logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve notice/fallback: {e}. Falling back to Chromium engine...")
                 else:
                     try:
-                        logger.info(f"[CamoufoxEngine] Spawning ephemeral Camoufox stealth Firefox solve for {url} (proxy={'yes' if pw_proxy else 'no'}, custom_ua={'yes' if user_agent else 'no'})...")
-                        async with AsyncCamoufox(
-                            headless=settings.HEADLESS,
-                            proxy=pw_proxy,
-                            humanize=True,
-                            disable_coop=True,
-                            config={'forceScopeAccess': True},
-                            i_know_what_im_doing=True
-                        ) as browser_instance:
-                            if hasattr(browser_instance, "contexts") and browser_instance.contexts:
-                                context = browser_instance.contexts[0]
-                            elif hasattr(browser_instance, "new_context"):
-                                context = await browser_instance.new_context()
-                            else:
-                                context = browser_instance
-                            page = await context.new_page()
-                            sol = await self._execute_solve_flow(
-                                context=context,
-                                page=page,
-                                url=url,
-                                method=method,
-                                post_data=post_data,
-                                cookies=cookies,
-                                timeout_ms=timeout_ms,
-                                active_ua=active_ua,
-                                headers=headers,
-                                start_time=start_time,
-                                wait_selector=wait_selector,
-                                wait_delay_ms=wait_delay_ms,
+                        sol = await asyncio.wait_for(
+                            self._solve_with_ephemeral_camoufox(
+                                url=url, method=method, post_data=post_data, cookies=cookies, pw_proxy=pw_proxy,
+                                user_agent=user_agent, timeout_ms=timeout_ms, active_ua=active_ua, headers=headers,
+                                start_time=start_time, wait_selector=wait_selector, wait_delay_ms=wait_delay_ms,
                                 capture_screenshot=capture_screenshot
-                            )
-                            if sol and sol.status < 400:
-                                return sol
-                            else:
-                                logger.warning(f"[CamoufoxEngine] Camoufox solve incomplete (Status {sol.status if sol else 'N/A'}). Escalating fallback to Chromium engine...")
+                            ),
+                            timeout=tier_timeout
+                        )
+                        if sol and sol.status < 400:
+                            return sol
+                        else:
+                            logger.warning(f"[CamoufoxEngine] Camoufox solve incomplete (Status {sol.status if sol else 'N/A'}). Escalating fallback to Chromium engine...")
                     except Exception as e:
                         logger.warning(f"[CamoufoxEngine] Camoufox solve notice/fallback: {e}. Falling back to Chromium engine...")
 
@@ -424,25 +435,28 @@ class BrowserPool:
                 extra_http_headers=req_headers,
                 ignore_https_errors=True
             )
-
-            await context.add_init_script(STEALTH_INIT_SCRIPT)
-            page = await context.new_page()
+            page = None
 
             try:
-                return await self._execute_solve_flow(
-                    context=context,
-                    page=page,
-                    url=url,
-                    method=method,
-                    post_data=post_data,
-                    cookies=cookies,
-                    timeout_ms=timeout_ms,
-                    active_ua=active_ua,
-                    headers=headers,
-                    start_time=start_time,
-                    wait_selector=wait_selector,
-                    wait_delay_ms=wait_delay_ms,
-                    capture_screenshot=capture_screenshot
+                await context.add_init_script(STEALTH_INIT_SCRIPT)
+                page = await context.new_page()
+                return await asyncio.wait_for(
+                    self._execute_solve_flow(
+                        context=context,
+                        page=page,
+                        url=url,
+                        method=method,
+                        post_data=post_data,
+                        cookies=cookies,
+                        timeout_ms=timeout_ms,
+                        active_ua=active_ua,
+                        headers=headers,
+                        start_time=start_time,
+                        wait_selector=wait_selector,
+                        wait_delay_ms=wait_delay_ms,
+                        capture_screenshot=capture_screenshot
+                    ),
+                    timeout=tier_timeout
                 )
             finally:
                 if page:
@@ -450,11 +464,10 @@ class BrowserPool:
                         await page.close()
                     except Exception:
                         pass
-                if context:
-                    try:
-                        await context.close()
-                    except Exception:
-                        pass
+                try:
+                    await context.close()
+                except Exception:
+                    pass
 
     async def _solve_with_pooled_camoufox(
         self,
@@ -509,6 +522,58 @@ class BrowserPool:
                 except Exception:
                     pass
             await self.camoufox_pool.release(inst)
+
+    async def _solve_with_ephemeral_camoufox(
+        self,
+        url: str,
+        method: str,
+        post_data: Optional[str],
+        cookies: Optional[List[CookieModel]],
+        pw_proxy: Optional[Dict[str, str]],
+        user_agent: Optional[str],
+        timeout_ms: int,
+        active_ua: str,
+        headers: Optional[Dict[str, str]],
+        start_time: float,
+        wait_selector: Optional[str],
+        wait_delay_ms: Optional[int],
+        capture_screenshot: bool
+    ) -> SolutionModel:
+        """Dedicated (non-pooled) Camoufox launch for requests carrying their
+        own proxy or an explicit user_agent - Camoufox ties geolocation/
+        timezone/WebRTC fingerprint derivation to the proxy's exit IP and to
+        the launch-time UA, so these can't share the warm no-proxy pool."""
+        logger.info(f"[CamoufoxEngine] Spawning ephemeral Camoufox stealth Firefox solve for {url} (proxy={'yes' if pw_proxy else 'no'}, custom_ua={'yes' if user_agent else 'no'})...")
+        async with AsyncCamoufox(
+            headless=settings.HEADLESS,
+            proxy=pw_proxy,
+            humanize=True,
+            disable_coop=True,
+            config={'forceScopeAccess': True},
+            i_know_what_im_doing=True
+        ) as browser_instance:
+            if hasattr(browser_instance, "contexts") and browser_instance.contexts:
+                context = browser_instance.contexts[0]
+            elif hasattr(browser_instance, "new_context"):
+                context = await browser_instance.new_context()
+            else:
+                context = browser_instance
+            page = await context.new_page()
+            return await self._execute_solve_flow(
+                context=context,
+                page=page,
+                url=url,
+                method=method,
+                post_data=post_data,
+                cookies=cookies,
+                timeout_ms=timeout_ms,
+                active_ua=active_ua,
+                headers=headers,
+                start_time=start_time,
+                wait_selector=wait_selector,
+                wait_delay_ms=wait_delay_ms,
+                capture_screenshot=capture_screenshot
+            )
 
     async def _try_captcha_solver_escalation(self, page: Page, url: str, challenge_type: str) -> bool:
         widget = CAPTCHA_SOLVER_WIDGETS.get(challenge_type)
