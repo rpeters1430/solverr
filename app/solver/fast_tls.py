@@ -2,6 +2,7 @@ import logging
 import time
 import zlib
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 from curl_cffi.requests import AsyncSession
 from app.models.flaresolverr import CookieModel, SolutionModel
 from app.config import settings

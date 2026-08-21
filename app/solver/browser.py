@@ -388,9 +388,35 @@ class BrowserPool:
                         if sol and sol.status < 400:
                             return sol
                         else:
-                            logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve incomplete (Status {sol.status if sol else 'N/A'}). Escalating fallback to Chromium engine...")
+                            logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve incomplete (Status {sol.status if sol else 'N/A'}). Retrying with a fresh ephemeral Camoufox instance...")
                     except Exception as e:
-                        logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve notice/fallback: {e}. Falling back to Chromium engine...")
+                        logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve notice/fallback: {e}. Retrying with a fresh ephemeral Camoufox instance...")
+
+                    # A pooled instance can fail for reasons specific to that
+                    # warm process (stale fingerprint, wedged page) that a
+                    # fresh process won't hit - retry once on an ephemeral
+                    # Camoufox before falling all the way to Chromium, since
+                    # Chromium's crashpad handler crashes outright when this
+                    # process is running as a non-root PUID/PGID user (its
+                    # crash-reporter subprocess assumes it can run as root),
+                    # while Camoufox is unaffected and already proven to work
+                    # non-root.
+                    try:
+                        sol = await asyncio.wait_for(
+                            self._solve_with_ephemeral_camoufox(
+                                url=url, method=method, post_data=post_data, cookies=cookies, pw_proxy=pw_proxy,
+                                user_agent=user_agent, timeout_ms=timeout_ms, active_ua=active_ua, headers=headers,
+                                start_time=start_time, wait_selector=wait_selector, wait_delay_ms=wait_delay_ms,
+                                capture_screenshot=capture_screenshot
+                            ),
+                            timeout=tier_timeout
+                        )
+                        if sol and sol.status < 400:
+                            return sol
+                        else:
+                            logger.warning(f"[CamoufoxEngine] Ephemeral Camoufox retry incomplete (Status {sol.status if sol else 'N/A'}). Escalating fallback to Chromium engine...")
+                    except Exception as e:
+                        logger.warning(f"[CamoufoxEngine] Ephemeral Camoufox retry notice/fallback: {e}. Falling back to Chromium engine...")
                 else:
                     try:
                         sol = await asyncio.wait_for(

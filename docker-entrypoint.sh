@@ -23,7 +23,18 @@ if [ -n "${PUID:-}" ] || [ -n "${PGID:-}" ]; then
   mkdir -p /app/data /app/.cache
   chown -R "${PUID}:${PGID}" /app/data /app/.cache
 
-  export HOME=/app
+  # gosu derives $HOME from the target UID's /etc/passwd entry, ignoring any
+  # HOME already exported here - an arbitrary NAS PUID with no passwd entry
+  # falls back to HOME=/, which is read-only for a non-root user and breaks
+  # Chromium/Camoufox (both need to write config/cache under $HOME). Register
+  # a matching passwd/group entry so gosu resolves HOME to /app instead.
+  if ! getent passwd "${PUID}" >/dev/null 2>&1; then
+    echo "solverr:x:${PUID}:${PGID}:solverr:/app:/bin/sh" >> /etc/passwd
+  fi
+  if ! getent group "${PGID}" >/dev/null 2>&1; then
+    echo "solverr:x:${PGID}:" >> /etc/group
+  fi
+
   exec gosu "${PUID}:${PGID}" "$@"
 fi
 
