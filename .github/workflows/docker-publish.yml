@@ -36,7 +36,7 @@ jobs:
           python -m unittest discover -s tests
 
   build-and-push:
-    name: Build & Push Multi-Arch Docker Image
+    name: Build & Push Docker Image (amd64 / UGREEN NASync)
     needs: test
     runs-on: ubuntu-latest
     permissions:
@@ -46,9 +46,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -78,7 +75,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
