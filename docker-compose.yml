@@ -19,6 +19,8 @@ services:
       - ENABLE_GPU=true
       - ENABLE_FAST_TLS=true
       - COOKIE_CACHE_TTL=7200
+      # - PUID=1000                      # Optional: run as this user ID (must be set with PGID)
+      # - PGID=1000                      # Optional: run as this group ID (must be set with PUID)
       # - TZ=Etc/UTC
       # - REDIS_URL=redis://redis:6379/0  # Shared cookie cache for horizontal scaling (see profile below)
       # - API_KEY=change-me                # Optional API key authentication for all endpoints
