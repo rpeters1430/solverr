@@ -2,7 +2,7 @@
 # Solverr - Ultra-fast & Lightweight FlareSolverr Alternative
 # Optimized for high-efficiency container deployments (UGREEN NASync / Linux / Docker)
 
-FROM python:3.11-slim-bookworm AS base
+FROM python:3.14-slim-bookworm AS base
 ENV PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8 \
     PYTHONDONTWRITEBYTECODE=1 \
