@@ -13,6 +13,12 @@ Running tests:
 python -m unittest discover -s tests
 ```
 
+Running a single test file or case:
+```
+python -m unittest tests.test_engine
+python -m unittest tests.test_engine.EngineTests.test_specific_case
+```
+
 Local run:
 ```
 pip install -r requirements.txt
@@ -20,10 +26,18 @@ playwright install chromium
 python -m app.main
 ```
 
-Docker:
+Docker (build + run locally from source):
 ```
 docker compose up --build
 ```
+Runs the `solverr` service only; the `redis` service is behind the `distributed` compose profile and does not start unless requested (see Horizontal Scaling below).
+
+Docker (pull the published image, no build):
+```
+docker compose pull
+docker compose up -d
+```
+`docker-compose.yml` sets `image: ghcr.io/rpeters1430/solverr:latest` alongside `build:`, so `docker compose up` without `--build` uses the local image if present or pulls `latest` from GHCR otherwise.
 
 Quick manual checks:
 - `GET /health` — liveness check & worker readiness
@@ -43,3 +57,29 @@ Quick manual checks:
 4. **Tier 4 — Fallback Proxy Escalation** (`app/solver/engine.py`): Escalates to residential or fallback proxies (`FALLBACK_PROXY_URL`) if direct solves fail.
 
 In-flight request deduplication is handled in `app/solver/engine.py` via `HybridSolverEngine._inflight` futures. Sessions (`app/solver/sessions.py`) follow the same dual-mode pattern as the cookie cache — in-memory by default, Redis-backed (surviving restarts, shared across replicas) when `REDIS_URL` is set. See the README's "Horizontal Scaling" section for running multiple replicas behind a shared Redis.
+
+## Module layout
+
+- `app/main.py` — FastAPI app, lifespan (browser pool init, periodic session cleanup), request-logging/auth middleware, `/health` and `/metrics`.
+- `app/api/flaresolverr.py` — `/v1`, `/v2`, `/scrape`, `/proxy` route handlers.
+- `app/api/dashboard.py` — `/api/*` dashboard endpoints (stats, cookies, sessions, test).
+- `app/models/flaresolverr.py` — Pydantic request/response models shared by the API routes.
+- `app/config.py` — single `Settings` object (`app.config.settings`) reading all env vars, including `MAX_BROWSER_WORKERS=auto` CPU/RAM-based auto-tuning; treat it as the source of truth for available configuration rather than the README's env var tables.
+- `app/metrics.py` / `app/logging_config.py` — Prometheus exposition formatting and structured logging setup (request-id correlation via `set_request_id`).
+
+Optional `X-Api-Key` auth (`API_KEY` env var) is enforced in `app/main.py`'s middleware for every route except `/health`, `/metrics`, and `/static/*`.
+
+## Docker image & deployment
+
+`Dockerfile` is a two-stage build on `python:3.14-slim-bookworm`, `linux/amd64` only (matches the CI publish target and the UGREEN/NAS deployment targets called out in the README):
+
+1. **`deps` stage** — creates a venv, `pip install -r requirements.txt`, then pre-fetches browser engines (`playwright install chromium` and `python -m camoufox fetch`) so they're baked into the image rather than downloaded at container start.
+2. **`runtime` stage** — copies the venv and pre-fetched browsers from `deps`, installs `tini`, `curl`, `ca-certificates`, `gosu`, and Playwright's OS-level Chromium/Firefox deps, then copies in `app/` and `docker-entrypoint.sh`.
+
+Container startup: `tini` is PID 1 (`ENTRYPOINT`), invoking `docker-entrypoint.sh`, which then `exec`s `python -m app.main` (the `CMD`). The container runs as **root by default** — set `PUID`/`PGID` together (both required, both must be numeric) to have the entrypoint `chown` `/app/data` and `/app/.cache` to that UID/GID and re-exec the process under it via `gosu`. Setting only one of the pair fails the container at startup by design.
+
+`HEALTHCHECK` and the compose `healthcheck:` block both poll `curl -f http://localhost:8191/health`; `/health` in `app/main.py` reports `503` only when a Chromium fallback browser was launched and then died — an unused/lazy pool is healthy.
+
+Build and publish is automated by `.github/workflows/docker-publish.yml`: runs `python -m unittest discover -s tests` first, then (on push to `main`, version tags, or manual dispatch — not on pull requests) builds and pushes `linux/amd64` to `ghcr.io/rpeters1430/solverr` tagged `latest` (default branch only), the branch/ref name, semver, and short SHA. To reproduce that image locally: `docker build --platform linux/amd64 -t solverr .`
+
+Horizontal scaling (multiple replicas behind a shared cache) needs `REDIS_URL` set on every replica and the compose `distributed` profile: `docker compose --profile distributed up -d --scale solverr=3`. Without a shared `REDIS_URL`, each replica's cookie cache and sessions are local to that process — see README "Horizontal Scaling" for the full rationale.
