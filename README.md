@@ -67,6 +67,8 @@ services:
       - ENABLE_GPU=true
       - ENABLE_FAST_TLS=true
       - COOKIE_CACHE_TTL=7200
+      # - PUID=1000 # Optional: run container process as this UID (must be set with PGID)
+      # - PGID=1000 # Optional: run container process as this GID (must be set with PUID)
     volumes:
       - /volume1/docker/solverr/data:/app/data
     devices:
@@ -99,6 +101,8 @@ docker run -d \
   -v /volume1/docker/solverr/data:/app/data \
   -e MAX_BROWSER_WORKERS=auto \
   -e ENABLE_GPU=true \
+  -e PUID=1000 \
+  -e PGID=1000 \
   ghcr.io/rpeters1430/solverr:latest
 ```
 
@@ -124,6 +128,8 @@ services:
       - ENABLE_GPU=true
       - ENABLE_FAST_TLS=true
       - COOKIE_CACHE_TTL=7200
+      # - PUID=1000 # Optional: run container process as this UID (must be set with PGID)
+      # - PGID=1000 # Optional: run container process as this GID (must be set with PUID)
     volumes:
       - ./data:/app/data
     healthcheck:
@@ -216,6 +222,8 @@ http://localhost:8191/metrics
 | :--- | :--- | :--- |
 | `PORT` | `8191` | Server HTTP port |
 | `HOST` | `0.0.0.0` | Server binding IP |
+| `PUID` | `None` | Optional runtime UID override for the main process (must be paired with `PGID`) |
+| `PGID` | `None` | Optional runtime GID override for the main process (must be paired with `PUID`) |
 | `MAX_BROWSER_WORKERS` | `auto` | Max concurrent browser workers, and Camoufox pool size (`auto` matches CPU cores, then clamps to a RAM-based cap - see `RAM_PER_WORKER_GB`/`RAM_RESERVED_GB`) |
 | `RAM_PER_WORKER_GB` | `1.0` | RAM budgeted per browser worker when auto-tuning `MAX_BROWSER_WORKERS` |
 | `RAM_RESERVED_GB` | `2.0` | RAM reserved for the OS/other containers and excluded from auto-tuning's worker budget |
