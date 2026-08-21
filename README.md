@@ -40,7 +40,7 @@
 
 ## 🟢 Quick Deployment: UGREEN NASync DXP4800 Pro (UGOS Pro)
 
-The **UGREEN NASync DXP4800 Pro** (Intel Core i5-1235U, 10-core / 12-thread CPU with Intel Iris Xe Graphics) runs Solverr with maximum hardware efficiency.
+The **UGREEN NASync DXP4800 Pro** ships with an Intel Core i3-1315U - 6 cores (2P+4E) / 8 threads, up to 4.5GHz, integrated UHD Graphics (no Iris Xe) - and 8GB DDR5-5600 stock, expandable to 96GB across 2 SODIMM slots. `MAX_BROWSER_WORKERS=auto` sizes off both CPU thread count *and* available RAM (see [Environment Configuration](#-environment-configuration)), so on the 8GB stock config it lands well under 8 concurrent browser workers by default rather than assuming a 10-12 thread machine. If you're running Sonarr/Radarr/Prowlarr on the same box, budget worker count against the RAM they need too - set `MAX_BROWSER_WORKERS` explicitly rather than relying on `auto` once other containers are sharing the NAS.
 
 ### Method 1: Using UGOS Pro Docker Compose (Recommended)
 
@@ -61,7 +61,7 @@ services:
       - PORT=8191
       - HOST=0.0.0.0
       - LOG_LEVEL=INFO
-      - MAX_BROWSER_WORKERS=auto # Auto-scales across CPU cores (10-12 workers on DXP4800 Pro)
+      - MAX_BROWSER_WORKERS=auto # Auto-scales across CPU cores, clamped to available RAM (see Environment Configuration below)
       - BROWSER_MAX_OLD_SPACE_SIZE=2048
       - HEADLESS=true
       - ENABLE_GPU=true
@@ -70,7 +70,7 @@ services:
     volumes:
       - /volume1/docker/solverr/data:/app/data
     devices:
-      - /dev/dri:/dev/dri # Intel Iris Xe / QuickSync hardware GPU acceleration
+      - /dev/dri:/dev/dri # Intel UHD Graphics / QuickSync passthrough - only affects the Chromium fallback engine, not the primary Camoufox pool (see ENABLE_GPU below)
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8191/health"]
       interval: 30s
@@ -216,8 +216,10 @@ http://localhost:8191/metrics
 | :--- | :--- | :--- |
 | `PORT` | `8191` | Server HTTP port |
 | `HOST` | `0.0.0.0` | Server binding IP |
-| `MAX_BROWSER_WORKERS` | `auto` | Max concurrent browser workers, and Camoufox pool size (`auto` matches CPU cores) |
-| `ENABLE_GPU` | `true` | Enables GPU hardware acceleration & rasterization |
+| `MAX_BROWSER_WORKERS` | `auto` | Max concurrent browser workers, and Camoufox pool size (`auto` matches CPU cores, then clamps to a RAM-based cap - see `RAM_PER_WORKER_GB`/`RAM_RESERVED_GB`) |
+| `RAM_PER_WORKER_GB` | `1.0` | RAM budgeted per browser worker when auto-tuning `MAX_BROWSER_WORKERS` |
+| `RAM_RESERVED_GB` | `2.0` | RAM reserved for the OS/other containers and excluded from auto-tuning's worker budget |
+| `ENABLE_GPU` | `true` | Enables Chromium's `--enable-gpu-rasterization` flag (Chromium fallback engine only - the primary Camoufox engine gets no GPU flags, so `/dev/dri` passthrough mainly helps if you force `USE_CAMOUFOX=false`) |
 | `ENABLE_FAST_TLS` | `true` | Enables 50ms TLS impersonation fast path |
 | `FAST_TLS_ROTATE` | `true` | Rotate the TLS/UA fingerprint per-domain across a matched profile pool instead of one fixed fingerprint |
 | `USE_CAMOUFOX` | `true` | Use Camoufox stealth Firefox engine |
