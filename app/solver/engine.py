@@ -8,6 +8,7 @@ from app.solver.cache import cookie_cache
 from app.solver.fast_tls import fast_tls_engine
 from app.solver.browser import browser_pool
 from app.config import settings
+from app.events import event_broadcaster
 
 logger = logging.getLogger("solverr.engine")
 
@@ -161,6 +162,7 @@ class HybridSolverEngine:
 
             if not is_cf_challenge and solution and (solution.status < 400 or solution.status == 404):
                 elapsed_ms = (time.time() - start_time) * 1000
+                tier_name = "tier2_cache" if had_cache else "tier1_fast_tls"
                 if had_cache:
                     metrics.record_cache(elapsed_ms)
                 else:
@@ -169,6 +171,13 @@ class HybridSolverEngine:
                 
                 if solution.cookies:
                     cookie_cache.set_cookies(url, solution.cookies)
+                event_broadcaster.emit("solve", {
+                    "url": url,
+                    "tier": tier_name,
+                    "status": solution.status,
+                    "duration_ms": round(elapsed_ms, 1),
+                    "cookies_count": len(solution.cookies) if solution.cookies else 0
+                })
                 return solution
 
             if req.fastTlsOnly:
@@ -178,9 +187,17 @@ class HybridSolverEngine:
                     logger.info(f"[HybridEngine] fastTlsOnly=True requested. Returning Fast TLS solution without browser escalation.")
                     if solution.cookies:
                         cookie_cache.set_cookies(url, solution.cookies)
+                    event_broadcaster.emit("solve", {
+                        "url": url,
+                        "tier": "tier1_fast_tls",
+                        "status": solution.status,
+                        "duration_ms": round(elapsed_ms, 1),
+                        "cookies_count": len(solution.cookies) if solution.cookies else 0
+                    })
                     return solution
                 else:
                     metrics.record_failure()
+                    event_broadcaster.emit("solve_error", {"url": url, "error": "Fast TLS path failed"})
                     raise RuntimeError(f"Fast TLS path failed for {url}")
 
             if is_cf_challenge:
@@ -215,6 +232,15 @@ class HybridSolverEngine:
             if solution.cookies:
                 cookie_cache.set_cookies(url, solution.cookies)
 
+            event_broadcaster.emit("solve", {
+                "url": url,
+                "tier": "tier3_stealth_browser",
+                "status": solution.status,
+                "challenge": solution.challengeType or "none",
+                "duration_ms": round(elapsed_ms, 1),
+                "cookies_count": len(solution.cookies) if solution.cookies else 0
+            })
+
             return solution
 
         except Exception as e:
@@ -241,13 +267,22 @@ class HybridSolverEngine:
                     logger.info(f"[HybridEngine] Tier 4 Fallback Proxy SUCCESS in {elapsed_ms:.1f}ms | Status: {solution.status}")
                     if solution.cookies:
                         cookie_cache.set_cookies(url, solution.cookies)
+                    event_broadcaster.emit("solve", {
+                        "url": url,
+                        "tier": "tier4_fallback_proxy",
+                        "status": solution.status,
+                        "duration_ms": round(elapsed_ms, 1),
+                        "cookies_count": len(solution.cookies) if solution.cookies else 0
+                    })
                     return solution
                 except Exception as fallback_err:
                     logger.error(f"[HybridEngine] Tier 4 Fallback Proxy solve also FAILED for {url}: {fallback_err}")
                     metrics.record_failure()
+                    event_broadcaster.emit("solve_error", {"url": url, "error": str(fallback_err)})
                     raise fallback_err
 
             metrics.record_failure()
+            event_broadcaster.emit("solve_error", {"url": url, "error": str(e)})
             logger.error(f"[HybridEngine] Level 3 Stealth Browser solve FAILED for {url}: {type(e).__name__} - {e}")
             raise e
 

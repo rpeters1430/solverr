@@ -104,6 +104,82 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('btn-refresh-stats').addEventListener('click', fetchStats);
 
+    // Real-Time Server-Sent Events (SSE) Listener
+    function initEventStream() {
+        const feed = document.getElementById('live-activity-feed');
+        const statusLabel = document.getElementById('sse-status-label');
+        if (!feed) return;
+
+        let evtSource = null;
+        try {
+            evtSource = new EventSource('/api/events');
+
+            evtSource.onopen = () => {
+                if (statusLabel) {
+                    statusLabel.textContent = 'SSE Connected';
+                    statusLabel.style.color = 'var(--accent-emerald)';
+                }
+            };
+
+            evtSource.onmessage = (event) => {
+                try {
+                    const parsed = JSON.parse(event.data);
+                    if (parsed.type === 'connected') return;
+
+                    const now = new Date();
+                    const timeStr = now.toTimeString().split(' ')[0];
+
+                    const entry = document.createElement('div');
+                    entry.style.padding = '4px 0';
+                    entry.style.borderBottom = '1px solid rgba(255,255,255,0.05)';
+
+                    if (parsed.type === 'solve') {
+                        const d = parsed.data;
+                        const tierBadge = d.tier === 'tier1_fast_tls' 
+                            ? '<span style="color: var(--accent-cyan); font-weight: 600;">[Tier 1 Fast TLS]</span>'
+                            : d.tier === 'tier2_cache'
+                            ? '<span style="color: var(--accent-emerald); font-weight: 600;">[Tier 2 Cache]</span>'
+                            : d.tier === 'tier3_stealth_browser'
+                            ? '<span style="color: var(--accent-purple); font-weight: 600;">[Tier 3 Browser]</span>'
+                            : '<span style="color: var(--accent-amber); font-weight: 600;">[Tier 4 Proxy]</span>';
+
+                        const challengeStr = d.challenge && d.challenge !== 'none' ? ` | Challenge: <b>${d.challenge}</b>` : '';
+                        entry.innerHTML = `<span style="color: var(--text-muted);">${timeStr}</span> ${tierBadge} -> <code>${d.url}</code> <span style="color: var(--accent-emerald);">HTTP ${d.status}</span> (${d.duration_ms}ms, ${d.cookies_count} cookies)${challengeStr}`;
+                    } else if (parsed.type === 'solve_error') {
+                        const d = parsed.data;
+                        entry.innerHTML = `<span style="color: var(--text-muted);">${timeStr}</span> <span style="color: var(--accent-rose); font-weight: 600;">[ERROR]</span> -> <code>${d.url}</code>: ${d.error}`;
+                    }
+
+                    if (feed.firstElementChild && feed.firstElementChild.textContent.includes('Waiting for solve')) {
+                        feed.innerHTML = '';
+                    }
+
+                    feed.appendChild(entry);
+
+                    while (feed.children.length > 50) {
+                        feed.removeChild(feed.firstChild);
+                    }
+
+                    feed.scrollTop = feed.scrollHeight;
+                    fetchStats();
+                } catch (e) {
+                    console.debug('SSE parse error:', e);
+                }
+            };
+
+            evtSource.onerror = () => {
+                if (statusLabel) {
+                    statusLabel.textContent = 'SSE Reconnecting...';
+                    statusLabel.style.color = 'var(--accent-amber)';
+                }
+            };
+        } catch (err) {
+            console.warn('SSE init notice:', err);
+        }
+    }
+
+    initEventStream();
+
     // Live URL Tester Form
     const testerForm = document.getElementById('tester-form');
     const testResults = document.getElementById('test-results');

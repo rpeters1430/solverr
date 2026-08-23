@@ -694,14 +694,14 @@ class BrowserPool:
                 # 1. Cloudflare Turnstile Frame-Level Checkbox Clicker
                 if not clicked:
                     for frame in page.frames:
-                        if any(x in frame.url.lower() for x in ["challenges.cloudflare.com", "turnstile"]):
+                        if any(x in frame.url.lower() for x in ["challenges.cloudflare.com", "turnstile", "cf-challenge"]):
                             try:
-                                body_loc = frame.locator("body").first
-                                box = await body_loc.bounding_box()
-                                if box and box['width'] > 20 and box['height'] > 20:
-                                    click_x = box['x'] + 28.0
+                                cb_loc = frame.locator("input[type='checkbox'], .ctp-checkbox-label, body").first
+                                box = await cb_loc.bounding_box()
+                                if box and box['width'] > 15 and box['height'] > 15:
+                                    click_x = box['x'] + (28.0 if box['width'] > 60 else box['width'] / 2.0)
                                     click_y = box['y'] + (box['height'] / 2.0)
-                                    logger.info(f"[Turnstile] Cloudflare frame detected at ({click_x:.0f}, {click_y:.0f}). Dispatching human click...")
+                                    logger.info(f"[Turnstile] Cloudflare frame target detected at ({click_x:.0f}, {click_y:.0f}). Dispatching human click...")
                                     await human_click(page, click_x, click_y)
                                     clicked = True
                                     break
@@ -713,8 +713,11 @@ class BrowserPool:
                     turnstile_locators = [
                         "iframe[src*='challenges.cloudflare.com']",
                         "iframe[src*='turnstile']",
+                        "iframe[src*='cloudflare']",
                         "div.cf-turnstile iframe",
+                        "#turnstile-wrapper iframe",
                         "#challenge-stage iframe",
+                        "div[data-sitekey] iframe",
                         "iframe[title*='Cloudflare']",
                         "iframe[title*='Turnstile']",
                         "#turnstile-wrapper",
@@ -727,7 +730,7 @@ class BrowserPool:
                             if await loc.count() > 0:
                                 box = await loc.bounding_box()
                                 if box and box['width'] > 15 and box['height'] > 15:
-                                    click_x = box['x'] + 28.0
+                                    click_x = box['x'] + (28.0 if box['width'] > 60 else box['width'] / 2.0)
                                     click_y = box['y'] + (box['height'] / 2.0)
                                     logger.info(f"[Turnstile] Detected widget '{t_sel}' at ({click_x:.0f}, {click_y:.0f}). Dispatching human click...")
                                     await human_click(page, click_x, click_y)
@@ -765,6 +768,49 @@ class BrowserPool:
                                 clicked = True
                     except Exception as hcap_err:
                         logger.debug(f"[hCaptcha] Notice: {hcap_err}")
+
+                # 4.5. Deep Shadow DOM & Web Components Walker Fallback
+                if not clicked and (active_challenge in ["cloudflare_turnstile", "recaptcha", "hcaptcha"] or is_challenge_title(title)):
+                    try:
+                        shadow_box = await page.evaluate("""() => {
+                            function findInRoot(root) {
+                                if (!root) return null;
+                                const candidates = root.querySelectorAll("iframe, input[type='checkbox'], div[class*='turnstile'], div[class*='captcha'], div[id*='turnstile'], div[id*='challenge']");
+                                for (const el of candidates) {
+                                    const rect = el.getBoundingClientRect();
+                                    if (rect && rect.width > 15 && rect.height > 15 && rect.top >= 0 && rect.left >= 0) {
+                                        const src = (el.src || "").toLowerCase();
+                                        const cls = (el.className || "").toString().toLowerCase();
+                                        const id = (el.id || "").toLowerCase();
+                                        if (src.includes("turnstile") || src.includes("challenges.cloudflare") || src.includes("captcha") ||
+                                            cls.includes("turnstile") || cls.includes("captcha") || id.includes("turnstile") || id.includes("challenge")) {
+                                            return { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
+                                        }
+                                    }
+                                }
+                                const all = root.querySelectorAll('*');
+                                for (const el of all) {
+                                    if (el.shadowRoot) {
+                                        const found = findInRoot(el.shadowRoot);
+                                        if (found) return found;
+                                    }
+                                }
+                                return null;
+                            }
+                            return findInRoot(document);
+                        }""")
+                        if shadow_box and shadow_box.get('width', 0) > 15:
+                            bx = shadow_box['x']
+                            by = shadow_box['y']
+                            bw = shadow_box['width']
+                            bh = shadow_box['height']
+                            click_x = bx + (28.0 if bw > 60 else bw / 2.0)
+                            click_y = by + (bh / 2.0)
+                            logger.info(f"[ShadowDOM] Detected widget inside shadow root at ({click_x:.0f}, {click_y:.0f}). Dispatching human click...")
+                            await human_click(page, click_x, click_y)
+                            clicked = True
+                    except Exception as s_err:
+                        logger.debug(f"[ShadowDOM] Walker notice: {s_err}")
 
                 # 5. Modal Disclaimer / Age Gate Dismissal (Chaturbate, SpankBang, etc.)
                 if not clicked and not age_gate_clicked:

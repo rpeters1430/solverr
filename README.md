@@ -6,20 +6,23 @@
 
 ## 🔥 Key Features
 
-- **⚡ 4-Tier Adaptive Solver Pipeline**:
-  - **Tier 1 (Fast TLS)**: Level 1 & 2 JA3 / TLS Impersonation (`curl_cffi`) solves requests in **30ms – 120ms** without browser overhead.
-  - **Tier 2 (Clearance Cache)**: Instant `cf_clearance` & domain cookie jar reuse (**< 50ms**).
-  - **Tier 3 (Stealth Browser)**: Warm Camoufox (Stealth Firefox) pool with Bézier human mouse curves for hard challenges, escalating to a fresh Camoufox instance (new fingerprint) if the pooled attempt fails.
+- **⚡ 4.5-Tier Adaptive Solver Pipeline**:
+  - **Tier 1 (Fast TLS)**: Level 1 & 2 JA3 / TLS Impersonation (`curl_cffi`) with **Adaptive Domain Scoring** solves requests in **30ms – 120ms** without browser overhead.
+  - **Tier 2 (Clearance Cache)**: Instant `cf_clearance` & domain cookie jar reuse (**< 50ms**) with granular per-cookie TTL expiration and Netscape export.
+  - **Tier 3 (Stealth Browser)**: Warm Camoufox (Stealth Firefox) pool with per-page isolated Bézier human mouse curves and **Deep Shadow DOM traversal**, escalating to a fresh Camoufox instance (new fingerprint) if the pooled attempt fails.
+  - **Tier 3.5 (Paid Captcha Escalation)**: Optional 2Captcha-protocol escalation for interactive image puzzles (`CAPTCHA_SOLVER_API_KEY`).
   - **Tier 4 (Fallback Proxy)**: Automatic residential / fallback proxy escalation for rate-limited indexers.
-- **🛡️ Multi-WAF & CAPTCHA Solver Suite**: Automated solving for **Cloudflare Turnstile**, **Cloudflare 5s Interstitial**, **Google reCAPTCHA v2 / Enterprise**, **hCaptcha**, **GeeTest**, and **Imperva / Incapsula**.
-- **🧩 Optional Paid Solver Escalation (Tier 3.5)**: When the free click-based solver can't clear an interactive image challenge, Solverr can escalate to a 2Captcha-compatible service (2Captcha, CapSolver, etc.) via `CAPTCHA_SOLVER_API_KEY` - fully optional, zero network calls unless configured.
-- **🔥 Warm Browser Pool**: Camoufox instances are pooled and reused across requests instead of spawning a fresh Firefox process per solve, with periodic fingerprint recycling to avoid reuse fingerprinting.
-- **🖱️ Humanized Bézier Curve Cursor Movement**: Emulates organic human mouse trajectories with micro-jitters, variable velocities, and natural pauses to defeat behavioral bot detection.
+- **🛡️ Multi-WAF & CAPTCHA Solver Suite**: Automated solving for **Cloudflare Turnstile**, **Cloudflare 5s Interstitial**, **Google reCAPTCHA v2 / Enterprise**, **hCaptcha**, **GeeTest**, **Imperva / Incapsula**, **DataDome**, and **Akamai**.
+- **🌐 Deep Shadow DOM & Web Component Traversal**: In-page recursive DOM walker locates Turnstile and CAPTCHA checkboxes nested inside `#shadow-root` nodes across custom web components.
+- **📈 Adaptive TLS Profile Learning**: Fast TLS automatically learns which browser TLS fingerprints (`firefox147`, `firefox144`, `firefox133`, `chrome146`, etc.) succeed per domain, penalizing failing fingerprints and picking optimal JA3 profiles.
+- **🖱️ Isolated Humanized Bézier Curve Movement**: Emulates organic human mouse trajectories with micro-jitters, variable velocities, and natural pauses — fully isolated per page using weakref cursor tracking for multi-worker concurrency.
+- **🍪 Netscape & JSON Cookie Export (`/api/cookies/export`)**: Single-click export of cached cookies in Netscape format (`curl -b cookies.txt`, `yt-dlp`, `wget`) or standard JSON.
+- **📡 Real-time Live Event Streaming (SSE)**: Server-Sent Events stream (`/api/events`) broadcasts real-time solve feeds, tier transitions, and telemetry directly to the interactive dashboard.
 - **🔌 100% FlareSolverr v1 & v2 Compatibility**: Standard `POST /v1` and `POST /v2` endpoints compatible out-of-the-box with **Prowlarr**, **Jackett**, **Sonarr**, **Radarr**, and **FlexGet**.
 - **🚀 Native High-Performance `POST /scrape` API**: Full programmatic control with tier overrides, DOM selector waiting (`wait_selector`), data extraction (`extract_rules`), and debug screenshots.
 - **📊 Native Prometheus Metrics (`GET /metrics`)**: Standard Prometheus exposition format for 1-click scraping in Grafana, Prometheus, or VictoriaMetrics.
 - **🧠 Dual-Mode Caching**: Zero-dependency local JSON file persistence by default, with automatic **Redis** cluster backend support via `REDIS_URL`.
-- **📊 Real-time Web Control Center**: Live interactive challenge test bench with HTML viewer, screenshot preview, cookie explorer, and hardware monitors.
+- **📊 Real-time Web Control Center**: Live interactive challenge test bench with HTML viewer, screenshot preview, live SSE event feed, cookie explorer, and hardware monitors.
 
 ---
 
@@ -204,6 +207,22 @@ Every request Solverr handles is a self-contained request/response - there's no 
 Scrape endpoint for Grafana, Prometheus, or VictoriaMetrics:
 ```
 http://localhost:8191/metrics
+```
+
+### 4. Netscape Cookie Export (`GET /api/cookies/export`)
+Export cached cookies in Netscape format (`curl -b cookies.txt`, `yt-dlp`) or JSON:
+```bash
+# Export all cached cookies in Netscape format
+curl http://localhost:8191/api/cookies/export?format=netscape -o cookies.txt
+
+# Export cookies for a specific domain
+curl http://localhost:8191/api/cookies/export?domain=example.com -o cookies_example.txt
+```
+
+### 5. Real-Time Event Stream (`GET /api/events`)
+Server-Sent Events (SSE) stream for live solve monitoring:
+```bash
+curl -N http://localhost:8191/api/events
 ```
 
 ---

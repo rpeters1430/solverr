@@ -1,7 +1,9 @@
 import os
 import psutil
 import logging
+from typing import Optional
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import PlainTextResponse
 from app.models.flaresolverr import TestRequestModel, V1Request
 from app.solver.engine import metrics, solver_engine
 from app.solver.cache import cookie_cache
@@ -42,6 +44,19 @@ async def get_stats():
 
 @router.get("/cookies")
 async def get_cookies():
+    return {"domains": cookie_cache.get_all_entries()}
+
+@router.get("/cookies/export")
+async def export_cookies(format: str = "netscape", domain: Optional[str] = None):
+    """Export cached cookies in Netscape format or JSON."""
+    if format.lower() in ["netscape", "txt"]:
+        content = cookie_cache.export_netscape(domain_filter=domain)
+        filename = f"cookies_{domain or 'all'}.txt"
+        return PlainTextResponse(
+            content,
+            media_type="text/plain",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        )
     return {"domains": cookie_cache.get_all_entries()}
 
 @router.post("/cookies/clear")
@@ -87,3 +102,35 @@ async def test_solver(req: TestRequestModel):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/events")
+async def sse_event_stream():
+    """Server-Sent Events stream for real-time dashboard updates."""
+    from fastapi.responses import StreamingResponse
+    import json
+    import time
+    from app.events import event_broadcaster
+
+    async def event_generator():
+        q = event_broadcaster.subscribe()
+        try:
+            init_payload = json.dumps({"type": "connected", "timestamp": round(time.time(), 3), "data": {"status": "ok"}})
+            yield f"data: {init_payload}\n\n"
+            while True:
+                data = await q.get()
+                yield f"data: {data}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            event_broadcaster.unsubscribe(q)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+

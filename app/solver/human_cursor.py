@@ -5,10 +5,20 @@ import logging
 from typing import Tuple, List, Optional
 from playwright.async_api import Page
 
+import weakref
+
 logger = logging.getLogger("solverr.human_cursor")
 
-# Persistent cursor position tracking for natural continuous trajectory across clicks
-_current_cursor: List[float] = [float(random.randint(150, 400)), float(random.randint(150, 400))]
+# Per-page cursor position tracking to isolate concurrent browser tasks
+_page_cursors: "weakref.WeakKeyDictionary[Page, List[float]]" = weakref.WeakKeyDictionary()
+
+def _get_page_cursor(page: Page) -> List[float]:
+    try:
+        if page not in _page_cursors:
+            _page_cursors[page] = [float(random.randint(150, 400)), float(random.randint(150, 400))]
+        return _page_cursors[page]
+    except Exception:
+        return [float(random.randint(150, 400)), float(random.randint(150, 400))]
 
 def _bezier_point(p0: Tuple[float, float], p1: Tuple[float, float], p2: Tuple[float, float], p3: Tuple[float, float], t: float) -> Tuple[float, float]:
     """Calculate point on cubic Bézier curve at parameter t in [0, 1]."""
@@ -57,9 +67,9 @@ def generate_bezier_path(start: Tuple[float, float], end: Tuple[float, float], s
 
 async def human_mouse_move(page: Page, target_x: float, target_y: float, start_x: Optional[float] = None, start_y: Optional[float] = None):
     """Smoothly moves mouse along a Bézier curve to target coordinates with natural pauses."""
-    global _current_cursor
-    sx = start_x if start_x is not None else _current_cursor[0]
-    sy = start_y if start_y is not None else _current_cursor[1]
+    cursor = _get_page_cursor(page)
+    sx = start_x if start_x is not None else cursor[0]
+    sy = start_y if start_y is not None else cursor[1]
 
     tx = max(0.0, min(1920.0, target_x))
     ty = max(0.0, min(1080.0, target_y))
@@ -70,14 +80,14 @@ async def human_mouse_move(page: Page, target_x: float, target_y: float, start_x
         for pt in path:
             await page.mouse.move(pt[0], pt[1])
             await asyncio.sleep(random.uniform(0.003, 0.010))
-        _current_cursor[0] = tx
-        _current_cursor[1] = ty
+        cursor[0] = tx
+        cursor[1] = ty
     except Exception as e:
         logger.debug(f"[HumanCursor] Mouse move notice: {e}")
         try:
             await page.mouse.move(tx, ty)
-            _current_cursor[0] = tx
-            _current_cursor[1] = ty
+            cursor[0] = tx
+            cursor[1] = ty
         except Exception:
             pass
 

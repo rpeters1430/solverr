@@ -141,6 +141,23 @@
                     </div>
                 </div>
 
+                <!-- Real-Time Live Event Stream -->
+                <div class="panel" style="margin-bottom: 24px;">
+                    <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center;">
+                        <div>
+                            <h3>Real-Time Live Event Stream</h3>
+                            <p>Live SSE event feed streaming solve events, tier transitions &amp; anti-bot challenges.</p>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span class="dot" style="background: var(--accent-emerald); display: inline-block; width: 8px; height: 8px; border-radius: 50%;"></span>
+                            <span style="font-size: 0.8rem; color: var(--accent-emerald); font-weight: 600;" id="sse-status-label">SSE Connected</span>
+                        </div>
+                    </div>
+                    <div id="live-activity-feed" style="max-height: 220px; overflow-y: auto; background: rgba(0,0,0,0.3); border-radius: 6px; padding: 12px; font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; line-height: 1.6; border: 1px solid var(--border-color);">
+                        <div style="color: var(--text-muted);">⚡ Waiting for solve requests...</div>
+                    </div>
+                </div>
+
                 <div class="content-row">
                     <div class="panel flex-2">
                         <div class="panel-header">
@@ -310,7 +327,13 @@
                             <h3>Domain Cookie Cache</h3>
                             <p>Active <code>cf_clearance</code> tokens and session cookies saved for instant fast-path reuse.</p>
                         </div>
-                        <button class="btn btn-danger" id="btn-clear-cookies">Clear All Cache</button>
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <a href="/api/cookies/export?format=netscape" download="cookies.txt" class="btn btn-secondary" style="text-decoration: none; display: inline-flex; align-items: center; gap: 6px;">
+                                <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                                Export Netscape
+                            </a>
+                            <button class="btn btn-danger" id="btn-clear-cookies">Clear All Cache</button>
+                        </div>
                     </div>
 
                     <div id="cookie-domains-container" class="cookie-domains-list">

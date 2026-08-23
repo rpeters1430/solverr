@@ -128,5 +128,18 @@ class TestAPIEndpoints(unittest.TestCase):
             called_req = mock_proc.call_args[0][0]
             self.assertEqual(called_req.url, "https://example.com/api?a=1&b=2")
 
+    def test_export_cookies_endpoint(self):
+        # Test Netscape export
+        res_netscape = self.client.get("/api/cookies/export?format=netscape")
+        self.assertEqual(res_netscape.status_code, 200)
+        self.assertIn("text/plain", res_netscape.headers.get("content-type", ""))
+        self.assertIn("# Netscape HTTP Cookie File", res_netscape.text)
+
+        # Test JSON export
+        res_json = self.client.get("/api/cookies/export?format=json")
+        self.assertEqual(res_json.status_code, 200)
+        self.assertIn("domains", res_json.json())
+
+
 if __name__ == "__main__":
     unittest.main()

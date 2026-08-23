@@ -1,10 +1,12 @@
 import logging
+import re
 import time
 import zlib
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 from curl_cffi.requests import AsyncSession
 from app.models.flaresolverr import CookieModel, SolutionModel
+from app.solver.browser import detect_challenge, is_challenge_title
 from app.config import settings
 from app.logging_config import sanitize_proxy_url
 
@@ -36,17 +38,45 @@ class FastTLSEngine:
         self.impersonate_target = getattr(settings, "FAST_TLS_TARGET", "firefox")
         self.rotate = getattr(settings, "FAST_TLS_ROTATE", True)
         self.profiles = FIREFOX_PROFILES if self.impersonate_target.startswith("firefox") else CHROME_PROFILES
+        self._domain_scores: Dict[str, Dict[str, int]] = {}
+
+    def _normalize_domain(self, url: str) -> str:
+        if "://" in url:
+            domain = url.split("://", 1)[-1].split("/", 1)[0].split(":")[0].lower()
+        else:
+            domain = url.split("/")[0].split(":")[0].lower()
+        return domain.lstrip(".")
+
+    def record_outcome(self, url: str, profile_target: str, success: bool):
+        """Track success/failure per-domain profile to adaptively pick optimal TLS profiles."""
+        domain = self._normalize_domain(url)
+        if domain not in self._domain_scores:
+            self._domain_scores[domain] = {}
+        curr = self._domain_scores[domain].get(profile_target, 0)
+        if success:
+            self._domain_scores[domain][profile_target] = min(curr + 1, 10)
+        else:
+            self._domain_scores[domain][profile_target] = max(curr - 2, -10)
 
     def _profile_for_domain(self, url: str) -> Tuple[str, str]:
-        """Deterministically pick a TLS/UA profile per-domain so repeat
-        requests to the same site stay consistent, while different domains
-        get spread across profiles to avoid a single reusable fingerprint
-        being linkable across every site this instance touches."""
+        """Deterministically pick a TLS/UA profile per-domain, with adaptive scoring."""
         if not self.rotate or len(self.profiles) == 1:
             return self.profiles[0]
-        domain = url.split("://", 1)[-1].split("/", 1)[0].lower()
-        idx = zlib.crc32(domain.encode("utf-8")) % len(self.profiles)
-        return self.profiles[idx]
+        domain = self._normalize_domain(url)
+        scores = self._domain_scores.get(domain, {})
+        
+        # Filter out heavily penalized profiles unless all are penalized
+        valid_profiles = [p for p in self.profiles if scores.get(p[0], 0) >= -2]
+        if not valid_profiles:
+            valid_profiles = self.profiles
+            
+        # If any profile has positive success history, pick the highest
+        positive_profiles = [p for p in valid_profiles if scores.get(p[0], 0) > 0]
+        if positive_profiles:
+            return max(positive_profiles, key=lambda p: scores.get(p[0], 0))
+
+        idx = zlib.crc32(domain.encode("utf-8")) % len(valid_profiles)
+        return valid_profiles[idx]
 
     async def request(
         self,
@@ -130,40 +160,38 @@ class FastTLSEngine:
             # Check if page returned a WAF challenge response
             is_cf_challenge = False
             matched_marker = None
-            body_lower = resp.text.lower() if resp.text else ""
+            body_text = resp.text or ""
+            body_lower = body_text.lower()
 
-            waf_markers = [
-                "just a moment", "cf-challenge", "turnstile", "checking your browser",
-                "attention required!", "akamai", "sec-cpt", "incapsula", "visid_incap",
-                "datadome", "geetest", "recaptcha", "hcaptcha", "ddos-guard",
-                "check.ddos-guard.net", "ddg-captcha", "cf-please-wait", "under attack"
-            ]
+            # Extract title tag if present
+            title_match = re.search(r"<title[^>]*>(.*?)</title>", body_text, re.IGNORECASE | re.DOTALL)
+            page_title = title_match.group(1).strip() if title_match else ""
+
+            detected_challenge = detect_challenge(page_title, body_lower, check_content=True)
 
             embedded_script_markers = [
                 "challenges.cloudflare.com", "cf-challenge", "turnstile.min.js",
                 "check.ddos-guard.net", "geo.captcha-delivery.com"
             ]
 
-            if resp.status_code in [403, 429, 503]:
-                for marker in waf_markers:
-                    if marker in body_lower:
-                        is_cf_challenge = True
-                        matched_marker = marker
-                        break
-                if not is_cf_challenge:
-                    # Generic 403/503 might still be an undetected bot wall
-                    is_cf_challenge = True
-                    matched_marker = f"http_{resp.status_code}"
+            if detected_challenge:
+                is_cf_challenge = True
+                matched_marker = detected_challenge
+            elif is_challenge_title(page_title):
+                is_cf_challenge = True
+                matched_marker = "challenge_title"
+            elif resp.status_code in [403, 429, 503]:
+                is_cf_challenge = True
+                matched_marker = f"http_{resp.status_code}"
             elif any(marker in body_lower for marker in embedded_script_markers):
                 is_cf_challenge = True
                 matched_marker = "embedded_challenge_script"
-            elif resp.status_code == 200 and ("<title>just a moment" in body_lower or "checking your browser" in body_lower):
-                is_cf_challenge = True
-                matched_marker = "title_challenge_marker"
 
             if is_cf_challenge:
+                self.record_outcome(url, impersonate_target, False)
                 logger.info(f"[FastTLS] WAF challenge detected (HTTP {resp.status_code}, marker: '{matched_marker}')")
             else:
+                self.record_outcome(url, impersonate_target, True)
                 logger.info(f"[FastTLS] Direct HTTP response received (HTTP Status: {resp.status_code}, Length: {len(resp.text)} bytes)")
 
             captured_cookies: List[CookieModel] = []
@@ -197,6 +225,7 @@ class FastTLSEngine:
             return is_cf_challenge, solution
 
         except Exception as e:
+            self.record_outcome(url, impersonate_target, False)
             logger.warning(f"[FastTLS] Fast TLS request failed or timed out for {url}: {type(e).__name__} - {e}")
             return True, None
 

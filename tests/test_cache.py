@@ -75,5 +75,29 @@ class TestCookieCache(unittest.TestCase):
         self.assertEqual(len(fetched), 1)
         self.assertEqual(fetched[0].value, "new_val")
 
+    def test_export_netscape_format(self):
+        cookies = [
+            CookieModel(name="cf_clearance", value="token123", domain=".example.com", path="/", secure=True, expires=1800000000)
+        ]
+        self.cache.set_cookies("https://example.com", cookies)
+        netscape_txt = self.cache.export_netscape()
+        self.assertIn("# Netscape HTTP Cookie File", netscape_txt)
+        self.assertIn(".example.com", netscape_txt)
+        self.assertIn("TRUE\t/\tTRUE\t1800000000\tcf_clearance\ttoken123", netscape_txt)
+
+    def test_expired_cookie_is_not_returned(self):
+        expired_ts = time.time() - 60  # Expired 1 minute ago
+        valid_ts = time.time() + 3600  # Valid for 1 hour
+        cookies = [
+            CookieModel(name="expired_token", value="old", domain=".example.com", expires=expired_ts),
+            CookieModel(name="valid_token", value="good", domain=".example.com", expires=valid_ts),
+        ]
+        self.cache.set_cookies("https://example.com", cookies)
+        fetched = self.cache.get_cookies("https://example.com")
+        names = {c.name: c.value for c in fetched}
+        self.assertNotIn("expired_token", names)
+        self.assertIn("valid_token", names)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -69,6 +69,8 @@ class CookieCache:
                     if data_raw:
                         data = json.loads(data_raw)
                         c_model = CookieModel(**data["cookie"])
+                        if c_model.expires and c_model.expires > 0 and now > c_model.expires:
+                            continue
                         result.append(c_model)
                 return result
             except Exception as e:
@@ -76,12 +78,14 @@ class CookieCache:
 
         for domain_key, cookies_dict in self._store.items():
             clean_domain = domain_key.lstrip(".")
-            if target_domain == clean_domain or target_domain.endswith("." + clean_domain) or clean_domain.endswith("." + target_domain):
+            if target_domain == clean_domain or target_domain.endswith("." + clean_domain):
                 for cookie_name, data in list(cookies_dict.items()):
                     if now - data.get("timestamp", 0) > settings.COOKIE_CACHE_TTL:
                         continue
                     try:
                         c_model = CookieModel(**data["cookie"])
+                        if c_model.expires and c_model.expires > 0 and now > c_model.expires:
+                            continue
                         result.append(c_model)
                     except Exception:
                         pass
@@ -176,6 +180,36 @@ class CookieCache:
             if valid_list:
                 out[domain] = valid_list
         return out
+
+    def export_netscape(self, domain_filter: Optional[str] = None) -> str:
+        """Export cached cookies in Netscape format for curl, yt-dlp, wget, etc."""
+        lines = [
+            "# Netscape HTTP Cookie File",
+            "# https://curl.se/docs/http-cookies.html",
+            "# Exported from Solverr",
+            ""
+        ]
+        all_entries = self.get_all_entries()
+        filter_norm = self._normalize_domain(domain_filter) if domain_filter else None
+        
+        for dom, cookies in all_entries.items():
+            if filter_norm and dom != filter_norm and not dom.endswith("." + filter_norm):
+                continue
+            for c in cookies:
+                c_dom = c.get("domain") or dom
+                if not c_dom.startswith(".") and not c_dom.startswith("http"):
+                    include_sub = "TRUE" if "." in c_dom else "FALSE"
+                    export_dom = f".{c_dom}" if include_sub == "TRUE" and not c_dom.startswith(".") else c_dom
+                else:
+                    include_sub = "TRUE" if c_dom.startswith(".") else "FALSE"
+                    export_dom = c_dom
+                path = c.get("path") or "/"
+                secure = "TRUE" if c.get("secure") else "FALSE"
+                expires = int(c.get("expires") if c.get("expires") and c.get("expires") > 0 else 0)
+                name = c.get("name", "")
+                value = c.get("value", "")
+                lines.append(f"{export_dom}\t{include_sub}\t{path}\t{secure}\t{expires}\t{name}\t{value}")
+        return "\n".join(lines) + "\n"
 
     def _schedule_save(self):
         """Debounce disk writes: coalesce bursts of set_cookies() into one
