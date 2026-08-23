@@ -1,6 +1,5 @@
 import logging
 import re
-import time
 import zlib
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse

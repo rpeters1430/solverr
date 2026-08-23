@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from playwright.async_api import Page
 from app.config import settings
 from app.models.flaresolverr import CookieModel, SolutionModel
-from app.solver.human_cursor import human_click, human_mouse_move
+from app.solver.human_cursor import human_click
 from app.solver.captcha_solver import captcha_solver
 from app.logging_config import sanitize_proxy_url
 
@@ -50,6 +50,7 @@ class CamoufoxPool:
         self._idle: "asyncio.Queue[_PooledCamoufox]" = asyncio.Queue()
         self._created = 0
         self._lock = asyncio.Lock()
+        self.recycles_total = 0
 
     async def acquire(self) -> _PooledCamoufox:
         try:
@@ -73,6 +74,7 @@ class CamoufoxPool:
 
     async def release(self, inst: _PooledCamoufox):
         if self._should_recycle(inst):
+            self.recycles_total += 1
             await self._close_instance(inst)
             async with self._lock:
                 self._created -= 1
@@ -273,6 +275,11 @@ class BrowserPool:
             if (CAMOUFOX_AVAILABLE and settings.CAMOUFOX_POOL_ENABLED)
             else None
         )
+        # Queue-pressure/crash telemetry, exposed via pool_stats() for
+        # /metrics and the dashboard - see app/metrics.py.
+        self._queue_wait_total_s: float = 0.0
+        self._queue_wait_count: int = 0
+        self._crashes_total: int = 0
 
     async def close(self):
         if self.camoufox_pool:
@@ -281,6 +288,76 @@ class BrowserPool:
             except Exception as e:
                 logger.warning(f"[CamoufoxPool] Shutdown notice: {e}")
         logger.info("Browser Pool stopped.")
+
+    def pool_stats(self) -> Dict[str, Any]:
+        cp = self.camoufox_pool
+        created = cp._created if cp else 0
+        idle = cp._idle.qsize() if cp else 0
+        avg_wait = (self._queue_wait_total_s / self._queue_wait_count) if self._queue_wait_count else 0.0
+        return {
+            "pool_size": cp.size if cp else 0,
+            "created": created,
+            "busy": max(0, created - idle),
+            "idle": idle,
+            "recycles_total": cp.recycles_total if cp else 0,
+            "crashes_total": self._crashes_total,
+            "avg_queue_wait_seconds": round(avg_wait, 3),
+            "queue_wait_samples": self._queue_wait_count,
+        }
+
+    async def self_test(self) -> Dict[str, Any]:
+        """Diagnostic-only smoke test: launch a real (ephemeral) Camoufox
+        instance, create a context/page, execute JS, then tear it all down.
+        Verifies Tier 3 is actually usable end-to-end, not just that the
+        Camoufox package imported successfully (see GET /health, which only
+        checks the import). Used by GET /api/diagnostics/browser.
+
+        Explicitly timeout-bounded: launching under some deployment
+        configurations (observed: PUID/PGID non-root + certain capability
+        restrictions) can leave the Playwright<->Firefox IPC handshake
+        hanging indefinitely rather than erroring, and this is the one
+        BrowserPool code path that doesn't already sit under an
+        asyncio.wait_for from solve()'s tier_timeout."""
+        if not CAMOUFOX_AVAILABLE:
+            return {"ok": False, "error": "Camoufox import failed - stealth engine unavailable"}
+
+        start = time.time()
+        try:
+            return await asyncio.wait_for(self._self_test_inner(start), timeout=SOLVE_WALLCLOCK_GRACE_SECONDS + 30)
+        except asyncio.TimeoutError:
+            return {
+                "ok": False,
+                "error": "Browser self-test timed out - Camoufox launch or IPC handshake did not complete",
+                "duration_ms": round((time.time() - start) * 1000, 1)
+            }
+        except Exception as e:
+            return {
+                "ok": False,
+                "error": f"{type(e).__name__}: {e}",
+                "duration_ms": round((time.time() - start) * 1000, 1)
+            }
+
+    async def _self_test_inner(self, start: float) -> Dict[str, Any]:
+        async with AsyncCamoufox(
+            headless=settings.HEADLESS,
+            os="linux",
+            config={'forceScopeAccess': True},
+            i_know_what_im_doing=True
+        ) as browser_instance:
+            context = await browser_instance.new_context() if hasattr(browser_instance, "new_context") else browser_instance
+            page = await context.new_page()
+            try:
+                result = await page.evaluate("() => 1 + 1")
+                ua = await page.evaluate("() => navigator.userAgent")
+            finally:
+                await page.close()
+                if context is not browser_instance:
+                    await context.close()
+        return {
+            "ok": result == 2,
+            "user_agent": ua,
+            "duration_ms": round((time.time() - start) * 1000, 1)
+        }
 
     async def solve(
         self,
@@ -296,7 +373,10 @@ class BrowserPool:
         wait_delay_ms: Optional[int] = None,
         capture_screenshot: bool = False
     ) -> SolutionModel:
+        wait_start = time.time()
         async with self.semaphore:
+            self._queue_wait_total_s += time.time() - wait_start
+            self._queue_wait_count += 1
             start_time = time.time()
             active_ua = user_agent or settings.DEFAULT_USER_AGENT
             pw_proxy = None
@@ -362,6 +442,7 @@ class BrowserPool:
                 last_error = e
                 logger.warning(f"[CamoufoxEngine] Ephemeral Camoufox solve notice/fallback: {e}.")
 
+            self._crashes_total += 1
             raise last_error or RuntimeError(f"Camoufox solve failed for {url}")
 
     async def _solve_with_pooled_camoufox(
@@ -563,6 +644,7 @@ class BrowserPool:
         # Handle navigation
         logger.info(f"[BrowserPool] Navigating to {url} ({method.upper()}, timeout: {timeout_ms}ms)")
         initial_status = 0
+        response = None
         if method.upper() == "POST" and post_data:
             try:
                 form_inputs = []
@@ -644,7 +726,6 @@ class BrowserPool:
                 except Exception:
                     content = ""
 
-            title_lower = title.lower()
             content_lower = content.lower() if content else ""
 
             active_challenge = detect_challenge(title, content, check_content)
@@ -877,7 +958,14 @@ class BrowserPool:
         if capture_screenshot:
             try:
                 img_bytes = await page.screenshot(type="jpeg", quality=60)
-                screenshot_b64 = base64.b64encode(img_bytes).decode("utf-8")
+                max_bytes = settings.MAX_SCREENSHOT_MB * 1024 * 1024
+                if max_bytes > 0 and len(img_bytes) > max_bytes:
+                    logger.warning(
+                        f"[BrowserPool] Screenshot ({len(img_bytes) / 1024 / 1024:.1f}MB) exceeds "
+                        f"MAX_SCREENSHOT_MB={settings.MAX_SCREENSHOT_MB}, dropping it"
+                    )
+                else:
+                    screenshot_b64 = base64.b64encode(img_bytes).decode("utf-8")
             except Exception as e:
                 logger.warning(f"[BrowserPool] Screenshot capture error: {e}")
 

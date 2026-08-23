@@ -3,7 +3,7 @@ import psutil
 import logging
 from typing import Optional
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, JSONResponse
 from app.models.flaresolverr import TestRequestModel, V1Request
 from app.solver.engine import metrics, solver_engine
 from app.solver.cache import cookie_cache
@@ -21,8 +21,11 @@ async def get_stats():
     ram_mb = round(mem_info.rss / 1024 / 1024, 1)
     cpu_percent = psutil.cpu_percent(interval=None)
 
-    from app.solver.browser import CAMOUFOX_AVAILABLE
+    from app.solver.browser import CAMOUFOX_AVAILABLE, browser_pool
     stealth_engine_name = "Camoufox Stealth Firefox" if CAMOUFOX_AVAILABLE else "Unavailable"
+
+    cache_lookups = metrics.cookie_cache_lookup_hits + metrics.cookie_cache_lookup_misses
+    cache_hit_ratio_pct = round(metrics.cookie_cache_lookup_hits / cache_lookups * 100, 1) if cache_lookups else 0.0
 
     data = metrics.to_dict()
     data.update({
@@ -36,9 +39,11 @@ async def get_stats():
         "total_cpu_cores": settings.TOTAL_CPU_CORES,
         "total_ram_gb": settings.TOTAL_RAM_GB,
         "worker_auto_tuned": getattr(settings, "WORKER_AUTO_TUNED", False),
-        "version": settings.VERSION,
+        "version": settings.DISPLAY_VERSION,
         "stealth_engine": stealth_engine_name,
-        "tls_impersonation": fast_tls_engine.impersonate_target
+        "tls_impersonation": fast_tls_engine.impersonate_target,
+        "cache_hit_ratio_pct": cache_hit_ratio_pct,
+        "browser_pool": browser_pool.pool_stats(),
     })
     return data
 
@@ -75,6 +80,18 @@ async def delete_session(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
     return {"status": "ok", "message": f"Session '{session_id}' deleted"}
 
+@router.get("/diagnostics/browser")
+async def diagnostics_browser():
+    """Browser self-test: launches a real Camoufox instance end-to-end
+    (context, page, JS execution) instead of just checking the import
+    succeeded. Covered by the same global X-Api-Key auth as every other
+    /api route (see app/main.py's middleware) - there's nothing
+    endpoint-specific to add here."""
+    from app.solver.browser import browser_pool
+    result = await browser_pool.self_test()
+    status_code = 200 if result.get("ok") else 503
+    return JSONResponse(status_code=status_code, content=result)
+
 @router.post("/test")
 async def test_solver(req: TestRequestModel):
     v1_req = V1Request(
@@ -106,6 +123,7 @@ async def test_solver(req: TestRequestModel):
 @router.get("/events")
 async def sse_event_stream():
     """Server-Sent Events stream for real-time dashboard updates."""
+    import asyncio
     from fastapi.responses import StreamingResponse
     import json
     import time

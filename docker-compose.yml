@@ -9,6 +9,16 @@ services:
     ports:
       - "8191:8191"
     shm_size: '2gb' # Recommended 1gb-2gb for Camoufox multi-worker rendering
+    security_opt:
+      - no-new-privileges:true
+    # cap_drop: [ALL] is intentionally NOT enabled by default here: verified
+    # working when the container runs as root (the default, no PUID/PGID),
+    # but Camoufox's Firefox sandbox hangs indefinitely under cap_drop:ALL
+    # once PUID/PGID drop the process to a non-root user via gosu, even with
+    # CHOWN/SETUID/SETGID/SYS_CHROOT/SYS_ADMIN added back - tested directly
+    # against this image. Only uncomment if you are NOT using PUID/PGID:
+    # cap_drop:
+    #   - ALL
     environment:
       - PORT=8191
       - HOST=0.0.0.0

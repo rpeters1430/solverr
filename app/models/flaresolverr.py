@@ -83,6 +83,7 @@ class SolutionModel(BaseModel):
     screenshot: Optional[str] = None
     extracted: Optional[Dict[str, Any]] = None
     challengeType: Optional[str] = None
+    tier: Optional[str] = None
 
 class V1Response(BaseModel):
     status: str = "ok"  # "ok" or "error"

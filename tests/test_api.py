@@ -14,6 +14,15 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertEqual(json_data.get("status"), "ok")
         self.assertIn("stealth_engine", json_data)
 
+    def test_health_live_and_ready_split(self):
+        live = self.client.get("/health/live")
+        self.assertEqual(live.status_code, 200)
+        self.assertEqual(live.json(), {"status": "ok"})
+
+        ready = self.client.get("/health/ready")
+        self.assertEqual(ready.status_code, 200)
+        self.assertIn("camoufox_available", ready.json())
+
     def test_prometheus_metrics(self):
         response = self.client.get("/metrics")
         self.assertEqual(response.status_code, 200)
@@ -23,6 +32,11 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertIn("solverr_active_workers", body)
         self.assertIn("solverr_memory_bytes", body)
         self.assertIn("solverr_fast_hit_rate_percent", body)
+        self.assertIn("solverr_request_duration_seconds_bucket", body)
+        self.assertIn("solverr_browser_pool_size", body)
+        self.assertIn("solverr_browser_queue_wait_seconds", body)
+        self.assertIn("solverr_cookie_cache_lookups_total", body)
+        self.assertIn("solverr_timeouts_total", body)
 
     def test_flaresolverr_sessions_flow(self):
         # 1. Create session
@@ -98,13 +112,14 @@ class TestAPIEndpoints(unittest.TestCase):
             res_bearer = self.client.get("/api/stats", headers={"authorization": "Bearer secret123"})
             self.assertEqual(res_bearer.status_code, 200)
 
-            # Query param api_key -> 200
+            # Query param api_key is intentionally rejected: it would leak the
+            # key into access logs, browser history, and outbound Referer
+            # headers. Header-only auth is required.
             res_param = self.client.get("/api/stats?api_key=secret123")
-            self.assertEqual(res_param.status_code, 200)
+            self.assertEqual(res_param.status_code, 401)
 
-            # Query param key -> 200
             res_key = self.client.get("/api/stats?key=secret123")
-            self.assertEqual(res_key.status_code, 200)
+            self.assertEqual(res_key.status_code, 401)
 
             # Health and metrics remain unauthenticated
             res_health = self.client.get("/health")

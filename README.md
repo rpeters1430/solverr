@@ -235,7 +235,7 @@ curl -N http://localhost:8191/api/events
 | `HOST` | `0.0.0.0` | Server binding IP |
 | `PUID` | `None` | Optional runtime UID override for the main process (must be paired with `PGID`) |
 | `PGID` | `None` | Optional runtime GID override for the main process (must be paired with `PUID`) |
-| `MAX_BROWSER_WORKERS` | `auto` | Max concurrent browser workers, and Camoufox pool size (`auto` matches CPU cores, then clamps to a RAM-based cap - see `RAM_PER_WORKER_GB`/`RAM_RESERVED_GB`) |
+| `MAX_BROWSER_WORKERS` | `auto` | Max concurrent browser workers, and Camoufox pool size (`auto` matches CPU cores - the container's `--cpus`/cgroup quota if set, else the host - then clamps to a RAM-based cap using the same container-aware limit - see `RAM_PER_WORKER_GB`/`RAM_RESERVED_GB`) |
 | `RAM_PER_WORKER_GB` | `1.0` | RAM budgeted per browser worker when auto-tuning `MAX_BROWSER_WORKERS` |
 | `RAM_RESERVED_GB` | `2.0` | RAM reserved for the OS/other containers and excluded from auto-tuning's worker budget |
 | `ENABLE_FAST_TLS` | `true` | Enables 50ms TLS impersonation fast path |
@@ -245,8 +245,17 @@ curl -N http://localhost:8191/api/events
 | `CAMOUFOX_POOL_RECYCLE_SECONDS` | `1800` | Recycle a pooled browser instance after this many seconds, whichever comes first |
 | `REDIS_URL` | `None` | Optional Redis URL for distributed cookie cache & sessions - required when running multiple replicas, see [Horizontal Scaling](#-horizontal-scaling) |
 | `COOKIE_CACHE_TTL` | `7200` | Clearance cookie cache TTL in seconds |
+| `MAX_CACHE_DOMAINS` | `1000` | Local (non-Redis) cookie cache: max distinct domains before the oldest is evicted |
+| `MAX_COOKIES_PER_DOMAIN` | `100` | Local (non-Redis) cookie cache: max cookies per domain before the oldest are evicted |
+| `MAX_SESSIONS` | `500` | Max in-memory sessions before the oldest (by last access) is evicted |
 | `FALLBACK_PROXY_URL` | `None` | Optional Tier 4 fallback proxy URL |
-| `API_KEY` | `None` | When set, requires a matching `X-Api-Key` header on every endpoint except `/health` and `/metrics` |
+| `API_KEY` | `None` | When set, requires a matching `X-Api-Key` header (header only - never a query param) on every endpoint except `/health`, and `/metrics` unless `METRICS_REQUIRE_AUTH=true` |
+| `METRICS_REQUIRE_AUTH` | `false` | Require `X-Api-Key` on `/metrics` too, instead of leaving it open for Prometheus scrapers |
+| `ALLOW_PRIVATE_NETWORKS` | `false` | Allow target URLs that resolve to loopback/RFC1918/link-local/cloud-metadata addresses. Only the initial target is checked, not redirects |
+| `ALLOWED_HOSTS` | (empty) | Comma-separated hostnames exempted from the private-network block above |
+| `DENIED_HOSTS` | (empty) | Comma-separated hostnames always rejected, regardless of `ALLOW_PRIVATE_NETWORKS` |
+| `MAX_REQUEST_BODY_MB` | `10` | Reject incoming requests whose `Content-Length` exceeds this (`0` disables) |
+| `MAX_SCREENSHOT_MB` | `8` | Drop a captured screenshot instead of returning it if it exceeds this size |
 | `CAPTCHA_SOLVER_API_KEY` | `None` | Optional 2Captcha-compatible API key for the Tier 3.5 paid-solver escalation on interactive image challenges |
 | `CAPTCHA_SOLVER_BASE_URL` | `https://2captcha.com` | API base URL - point at another provider's 2captcha-compatible endpoint (e.g. CapSolver) here |
 | `HEADLESS` | `true` | Run browser in headless mode |

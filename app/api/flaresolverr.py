@@ -4,7 +4,7 @@ import logging
 from typing import Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, Request as FastAPIRequest, Response
 from app.models.flaresolverr import V1Request, V1Response, ScrapeRequest, ScrapeResponse
-from app.solver.engine import solver_engine, metrics
+from app.solver.engine import solver_engine
 from app.solver.sessions import session_manager
 from app.config import settings
 from app.logging_config import sanitize_proxy_url
@@ -193,11 +193,7 @@ async def native_scrape_api(req: ScrapeRequest):
         solution = await solver_engine.process_request(v1_req)
         duration_ms = round((time.time() - start_ts) * 1000, 2)
 
-        tier_used = "tier1_fast_tls"
-        if duration_ms > 1500 or v1_req.forceBrowser:
-            tier_used = "tier3_stealth_browser"
-        elif req.cookies or v1_req.cookies:
-            tier_used = "tier2_cache"
+        tier_used = solution.tier or "tier1_fast_tls"
 
         extracted = None
         if req.extract_rules and solution.response:
@@ -227,12 +223,16 @@ async def transparent_proxy(request: FastAPIRequest, url: Optional[str] = None):
     Passes requests through Solverr's 4-tier engine and returns the solved response directly.
     """
     cmd = f"request.{request.method.lower()}"
+    # A caller's own target URL commonly carries its own unescaped "&"-joined
+    # query string (e.g. ?url=https://example.com/api?a=1&b=2) - Starlette's
+    # query_params would split that at the outer "&" and truncate it, so take
+    # everything after "url=" verbatim instead of relying on parsed params.
     raw_query = str(request.url.query)
     target_url = url or ""
     if "url=" in raw_query:
         target_url = raw_query.split("url=", 1)[1]
-        from urllib.parse import unquote
         if target_url.startswith("http%3A") or target_url.startswith("https%3A"):
+            from urllib.parse import unquote
             target_url = unquote(target_url)
 
     if not target_url:
@@ -241,11 +241,26 @@ async def transparent_proxy(request: FastAPIRequest, url: Optional[str] = None):
     body = await request.body()
     post_data = body.decode("utf-8") if body else None
 
+    # Strip hop-by-hop / identity headers before forwarding: these describe
+    # the connection between the caller and Solverr, not the outbound
+    # request Solverr makes to the target site (a stale Content-Length after
+    # the body's been re-read, or a Host pointing at Solverr itself, would
+    # otherwise leak straight into the outbound request).
+    _HOP_BY_HOP_HEADERS = {
+        "host", "connection", "content-length", "transfer-encoding",
+        "keep-alive", "proxy-authenticate", "proxy-authorization",
+        "te", "trailer", "upgrade", "accept-encoding", "x-api-key",
+    }
+    forward_headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower() not in _HOP_BY_HOP_HEADERS
+    }
+
     v1_req = V1Request(
         cmd=cmd,
         url=target_url,
         postData=post_data,
-        headers=dict(request.headers)
+        headers=forward_headers
     )
 
     try:

@@ -1,7 +1,8 @@
 import asyncio
+import time
 import unittest
 from unittest.mock import patch
-from app.solver.browser import CamoufoxPool, _PooledCamoufox
+from app.solver.browser import BrowserPool, CamoufoxPool, _PooledCamoufox
 from app.config import settings
 
 
@@ -84,6 +85,59 @@ class TestCamoufoxPool(unittest.IsolatedAsyncioTestCase):
         await pool.close()
         self.assertEqual(pool.close_count, 2)
         self.assertEqual(pool._created, 0)
+
+
+class FakePage:
+    async def evaluate(self, script):
+        return "fake-ua"
+
+    async def close(self):
+        pass
+
+
+class FakeContext:
+    async def new_page(self):
+        return FakePage()
+
+    async def close(self):
+        pass
+
+
+class FakeBrowser:
+    contexts = []
+
+    async def new_context(self):
+        return FakeContext()
+
+
+class FakeCamoufoxPoolWithBrowser(FakeCamoufoxPool):
+    async def _launch_instance(self) -> _PooledCamoufox:
+        self.launch_count += 1
+        return _PooledCamoufox(cm=object(), browser=FakeBrowser(), created_at=time.time())
+
+
+class TestBrowserPoolCancellation(unittest.IsolatedAsyncioTestCase):
+    async def test_pooled_instance_is_released_when_solve_flow_raises(self):
+        """A crash (or cancellation) mid-solve must still close the page/
+        context and check the warm instance back into the pool - otherwise
+        every failed solve permanently leaks a pool slot."""
+        pool = BrowserPool()
+        fake_camoufox_pool = FakeCamoufoxPoolWithBrowser(2)
+        pool.camoufox_pool = fake_camoufox_pool
+
+        async def raising_execute_solve_flow(*args, **kwargs):
+            raise asyncio.CancelledError()
+
+        with patch.object(pool, "_execute_solve_flow", side_effect=raising_execute_solve_flow):
+            with self.assertRaises(asyncio.CancelledError):
+                await pool._solve_with_pooled_camoufox(
+                    url="https://example.com", method="GET", post_data=None, cookies=None,
+                    timeout_ms=5000, headers=None, start_time=time.time(),
+                    wait_selector=None, wait_delay_ms=None, capture_screenshot=False
+                )
+
+        self.assertEqual(fake_camoufox_pool._idle.qsize(), 1)
+        self.assertEqual(fake_camoufox_pool._created, 1)
 
 
 if __name__ == "__main__":

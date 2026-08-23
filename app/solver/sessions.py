@@ -28,8 +28,12 @@ class Session:
 
     def update_cookies(self, new_cookies: List[CookieModel]):
         self.touch()
-        existing_names = {c.name for c in new_cookies}
-        self.cookies = [c for c in self.cookies if c.name not in existing_names] + new_cookies
+        # Identity is domain + path + name: a same-name cookie on a
+        # different path must not replace an unrelated cookie.
+        existing_keys = {(c.domain, c.path, c.name) for c in new_cookies}
+        self.cookies = [
+            c for c in self.cookies if (c.domain, c.path, c.name) not in existing_keys
+        ] + new_cookies
 
     def to_dict(self) -> dict:
         return {
@@ -103,12 +107,26 @@ class SessionManager:
 
     def create_session(self, session_id: Optional[str] = None, proxy: Optional[str] = None, ttl: int = 7200) -> str:
         sid = session_id or str(uuid.uuid4())
+        self._evict_oldest_if_at_capacity()
         sess = Session(session_id=sid, proxy=proxy, ttl=ttl)
         self._sessions[sid] = sess
         self._persist(sess)
         proxy_desc = f" (proxy: {sanitize_proxy_url(proxy)})" if proxy else ""
         logger.info(f"[SessionManager] Created session '{sid}'{proxy_desc}")
         return sid
+
+    def _evict_oldest_if_at_capacity(self):
+        # In-memory bound only - Redis-backed sessions already expire via
+        # their own TTL (see _persist's `ex=sess.ttl`), so this only
+        # protects the local process's in-memory dict from unbounded growth.
+        if len(self._sessions) < settings.MAX_SESSIONS:
+            return
+        self.prune_expired_sessions()
+        if len(self._sessions) < settings.MAX_SESSIONS:
+            return
+        oldest_id = min(self._sessions, key=lambda sid: self._sessions[sid].last_accessed)
+        logger.info(f"[SessionManager] Evicting oldest session '{oldest_id}' (MAX_SESSIONS={settings.MAX_SESSIONS} reached)")
+        self._delete(oldest_id)
 
     def get_session(self, session_id: str) -> Optional[Session]:
         sess = self._sessions.get(session_id)
@@ -155,7 +173,10 @@ class SessionManager:
         session_ids = set(self._sessions.keys())
         if self.redis_client:
             try:
-                for key in self.redis_client.keys(f"{REDIS_KEY_PREFIX}*"):
+                # SCAN, not KEYS: KEYS blocks the single-threaded Redis
+                # server for the whole keyspace scan, which is fine on a
+                # dev box but a real problem on a shared/production Redis.
+                for key in self.redis_client.scan_iter(match=f"{REDIS_KEY_PREFIX}*", count=200):
                     session_ids.add(key[len(REDIS_KEY_PREFIX):])
             except Exception as e:
                 logger.debug(f"[SessionManager] Redis list error: {e}")

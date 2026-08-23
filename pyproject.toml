@@ -1,0 +1,9 @@
+[tool.ruff]
+line-length = 200
+
+[tool.ruff.lint]
+# Deliberately minimal: syntax errors + pyflakes (undefined names, unused
+# imports/variables, etc). The codebase doesn't follow a strict line-length
+# or import-order convention, so this stays a real-bug gate rather than a
+# style gate that would need a large unrelated reformatting pass to adopt.
+select = ["E9", "F"]

@@ -2,6 +2,8 @@ import os
 import time
 import tempfile
 import unittest
+from unittest.mock import patch
+from app.config import settings
 from app.models.flaresolverr import CookieModel
 from app.solver.cache import CookieCache
 
@@ -97,6 +99,42 @@ class TestCookieCache(unittest.TestCase):
         names = {c.name: c.value for c in fetched}
         self.assertNotIn("expired_token", names)
         self.assertIn("valid_token", names)
+
+
+    def test_evicts_oldest_domain_when_over_capacity(self):
+        with patch.object(settings, "MAX_CACHE_DOMAINS", 2):
+            self.cache.set_cookies("https://a.com", [CookieModel(name="x", value="1", domain="a.com")])
+            time.sleep(0.01)
+            self.cache.set_cookies("https://b.com", [CookieModel(name="x", value="1", domain="b.com")])
+            time.sleep(0.01)
+            self.cache.set_cookies("https://c.com", [CookieModel(name="x", value="1", domain="c.com")])
+
+            self.assertEqual(len(self.cache._store), 2)
+            self.assertNotIn("a.com", self.cache._store)
+            self.assertIn("c.com", self.cache._store)
+
+    def test_evicts_oldest_cookies_when_domain_over_capacity(self):
+        with patch.object(settings, "MAX_COOKIES_PER_DOMAIN", 2):
+            for i in range(3):
+                self.cache.set_cookies("https://example.com", [CookieModel(name=f"c{i}", value="v", domain="example.com")])
+                time.sleep(0.01)
+
+            fetched = {c.name for c in self.cache.get_cookies("https://example.com")}
+            self.assertEqual(len(fetched), 2)
+            self.assertNotIn("c0", fetched)
+            self.assertIn("c2", fetched)
+
+    def test_cookie_identity_includes_path(self):
+        # Two same-name cookies on different paths must not overwrite
+        # each other in the local store.
+        self.cache.set_cookies("https://example.com", [
+            CookieModel(name="token", value="root", domain="example.com", path="/"),
+        ])
+        self.cache.set_cookies("https://example.com", [
+            CookieModel(name="token", value="admin", domain="example.com", path="/admin"),
+        ])
+        stored = self.cache._store["example.com"]
+        self.assertEqual(len(stored), 2)
 
 
 if __name__ == "__main__":

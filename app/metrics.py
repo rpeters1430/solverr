@@ -1,9 +1,9 @@
 import os
 import psutil
-import time
 from app.solver.engine import metrics
 from app.solver.cache import cookie_cache
 from app.solver.sessions import session_manager
+from app.solver.browser import browser_pool
 from app.config import settings
 
 def generate_prometheus_metrics() -> str:
@@ -69,5 +69,66 @@ def generate_prometheus_metrics() -> str:
     for ctype, count in stats.get("challenges_solved", {}).items():
         lines.append(f'solverr_challenges_solved_total{{type="{ctype}"}} {count}')
 
+    lines += [
+        "",
+        "# HELP solverr_cookie_cache_lookups_total Cookie cache lookups by outcome, independent of which tier ultimately served the request",
+        "# TYPE solverr_cookie_cache_lookups_total counter",
+        f'solverr_cookie_cache_lookups_total{{outcome="hit"}} {stats["cookie_cache_lookup_hits"]}',
+        f'solverr_cookie_cache_lookups_total{{outcome="miss"}} {stats["cookie_cache_lookup_misses"]}',
+        "",
+        "# HELP solverr_timeouts_total Count of Tier 3 browser solves that exceeded their timeout budget",
+        "# TYPE solverr_timeouts_total counter",
+        f'solverr_timeouts_total {stats["timeouts_total"]}',
+        "",
+        "# HELP solverr_requests_inflight Currently in-flight deduplicated solve requests",
+        "# TYPE solverr_requests_inflight gauge",
+        f'solverr_requests_inflight {len(_inflight_snapshot())}',
+    ]
+
+    pool_stats = browser_pool.pool_stats()
+    lines += [
+        "",
+        "# HELP solverr_browser_pool_size Configured Camoufox warm-pool capacity",
+        "# TYPE solverr_browser_pool_size gauge",
+        f'solverr_browser_pool_size {pool_stats["pool_size"]}',
+        "",
+        "# HELP solverr_browser_pool_busy Warm Camoufox instances currently checked out",
+        "# TYPE solverr_browser_pool_busy gauge",
+        f'solverr_browser_pool_busy {pool_stats["busy"]}',
+        "",
+        "# HELP solverr_browser_pool_idle Warm Camoufox instances currently idle and available",
+        "# TYPE solverr_browser_pool_idle gauge",
+        f'solverr_browser_pool_idle {pool_stats["idle"]}',
+        "",
+        "# HELP solverr_browser_pool_recycles_total Pooled Camoufox instances recycled (use/age budget exhausted)",
+        "# TYPE solverr_browser_pool_recycles_total counter",
+        f'solverr_browser_pool_recycles_total {pool_stats["recycles_total"]}',
+        "",
+        "# HELP solverr_browser_crashes_total Tier 3 solve attempts that exhausted both the pooled and ephemeral Camoufox paths",
+        "# TYPE solverr_browser_crashes_total counter",
+        f'solverr_browser_crashes_total {pool_stats["crashes_total"]}',
+        "",
+        "# HELP solverr_browser_queue_wait_seconds Average time a request waited for a free browser worker slot",
+        "# TYPE solverr_browser_queue_wait_seconds gauge",
+        f'solverr_browser_queue_wait_seconds {pool_stats["avg_queue_wait_seconds"]}',
+    ]
+
+    lines += [
+        "",
+        "# HELP solverr_request_duration_seconds Request latency in seconds, partitioned by execution tier",
+        "# TYPE solverr_request_duration_seconds histogram",
+    ]
+    for tier_name, hist in metrics.duration_histograms.items():
+        for bucket in hist.buckets:
+            lines.append(f'solverr_request_duration_seconds_bucket{{tier="{tier_name}",le="{bucket}"}} {hist.bucket_counts[bucket]}')
+        lines.append(f'solverr_request_duration_seconds_bucket{{tier="{tier_name}",le="+Inf"}} {hist.count}')
+        lines.append(f'solverr_request_duration_seconds_sum{{tier="{tier_name}"}} {round(hist.sum, 4)}')
+        lines.append(f'solverr_request_duration_seconds_count{{tier="{tier_name}"}} {hist.count}')
+
     lines.append("")
     return "\n".join(lines)
+
+
+def _inflight_snapshot():
+    from app.solver.engine import solver_engine
+    return solver_engine._inflight

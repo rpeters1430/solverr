@@ -33,6 +33,17 @@ jobs:
         run: |
           python -m unittest discover -s tests
 
+      - name: Lint (ruff)
+        run: |
+          pip install ruff
+          ruff check app/
+
+      - name: Security scan (bandit, non-blocking)
+        continue-on-error: true
+        run: |
+          pip install bandit
+          bandit -r app -ll
+
   build-and-push:
     name: Build & Push Docker Image (amd64 / UGREEN NASync)
     needs: test
@@ -66,6 +77,37 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,format=short
+
+      - name: Build image locally for smoke test
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: solverr:ci-smoke-test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the built image
+        run: |
+          docker run -d --name solverr-smoke -p 8191:8191 solverr:ci-smoke-test
+          echo "Waiting for /health to report ok..."
+          for i in $(seq 1 30); do
+            if curl -fs http://localhost:8191/health | tee /tmp/health.json | grep -q '"status":"ok"'; then
+              echo "Health check passed:"; cat /tmp/health.json
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Health check did not pass in time. Container logs:"
+          docker logs solverr-smoke
+          exit 1
+
+      - name: Tear down smoke test container
+        if: always()
+        run: docker rm -f solverr-smoke || true
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v7

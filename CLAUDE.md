@@ -41,13 +41,15 @@ docker compose up -d
 `docker-compose.yml` sets `image: ghcr.io/rpeters1430/solverr:latest` alongside `build:`, so `docker compose up` without `--build` uses the local image if present or pulls `latest` from GHCR otherwise.
 
 Quick manual checks:
-- `GET /health` — liveness check & worker readiness
-- `GET /metrics` — Prometheus exposition format metrics
+- `GET /health` — combined liveness+readiness check (503 only when the Camoufox import itself failed)
+- `GET /health/live` — liveness only, never checks Camoufox/pool state (safe for an orchestrator's restart policy)
+- `GET /health/ready` — readiness (same check as `/health`; split out so a load balancer can pull a degraded-but-alive instance without restarting it)
+- `GET /metrics` — Prometheus exposition format metrics (open by default; gate behind `X-Api-Key` with `METRICS_REQUIRE_AUTH=true`)
 - `GET /` — dashboard UI (`app/templates/index.html` + `app/static/`)
 - `POST /v1` or `POST /v2` — FlareSolverr-compatible API
 - `POST /scrape` — native advanced scraping API with tier overrides, selector waiting, extraction rules, and screenshots
 - `GET/POST /proxy` — transparent HTTP proxy mode
-- `GET/POST /api/*` — dashboard endpoints: `/api/stats`, `/api/cookies`, `/api/cookies/clear`, `/api/sessions`, `/api/test`
+- `GET/POST /api/*` — dashboard endpoints: `/api/stats`, `/api/cookies`, `/api/cookies/clear`, `/api/sessions`, `/api/test`, `/api/diagnostics/browser` (launches a real ephemeral Camoufox end-to-end - context, page, JS execution - unlike `/health` which only checks the import)
 
 ## Architecture: 4.5-Tier Adaptive Solving Pipeline
 
@@ -59,7 +61,11 @@ Camoufox is the only browser engine — there is no Chromium fallback (removed i
 3.5. **Tier 3.5 — Paid Captcha-Solver Escalation** (`app/solver/captcha_solver.py`): Optional, off unless `CAPTCHA_SOLVER_API_KEY` is set. Only triggered after Tier 3's free click-based loop has exhausted its full timeout without clearing — extracts the widget's `data-sitekey`/`data-callback`, submits to a 2Captcha-protocol-compatible service, and injects the solved token back into the page. Covers interactive image challenges (hCaptcha puzzle grids, reCAPTCHA image selection) a checkbox click alone can't solve.
 4. **Tier 4 — Fallback Proxy Escalation** (`app/solver/engine.py`): Escalates to residential or fallback proxies (`FALLBACK_PROXY_URL`) if direct solves fail — this re-enters `BrowserPool.solve()` with the fallback proxy set, so it's itself a fresh-Camoufox-with-alternate-proxy attempt, not a distinct engine.
 
-In-flight request deduplication is handled in `app/solver/engine.py` via `HybridSolverEngine._inflight` futures. Sessions (`app/solver/sessions.py`) follow the same dual-mode pattern as the cookie cache — in-memory by default, Redis-backed (surviving restarts, shared across replicas) when `REDIS_URL` is set. See the README's "Horizontal Scaling" section for running multiple replicas behind a shared Redis.
+In-flight request deduplication is handled in `app/solver/engine.py` via `HybridSolverEngine._inflight` futures, keyed by a SHA-256 fingerprint of every field that can change the outcome (method, url, postData, cookies, headers, proxy, session, userAgent, forceBrowser, fastTlsOnly, wait_selector, wait_delay_ms) — not just `method:url:forceBrowser`, so two concurrent requests that only differ in body/session/proxy never get coalesced into one answer. Sessions (`app/solver/sessions.py`) follow the same dual-mode pattern as the cookie cache — in-memory by default, Redis-backed (surviving restarts, shared across replicas) when `REDIS_URL` is set. See the README's "Horizontal Scaling" section for running multiple replicas behind a shared Redis.
+
+Both the cookie cache (`app/solver/cache.py`) and sessions (`app/solver/sessions.py`) key cookie identity by `domain+path+name`, not name alone, so two same-name cookies on different paths of the same domain don't overwrite each other. The local (non-Redis) cookie cache and session store are bounded — `MAX_CACHE_DOMAINS`/`MAX_COOKIES_PER_DOMAIN`/`MAX_SESSIONS` evict the oldest entry once the cap is hit; Redis-backed storage relies on its own TTL expiry instead. Redis reads use `SCAN` (`scan_iter`), never `KEYS`, since `KEYS` blocks the single-threaded Redis server for the whole keyspace walk.
+
+`SolutionModel.tier` (one of `tier1_fast_tls`/`tier2_cache`/`tier3_stealth_browser`/`tier4_fallback_proxy`) is set by `engine.py` at each of its four return points and is the source of truth for which tier actually handled a request — `/scrape`'s `tier_used` field reads it directly rather than guessing from duration/cookie presence.
 
 **v1.5 removed Chromium entirely** (previously a Tier 3/4 fallback engine). Chromium's crashpad crash-reporter handler crashes outright when the process runs as a non-root `PUID`/`PGID` user — reproduced even under `--privileged` with every capability added, so it wasn't fixable via permissions. Camoufox has no such issue. `app/solver/stealth.py` (a Chrome-specific `navigator.webdriver`/`window.chrome` JS spoofing script only ever injected into the old Chromium context) was deleted along with it — repurposing it for a Firefox/Camoufox context would be counterproductive, since a Firefox page reporting a `window.chrome` object is itself a tell.
 
@@ -69,8 +75,9 @@ In-flight request deduplication is handled in `app/solver/engine.py` via `Hybrid
 - `app/api/flaresolverr.py` — `/v1`, `/v2`, `/scrape`, `/proxy` route handlers.
 - `app/api/dashboard.py` — `/api/*` dashboard endpoints (stats, cookies, sessions, test).
 - `app/models/flaresolverr.py` — Pydantic request/response models shared by the API routes.
-- `app/config.py` — single `Settings` object (`app.config.settings`) reading all env vars, including `MAX_BROWSER_WORKERS=auto` CPU/RAM-based auto-tuning; treat it as the source of truth for available configuration rather than the README's env var tables.
-- `app/metrics.py` / `app/logging_config.py` — Prometheus exposition formatting and structured logging setup (request-id correlation via `set_request_id`).
+- `app/config.py` — single `Settings` object (`app.config.settings`) reading all env vars, including `MAX_BROWSER_WORKERS=auto` CPU/RAM-based auto-tuning; treat it as the source of truth for available configuration rather than the README's env var tables. `TOTAL_CPU_CORES`/`TOTAL_RAM_GB` read the container's cgroup v2 (`/sys/fs/cgroup/cpu.max`, `memory.max`) or v1 limits when present, falling back to host-level `os.cpu_count()`/`psutil` otherwise — `psutil.virtual_memory()` alone reads `/proc/meminfo`, which isn't namespaced and overstates what a `docker run --memory=`-limited container can actually use.
+- `app/metrics.py` / `app/logging_config.py` — Prometheus exposition formatting (counters, gauges, and a per-tier request-duration histogram sourced from `app.solver.engine.metrics` and `app.solver.browser.browser_pool.pool_stats()`) and structured logging setup (request-id correlation via `set_request_id`).
+- `app/security.py` — `check_target_url()`, called at the top of `HybridSolverEngine.process_request` (so it covers `/v1`, `/v2`, `/scrape`, and `/proxy` uniformly). Blocks loopback/RFC1918/link-local/cloud-metadata targets by default (`ALLOW_PRIVATE_NETWORKS=false`), with `ALLOWED_HOSTS`/`DENIED_HOSTS` overrides. Only the initial request target is checked — it does not re-validate redirects, since that would require hooking into `curl_cffi` (fast_tls.py), Camoufox navigation (browser.py), and the Tier 4 proxy path separately.
 
 Optional `X-Api-Key` auth (`API_KEY` env var) is enforced in `app/main.py`'s middleware for every route except `/health`, `/metrics`, and `/static/*`.
 
@@ -82,6 +89,8 @@ Optional `X-Api-Key` auth (`API_KEY` env var) is enforced in `app/main.py`'s mid
 2. **`runtime` stage** — copies the venv and pre-fetched Camoufox browser from `deps`, installs `tini`, `curl`, `ca-certificates`, `gosu`, and a curated list of the specific X11/GTK/NSS shared libs headless Camoufox/Firefox actually needs (not `playwright install-deps firefox`, which pulls in a much larger transitive closure — Xvfb, X11 utilities, extra fonts — built to support any Playwright browser), then copies in `app/` and `docker-entrypoint.sh`.
 
 Container startup: `tini` is PID 1 (`ENTRYPOINT`), invoking `docker-entrypoint.sh`, which then `exec`s `python -m app.main` (the `CMD`). The container runs as **root by default** — set `PUID`/`PGID` together (both required, both must be numeric) to have the entrypoint `chown` `/app/data` and `/app/.cache` to that UID/GID and re-exec the process under it via `gosu`. Setting only one of the pair fails the container at startup by design. The entrypoint also registers a matching `/etc/passwd`/`/etc/group` entry for an unrecognized PUID/PGID before dropping privileges, since `gosu` derives `$HOME` from the target UID's passwd entry (ignoring any exported `HOME`) — an unregistered UID would otherwise resolve to `HOME=/`, which is read-only for a non-root user and breaks Camoufox's config/cache directories.
+
+**Known issue, confirmed 2026-08-23 against a real build:** under `PUID`/`PGID` (non-root), a Camoufox launch can hang indefinitely instead of erroring — reproduced with `docker run -e PUID=1000 -e PGID=1000` alone, no extra hardening flags needed to trigger it. `BrowserPool.solve()`'s tiers are already `asyncio.wait_for`-wrapped so a hung launch there still times out and gets logged/retried rather than freezing the whole server, but `BrowserPool.self_test()` (used by `GET /api/diagnostics/browser`) originally had no such wrapper and could hang a request forever — now fixed with its own `asyncio.wait_for`. The underlying cause (why the Playwright↔Firefox IPC handshake stalls under a non-root UID specifically) wasn't root-caused — worth filing as a tracked issue before recommending PUID/PGID + Tier 3 browser solving together in production.
 
 `HEALTHCHECK` and the compose `healthcheck:` block both poll `curl -f http://localhost:8191/health`; `/health` in `app/main.py` reports `503` only when the Camoufox import itself failed (`CAMOUFOX_AVAILABLE` is False) — there's no other engine left to service Tier 3 in that case. An unused/lazy pool (nothing solved yet) is healthy.
 

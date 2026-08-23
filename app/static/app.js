@@ -1,3 +1,9 @@
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     // Tab Navigation
     const navItems = document.querySelectorAll('.nav-item');
@@ -63,6 +69,21 @@ document.addEventListener('DOMContentLoaded', () => {
             if (document.getElementById('val-tier4-hits')) {
                 document.getElementById('val-tier4-hits').textContent = data.tier4_fallback_proxy_hits || 0;
             }
+
+            // Browser Pool & Cache Health
+            const pool = data.browser_pool || {};
+            if (document.getElementById('val-pool-busy')) document.getElementById('val-pool-busy').textContent = pool.busy || 0;
+            if (document.getElementById('val-pool-size')) document.getElementById('val-pool-size').textContent = pool.pool_size || 0;
+            if (document.getElementById('val-pool-idle')) document.getElementById('val-pool-idle').textContent = pool.idle || 0;
+            if (document.getElementById('val-pool-recycles')) document.getElementById('val-pool-recycles').textContent = pool.recycles_total || 0;
+            if (document.getElementById('val-browser-crashes')) document.getElementById('val-browser-crashes').textContent = pool.crashes_total || 0;
+            if (document.getElementById('val-queue-wait')) document.getElementById('val-queue-wait').textContent = Math.round((pool.avg_queue_wait_seconds || 0) * 1000);
+            if (document.getElementById('val-cache-hit-ratio')) document.getElementById('val-cache-hit-ratio').textContent = (data.cache_hit_ratio_pct || 0) + '%';
+            if (document.getElementById('val-cache-lookups')) {
+                const lookups = (data.cookie_cache_lookup_hits || 0) + (data.cookie_cache_lookup_misses || 0);
+                document.getElementById('val-cache-lookups').textContent = lookups;
+            }
+            if (document.getElementById('val-timeouts')) document.getElementById('val-timeouts').textContent = data.timeouts_total || 0;
 
             const workerLabel = data.worker_auto_tuned 
                 ? `${data.max_workers || 4} Workers (Auto)` 
@@ -143,11 +164,11 @@ document.addEventListener('DOMContentLoaded', () => {
                             ? '<span style="color: var(--accent-purple); font-weight: 600;">[Tier 3 Browser]</span>'
                             : '<span style="color: var(--accent-amber); font-weight: 600;">[Tier 4 Proxy]</span>';
 
-                        const challengeStr = d.challenge && d.challenge !== 'none' ? ` | Challenge: <b>${d.challenge}</b>` : '';
-                        entry.innerHTML = `<span style="color: var(--text-muted);">${timeStr}</span> ${tierBadge} -> <code>${d.url}</code> <span style="color: var(--accent-emerald);">HTTP ${d.status}</span> (${d.duration_ms}ms, ${d.cookies_count} cookies)${challengeStr}`;
+                        const challengeStr = d.challenge && d.challenge !== 'none' ? ` | Challenge: <b>${escapeHtml(d.challenge)}</b>` : '';
+                        entry.innerHTML = `<span style="color: var(--text-muted);">${timeStr}</span> ${tierBadge} -> <code>${escapeHtml(d.url)}</code> <span style="color: var(--accent-emerald);">HTTP ${d.status}</span> (${d.duration_ms}ms, ${d.cookies_count} cookies)${challengeStr}`;
                     } else if (parsed.type === 'solve_error') {
                         const d = parsed.data;
-                        entry.innerHTML = `<span style="color: var(--text-muted);">${timeStr}</span> <span style="color: var(--accent-rose); font-weight: 600;">[ERROR]</span> -> <code>${d.url}</code>: ${d.error}`;
+                        entry.innerHTML = `<span style="color: var(--text-muted);">${timeStr}</span> <span style="color: var(--accent-rose); font-weight: 600;">[ERROR]</span> -> <code>${escapeHtml(d.url)}</code>: ${escapeHtml(d.error)}`;
                     }
 
                     if (feed.firstElementChild && feed.firstElementChild.textContent.includes('Waiting for solve')) {
@@ -232,10 +253,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 data.cookies.forEach(c => {
                     const tr = document.createElement('tr');
                     tr.innerHTML = `
-                        <td><code>${c.name}</code></td>
-                        <td><code style="word-break: break-all;">${c.value}</code></td>
-                        <td>${c.domain || '-'}</td>
-                        <td>${c.path || '/'}</td>
+                        <td><code>${escapeHtml(c.name)}</code></td>
+                        <td><code style="word-break: break-all;">${escapeHtml(c.value)}</code></td>
+                        <td>${escapeHtml(c.domain || '-')}</td>
+                        <td>${escapeHtml(c.path || '/')}</td>
                     `;
                     tbody.appendChild(tr);
                 });
@@ -304,14 +325,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 
                 let cookiesHtml = cookieList.map(c => `
                     <tr>
-                        <td><code>${c.name}</code></td>
-                        <td><code style="word-break: break-all;">${c.value}</code></td>
-                        <td>${c.age_seconds}s ago</td>
+                        <td><code>${escapeHtml(c.name)}</code></td>
+                        <td><code style="word-break: break-all;">${escapeHtml(c.value)}</code></td>
+                        <td>${escapeHtml(c.age_seconds)}s ago</td>
                     </tr>
                 `).join('');
 
                 card.innerHTML = `
-                    <h4 style="margin-bottom: 12px; color: var(--accent-cyan);">🌐 ${domain}</h4>
+                    <h4 style="margin-bottom: 12px; color: var(--accent-cyan);">🌐 ${escapeHtml(domain)}</h4>
                     <table class="data-table">
                         <thead>
                             <tr><th>Name</th><th>Value</th><th>Age</th></tr>

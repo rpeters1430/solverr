@@ -1,5 +1,7 @@
 import time
 import unittest
+from unittest.mock import patch
+from app.config import settings
 from app.models.flaresolverr import CookieModel
 from app.solver.sessions import SessionManager
 
@@ -44,6 +46,19 @@ class TestSessionManager(unittest.TestCase):
         sid = self.mgr.create_session()
         self.assertTrue(self.mgr.destroy_session(sid))
         self.assertFalse(self.mgr.destroy_session(sid))
+
+    def test_evicts_oldest_session_when_over_capacity(self):
+        with patch.object(settings, "MAX_SESSIONS", 2):
+            sid1 = self.mgr.create_session()
+            self.mgr._sessions[sid1].last_accessed = time.time() - 10
+            sid2 = self.mgr.create_session()
+            self.mgr._sessions[sid2].last_accessed = time.time() - 5
+            sid3 = self.mgr.create_session()
+
+            active = set(self.mgr.list_sessions())
+            self.assertEqual(len(active), 2)
+            self.assertNotIn(sid1, active)
+            self.assertIn(sid3, active)
 
 if __name__ == "__main__":
     unittest.main()

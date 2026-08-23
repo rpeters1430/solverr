@@ -18,7 +18,7 @@
                 <div class="brand-icon">⚡</div>
                 <div class="brand-text">
                     <h1>SOLVERR</h1>
-                    <span class="version-tag" id="val-version-tag">v1.4.0-ultra</span>
+                    <span class="version-tag" id="val-version-tag">v1.6.0-ultra</span>
                 </div>
             </div>
 
@@ -137,6 +137,36 @@
                             <div style="font-size: 0.8rem; color: var(--accent-amber); font-weight: 600;">TIER 4 (FALLBACK PROXY)</div>
                             <div style="font-size: 1.5rem; font-weight: 700; margin: 4px 0;" id="val-tier4-hits">0</div>
                             <div style="font-size: 0.75rem; color: var(--text-muted);">Residential / Fallback proxy routing</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Browser Pool & Cache Health -->
+                <div class="panel" style="margin-bottom: 24px;">
+                    <div class="panel-header">
+                        <h3>Browser Pool &amp; Cache Health</h3>
+                        <p>Warm Camoufox pool utilization and cookie cache effectiveness.</p>
+                    </div>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px;">
+                        <div style="background: rgba(168, 85, 247, 0.08); border: 1px solid rgba(168, 85, 247, 0.2); border-radius: 8px; padding: 14px;">
+                            <div style="font-size: 0.8rem; color: var(--accent-purple); font-weight: 600;">POOL UTILIZATION</div>
+                            <div style="font-size: 1.5rem; font-weight: 700; margin: 4px 0;"><span id="val-pool-busy">0</span>/<span id="val-pool-size">0</span></div>
+                            <div style="font-size: 0.75rem; color: var(--text-muted);"><span id="val-pool-idle">0</span> idle warm instance(s)</div>
+                        </div>
+                        <div style="background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.2); border-radius: 8px; padding: 14px;">
+                            <div style="font-size: 0.8rem; color: var(--accent-emerald); font-weight: 600;">COOKIE CACHE HIT RATIO</div>
+                            <div style="font-size: 1.5rem; font-weight: 700; margin: 4px 0;" id="val-cache-hit-ratio">0%</div>
+                            <div style="font-size: 0.75rem; color: var(--text-muted);"><span id="val-cache-lookups">0</span> lookup(s)</div>
+                        </div>
+                        <div style="background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.2); border-radius: 8px; padding: 14px;">
+                            <div style="font-size: 0.8rem; color: var(--accent-amber); font-weight: 600;">QUEUE WAIT (AVG)</div>
+                            <div style="font-size: 1.5rem; font-weight: 700; margin: 4px 0;"><span id="val-queue-wait">0</span><span class="unit">ms</span></div>
+                            <div style="font-size: 0.75rem; color: var(--text-muted);"><span id="val-pool-recycles">0</span> recycle(s)</div>
+                        </div>
+                        <div style="background: rgba(244, 63, 94, 0.08); border: 1px solid rgba(244, 63, 94, 0.2); border-radius: 8px; padding: 14px;">
+                            <div style="font-size: 0.8rem; color: var(--accent-rose); font-weight: 600;">BROWSER CRASHES</div>
+                            <div style="font-size: 1.5rem; font-weight: 700; margin: 4px 0;" id="val-browser-crashes">0</div>
+                            <div style="font-size: 0.75rem; color: var(--text-muted);"><span id="val-timeouts">0</span> timeout(s)</div>
                         </div>
                     </div>
                 </div>

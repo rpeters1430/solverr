@@ -42,6 +42,12 @@ class CookieCache:
             self.redis_client = None
             self._load_from_disk()
 
+    def _cookie_key(self, cookie: CookieModel) -> str:
+        # Identity is domain + path + name, not just name - two cookies with
+        # the same name on different paths of the same domain are distinct
+        # and must not overwrite each other.
+        return f"{cookie.name}|{cookie.path or '/'}"
+
     def _normalize_domain(self, domain_or_url: str) -> str:
         if "://" in domain_or_url:
             parsed = urlparse(domain_or_url)
@@ -50,6 +56,13 @@ class CookieCache:
             domain = domain_or_url.split(":")[0]
         return domain.lstrip(".").lower()
 
+    def _scan_keys(self, pattern: str) -> List[str]:
+        # SCAN instead of KEYS: KEYS is O(N) over the *entire* keyspace and
+        # blocks the single-threaded Redis server for its whole duration -
+        # fine on a dev box, a real problem on a shared/production Redis
+        # with other tenants. SCAN walks in bounded increments instead.
+        return list(self.redis_client.scan_iter(match=pattern, count=200))
+
     def get_cookies(self, url_or_domain: str) -> List[CookieModel]:
         target_domain = self._normalize_domain(url_or_domain)
         result: List[CookieModel] = []
@@ -57,12 +70,12 @@ class CookieCache:
 
         if self.redis_client:
             try:
-                keys = self.redis_client.keys(f"solverr:cookie:{target_domain}:*")
+                keys = self._scan_keys(f"solverr:cookie:{target_domain}:*")
                 # Also check wildcard parent domains
                 parts = target_domain.split(".")
                 if len(parts) > 2:
                     parent_domain = ".".join(parts[-2:])
-                    keys += self.redis_client.keys(f"solverr:cookie:{parent_domain}:*")
+                    keys += self._scan_keys(f"solverr:cookie:{parent_domain}:*")
 
                 for key in set(keys):
                     data_raw = self.redis_client.get(key)
@@ -108,7 +121,7 @@ class CookieCache:
                 for c in cookies:
                     c_dict = c.model_dump()
                     c_domain = c.domain.lstrip(".") if c.domain else domain
-                    key = f"solverr:cookie:{c_domain}:{c.name}"
+                    key = f"solverr:cookie:{c_domain}:{self._cookie_key(c)}"
                     val = json.dumps({"cookie": c_dict, "timestamp": now})
                     self.redis_client.set(key, val, ex=settings.COOKIE_CACHE_TTL)
                 logger.debug(f"[CookieCache] Saved {len(cookies)} cookie(s) to Redis for domain '{domain}'")
@@ -116,25 +129,46 @@ class CookieCache:
             except Exception as e:
                 logger.debug(f"[CookieCache] Redis write error: {e}")
 
-        if domain not in self._store:
-            self._store[domain] = {}
-        
         for c in cookies:
             c_dict = c.model_dump()
             c_domain = c.domain.lstrip(".") if c.domain else domain
             if c_domain not in self._store:
+                self._evict_domain_if_at_capacity()
                 self._store[c_domain] = {}
-            self._store[c_domain][c.name] = {
+            self._store[c_domain][self._cookie_key(c)] = {
                 "cookie": c_dict,
                 "timestamp": now
             }
+            self._evict_cookies_if_at_capacity(c_domain)
         logger.debug(f"[CookieCache] Saved {len(cookies)} cookie(s) to local cache for domain '{domain}'")
         self._schedule_save()
+
+    def _evict_domain_if_at_capacity(self):
+        """LRU-ish eviction: drop the domain whose freshest cookie is oldest,
+        so a caller hitting many distinct domains can't grow the in-memory/
+        disk cache unboundedly."""
+        if len(self._store) < settings.MAX_CACHE_DOMAINS:
+            return
+        oldest_domain = min(
+            self._store,
+            key=lambda d: max((v.get("timestamp", 0) for v in self._store[d].values()), default=0),
+        )
+        del self._store[oldest_domain]
+        logger.info(f"[CookieCache] Evicted domain '{oldest_domain}' (MAX_CACHE_DOMAINS={settings.MAX_CACHE_DOMAINS} reached)")
+
+    def _evict_cookies_if_at_capacity(self, domain: str):
+        cookies_for_domain = self._store.get(domain, {})
+        overflow = len(cookies_for_domain) - settings.MAX_COOKIES_PER_DOMAIN
+        if overflow <= 0:
+            return
+        oldest_keys = sorted(cookies_for_domain, key=lambda k: cookies_for_domain[k].get("timestamp", 0))[:overflow]
+        for key in oldest_keys:
+            del cookies_for_domain[key]
 
     def clear(self):
         if self.redis_client:
             try:
-                keys = self.redis_client.keys("solverr:cookie:*")
+                keys = self._scan_keys("solverr:cookie:*")
                 if keys:
                     self.redis_client.delete(*keys)
                 logger.info("[CookieCache] Cleared all cached cookies from Redis")
@@ -151,7 +185,7 @@ class CookieCache:
 
         if self.redis_client:
             try:
-                keys = self.redis_client.keys("solverr:cookie:*")
+                keys = self._scan_keys("solverr:cookie:*")
                 for key in keys:
                     parts = key.split(":")
                     if len(parts) >= 4:
@@ -229,9 +263,15 @@ class CookieCache:
     async def _debounced_flush(self, loop: asyncio.AbstractEventLoop):
         # Throttle: wait once, then flush whatever accumulated in _store,
         # regardless of how many set_cookies() calls arrived during the wait.
-        await asyncio.sleep(DEBOUNCE_SECONDS)
-        self._save_pending = False
-        await loop.run_in_executor(None, self._save_to_disk)
+        while True:
+            await asyncio.sleep(DEBOUNCE_SECONDS)
+            self._save_pending = False
+            await loop.run_in_executor(None, self._save_to_disk)
+            if not self._save_pending:
+                break
+            # A set_cookies() call landed while the write was in flight
+            # (a separate thread via run_in_executor) - loop back and flush
+            # again instead of silently dropping that update.
 
     def _load_from_disk(self):
         if os.path.exists(self.cache_file):
