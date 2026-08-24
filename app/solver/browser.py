@@ -128,7 +128,19 @@ class CamoufoxPool:
             config={'forceScopeAccess': True},
             i_know_what_im_doing=True
         )
-        browser = await cm.__aenter__()
+        try:
+            browser = await asyncio.wait_for(cm.__aenter__(), timeout=CAMOUFOX_LAUNCH_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as e:
+            # __aenter__ never completed, so __aexit__ won't be called by an
+            # `async with` anywhere - close it ourselves to avoid leaking a
+            # half-started Firefox process.
+            try:
+                await cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+            raise TimeoutError(
+                f"Camoufox launch did not complete within {CAMOUFOX_LAUNCH_TIMEOUT_SECONDS}s"
+            ) from e
         logger.info(f"[CamoufoxPool] Warmed stealth browser instance ({self._created + 1}/{self.size})")
         return _PooledCamoufox(cm=cm, browser=browser, created_at=time.time())
 
@@ -266,6 +278,24 @@ async def inject_captcha_token(page: Page, response_field_names: List[str], toke
 # it (and, on a small worker count, a meaningful fraction of total capacity)
 # indefinitely.
 SOLVE_WALLCLOCK_GRACE_SECONDS = 15
+
+# Bounds a single Camoufox process launch (cm.__aenter__()) independently of
+# the outer per-solve wall-clock timeout. Without this, a launch that hangs
+# (confirmed reproducible under PUID/PGID non-root execution - see CLAUDE.md)
+# holds CamoufoxPool._lock for the launch's full duration, serializing every
+# other acquire() behind it since the lock is only released when the caller's
+# outer asyncio.wait_for eventually cancels this task.
+CAMOUFOX_LAUNCH_TIMEOUT_SECONDS = 30
+
+
+def _describe_solve_error(e: BaseException, tier_timeout: float, tier_label: str) -> BaseException:
+    """asyncio.wait_for raises a bare TimeoutError/CancelledError with no
+    message (str(e) == "") - left as-is, that surfaces to API callers as an
+    empty "Error solving request: " with no actual information. Wrap it with
+    a message identifying which tier and timeout actually fired."""
+    if isinstance(e, (asyncio.TimeoutError, TimeoutError)) and not str(e):
+        return TimeoutError(f"{tier_label} timed out after {tier_timeout:.0f}s")
+    return e
 
 class BrowserPool:
     def __init__(self):
@@ -415,8 +445,8 @@ class BrowserPool:
                     last_error = RuntimeError(f"Pooled Camoufox solve incomplete (status {sol.status if sol else 'N/A'})")
                     logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve incomplete (Status {sol.status if sol else 'N/A'}). Retrying with a fresh ephemeral Camoufox instance...")
                 except Exception as e:
-                    last_error = e
-                    logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve notice/fallback: {e}. Retrying with a fresh ephemeral Camoufox instance...")
+                    last_error = _describe_solve_error(e, tier_timeout, "Pooled Camoufox solve")
+                    logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve notice/fallback: {last_error}. Retrying with a fresh ephemeral Camoufox instance...")
 
             # Fresh-fingerprint escalation: a brand-new Camoufox process with
             # its own randomly generated fingerprint (and its own proxy
@@ -439,8 +469,8 @@ class BrowserPool:
                 last_error = RuntimeError(f"Ephemeral Camoufox solve incomplete (status {sol.status if sol else 'N/A'})")
                 logger.warning(f"[CamoufoxEngine] Ephemeral Camoufox solve incomplete (Status {sol.status if sol else 'N/A'}).")
             except Exception as e:
-                last_error = e
-                logger.warning(f"[CamoufoxEngine] Ephemeral Camoufox solve notice/fallback: {e}.")
+                last_error = _describe_solve_error(e, tier_timeout, "Ephemeral Camoufox solve")
+                logger.warning(f"[CamoufoxEngine] Ephemeral Camoufox solve notice/fallback: {last_error}.")
 
             self._crashes_total += 1
             raise last_error or RuntimeError(f"Camoufox solve failed for {url}")
