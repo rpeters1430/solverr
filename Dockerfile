@@ -24,15 +24,20 @@ WORKDIR /app
 # site-packages (before the venv PATH switch below) so the uv binary itself
 # never ends up copied into the venv that ships in the runtime image.
 # (The pip cache mount here previously did nothing: PIP_NO_CACHE_DIR=1 plus
-# --no-cache-dir told pip never to populate its cache dir in the first place.)
-RUN --mount=type=cache,target=/root/.cache/pip \
+# --no-cache-dir told pip never to populate its cache dir in the first place.
+# The mount targets /app/.cache/pip, not the usual /root/.cache/pip, because
+# XDG_CACHE_HOME=/app/.cache is set above and both pip and uv follow the XDG
+# base-directory spec on Linux - pointing the mount at /root/.cache would
+# just recreate the same class of dead-cache bug against a path neither
+# tool ever writes to.)
+RUN --mount=type=cache,target=/app/.cache/pip \
     pip install uv==0.12.5
 
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 COPY requirements.txt .
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/app/.cache/uv \
     uv pip install --python /opt/venv/bin/python -r requirements.txt
 
 # Fetch the Camoufox stealth Firefox browser binary, then trim it down:
