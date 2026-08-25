@@ -1,6 +1,6 @@
 fastapi==0.141.1
 uvicorn[standard]==0.52.4
-curl_cffi==0.16.1
+curl_cffi==0.16.2
 playwright>=1.60.0
 camoufox==0.5.5
 pydantic==2.13.4
