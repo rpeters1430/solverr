@@ -78,21 +78,33 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha,format=short
 
-      - name: Build image locally for smoke test
+      # Build exactly once, to a disposable staging tag, and both load it
+      # locally (for the smoke test / trivy scan below) and push it (so the
+      # later promotion step can retag it by digest without rebuilding).
+      # Building a second time for the real push - as this workflow used to
+      # do - gave no guarantee the pushed image matched what was validated:
+      # the floating python base tag and the `>=` pins in requirements.txt
+      # mean a second `docker buildx build` invocation can resolve different
+      # package/base versions than the first, even with layer caching.
+      - name: Build candidate image
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64
           load: true
-          push: false
-          tags: solverr:ci-smoke-test
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-staging-${{ github.sha }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
 
       - name: Smoke test the built image
         run: |
-          docker run -d --name solverr-smoke -p 8191:8191 solverr:ci-smoke-test
+          docker run -d --name solverr-smoke -p 8191:8191 "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-staging-${{ github.sha }}"
           echo "Waiting for /health to report ok..."
           for i in $(seq 1 30); do
             if curl -fs http://localhost:8191/health | tee /tmp/health.json | grep -q '"status":"ok"'; then
@@ -109,14 +121,24 @@ jobs:
         if: always()
         run: docker rm -f solverr-smoke || true
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v7
+      - name: Scan image for vulnerabilities (trivy)
+        uses: aquasecurity/trivy-action@0.24.0
         with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-staging-${{ github.sha }}
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
+          ignore-unfixed: true
+
+      # Everything above validated the exact digest built above. Promote
+      # that same digest to the real tags (latest/branch/semver/short-sha)
+      # via imagetools - a registry-side retag, not a rebuild - so what
+      # gets those tags is guaranteed byte-identical to what was scanned.
+      - name: Promote validated image to release tags
+        run: |
+          set -eu
+          digest="${{ steps.build.outputs.digest }}"
+          source="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${digest}"
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            docker buildx imagetools create -t "$tag" "$source"
+          done <<< "${{ steps.meta.outputs.tags }}"
