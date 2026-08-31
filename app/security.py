@@ -30,8 +30,12 @@ def _is_blocked_ip(ip_str: str) -> bool:
     )
 
 
-def check_target_url(url: str) -> None:
+def check_target_url(url: str, label: str = "Target") -> None:
     """Raise SSRFBlockedError if `url`'s host is disallowed by policy.
+
+    `label` only affects the error message (e.g. "Proxy" when validating a
+    caller-supplied proxy endpoint instead of the actual fetch target), so
+    callers get an accurate message about which field triggered the block.
 
     Only validates the initial request target - it does not follow
     redirects, so a target that redirects to an internal address only after
@@ -51,9 +55,9 @@ def check_target_url(url: str) -> None:
     if host_lower in settings.ALLOWED_HOSTS:
         return
     if host_lower in settings.DENIED_HOSTS:
-        raise SSRFBlockedError(f"Target host '{host}' is explicitly denied by DENIED_HOSTS")
+        raise SSRFBlockedError(f"{label} host '{host}' is explicitly denied by DENIED_HOSTS")
     if host_lower == "localhost" or host_lower in _METADATA_HOSTNAMES:
-        raise SSRFBlockedError(f"Target host '{host}' is not allowed (blocked hostname)")
+        raise SSRFBlockedError(f"{label} host '{host}' is not allowed (blocked hostname)")
 
     try:
         infos = socket.getaddrinfo(host, None)
@@ -66,7 +70,7 @@ def check_target_url(url: str) -> None:
         ip_str = info[4][0]
         if _is_blocked_ip(ip_str):
             raise SSRFBlockedError(
-                f"Target host '{host}' resolves to a private/internal address "
+                f"{label} host '{host}' resolves to a private/internal address "
                 f"({ip_str}) - set ALLOW_PRIVATE_NETWORKS=true or add it to "
                 f"ALLOWED_HOSTS to permit this"
             )

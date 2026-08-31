@@ -293,7 +293,12 @@ class CookieCache:
                 with open(tmp_file, "w", encoding="utf-8") as f:
                     json.dump(self._store, f, indent=2)
                 try:
-                    os.chmod(tmp_file, 0o666)
+                    # Group-writable (not world) so a PUID/PGID container
+                    # user sharing the bind mount's group with a host user
+                    # can still read/write it, without making a file full of
+                    # live cf_clearance/session cookies world-readable to
+                    # every other local user or co-mounted container.
+                    os.chmod(tmp_file, 0o660)
                 except Exception:
                     pass
                 os.replace(tmp_file, self.cache_file)

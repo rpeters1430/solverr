@@ -181,6 +181,14 @@ class HybridSolverEngine:
         method = req.cmd.split(".")[-1].upper() if "." in req.cmd else "GET"
 
         check_target_url(url)
+        # The proxy endpoint is just as capable of reaching internal/private
+        # network targets as `url` itself (it becomes the actual egress point
+        # for curl_cffi/Camoufox), so it must pass the same SSRF policy -
+        # otherwise a caller can point Solverr's egress at an internal
+        # service by setting `proxy` instead of `url`.
+        proxy_for_check = req.get_proxy_url()
+        if proxy_for_check:
+            check_target_url(proxy_for_check, label="Proxy")
 
         # Deduplication key for identical concurrent solves. Must cover every
         # field that can change the outcome - two requests that only differ
