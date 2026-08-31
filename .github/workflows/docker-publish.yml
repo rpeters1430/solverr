@@ -93,7 +93,6 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64
-          load: true
           push: true
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-staging-${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
