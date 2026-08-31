@@ -99,7 +99,11 @@ COPY app ./app
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN mkdir -p data /app/.cache \
     && chmod +x /usr/local/bin/docker-entrypoint.sh \
-    && chmod -R a+rX /app/.cache/camoufox
+    && chmod -R a+rX /app/.cache/camoufox \
+    && rm -rf /usr/local/lib/python*/site-packages/setuptools* \
+              /usr/local/lib/python*/site-packages/pip* \
+              /opt/venv/lib/python*/site-packages/setuptools* \
+              /opt/venv/lib/python*/site-packages/pip*
 
 EXPOSE 8191
 
