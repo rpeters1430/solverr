@@ -44,8 +44,16 @@ def check_target_url(url: str, label: str = "Target") -> None:
     if settings.ALLOW_PRIVATE_NETWORKS or not url:
         return
 
+    # urlparse() only recognizes a netloc (and therefore .hostname) when the
+    # string has a "//" authority marker - a scheme-less "host:port" (a
+    # legitimate way to write a proxy endpoint) parses with .hostname=None
+    # and would otherwise sail through the `if not host: return` below
+    # unchecked. Treat anything without "://" as an authority so it's
+    # actually inspected.
+    parse_target = url if "://" in url else f"//{url}"
+
     try:
-        host = urlparse(url).hostname
+        host = urlparse(parse_target).hostname
     except Exception:
         return
     if not host:
