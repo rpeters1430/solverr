@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 import zlib
@@ -38,6 +39,10 @@ class FastTLSEngine:
         self.rotate = getattr(settings, "FAST_TLS_ROTATE", True)
         self.profiles = FIREFOX_PROFILES if self.impersonate_target.startswith("firefox") else CHROME_PROFILES
         self._domain_scores: Dict[str, Dict[str, int]] = {}
+        self._sessions: Dict[str, AsyncSession] = {}
+        self._pool_enabled: bool = getattr(settings, "FAST_TLS_POOL_ENABLED", True)
+        self._pool_size: int = getattr(settings, "FAST_TLS_POOL_SIZE", 50)
+        self._lock = asyncio.Lock()
 
     def _normalize_domain(self, url: str) -> str:
         if "://" in url:
@@ -77,6 +82,46 @@ class FastTLSEngine:
         idx = zlib.crc32(domain.encode("utf-8")) % len(valid_profiles)
         return valid_profiles[idx]
 
+    async def _get_session(self, pool_key: str, impersonate_target: str) -> AsyncSession:
+        if not self._pool_enabled:
+            return AsyncSession(impersonate=impersonate_target)
+        async with self._lock:
+            if pool_key in self._sessions:
+                return self._sessions[pool_key]
+            # Evict oldest session if at capacity
+            if len(self._sessions) >= self._pool_size:
+                oldest_key = next(iter(self._sessions))
+                old_sess = self._sessions.pop(oldest_key)
+                try:
+                    await old_sess.close()
+                except Exception:
+                    pass
+            sess = AsyncSession(impersonate=impersonate_target)
+            self._sessions[pool_key] = sess
+            return sess
+
+    async def _evict_session(self, pool_key: str):
+        if not self._pool_enabled:
+            return
+        async with self._lock:
+            sess = self._sessions.pop(pool_key, None)
+            if sess:
+                try:
+                    await sess.close()
+                except Exception:
+                    pass
+
+    async def close(self):
+        """Close all pooled sessions on application shutdown."""
+        async with self._lock:
+            for key, sess in list(self._sessions.items()):
+                try:
+                    await sess.close()
+                except Exception:
+                    pass
+            self._sessions.clear()
+            logger.info("[FastTLS] Session pool closed.")
+
     async def request(
         self,
         url: str,
@@ -97,6 +142,9 @@ class FastTLSEngine:
             impersonate_target = self.impersonate_target
         else:
             impersonate_target, active_ua = self._profile_for_domain(url)
+
+        domain = self._normalize_domain(url)
+        pool_key = f"{domain}:{impersonate_target}:{proxy or ''}"
 
         cookie_dict = {}
         if cookies:
@@ -135,26 +183,28 @@ class FastTLSEngine:
         logger.info(f"[FastTLS] Executing async {method.upper()} -> {url} (impersonate='{impersonate_target}', timeout={timeout}s{proxy_desc})")
 
         try:
-            async with AsyncSession(impersonate=impersonate_target) as session:
-                if method.upper() == "POST":
-                    resp = await session.post(
-                        url,
-                        data=post_data,
-                        headers=req_headers,
-                        cookies=cookie_dict,
-                        proxies=proxies,
-                        timeout=timeout,
-                        allow_redirects=True
-                    )
-                else:
-                    resp = await session.get(
-                        url,
-                        headers=req_headers,
-                        cookies=cookie_dict,
-                        proxies=proxies,
-                        timeout=timeout,
-                        allow_redirects=True
-                    )
+            session = await self._get_session(pool_key, impersonate_target)
+            if method.upper() == "POST":
+                resp = await session.post(
+                    url,
+                    data=post_data,
+                    headers=req_headers,
+                    cookies=cookie_dict,
+                    proxies=proxies,
+                    timeout=timeout,
+                    allow_redirects=True
+                )
+            else:
+                resp = await session.get(
+                    url,
+                    headers=req_headers,
+                    cookies=cookie_dict,
+                    proxies=proxies,
+                    timeout=timeout,
+                    allow_redirects=True
+                )
+            if not self._pool_enabled:
+                await session.close()
 
             # Check if page returned a WAF challenge response
             is_cf_challenge = False
@@ -224,6 +274,7 @@ class FastTLSEngine:
             return is_cf_challenge, solution
 
         except Exception as e:
+            await self._evict_session(pool_key)
             self.record_outcome(url, impersonate_target, False)
             logger.warning(f"[FastTLS] Fast TLS request failed or timed out for {url}: {type(e).__name__} - {e}")
             return True, None

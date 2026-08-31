@@ -292,6 +292,10 @@ class CookieCache:
                 tmp_file = f"{self.cache_file}.tmp"
                 with open(tmp_file, "w", encoding="utf-8") as f:
                     json.dump(self._store, f, indent=2)
+                try:
+                    os.chmod(tmp_file, 0o666)
+                except Exception:
+                    pass
                 os.replace(tmp_file, self.cache_file)
             except Exception as e:
                 logger.warning(f"[CookieCache] Could not save cache to disk: {e}")

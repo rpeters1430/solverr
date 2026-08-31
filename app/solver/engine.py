@@ -134,6 +134,30 @@ class PerformanceMetrics:
 
 metrics = PerformanceMetrics()
 
+class RequestBudget:
+    """Tracks remaining timeout budget across multi-tier solve stages using a monotonic clock."""
+    def __init__(self, timeout_ms: int):
+        self.total_timeout_s = max(1.0, timeout_ms / 1000.0)
+        self.start_mono = time.monotonic()
+        self.deadline = self.start_mono + self.total_timeout_s
+
+    @property
+    def remaining_s(self) -> float:
+        return max(0.0, self.deadline - time.monotonic())
+
+    @property
+    def remaining_ms(self) -> int:
+        return int(self.remaining_s * 1000)
+
+    @property
+    def elapsed_ms(self) -> float:
+        return (time.monotonic() - self.start_mono) * 1000.0
+
+    @property
+    def is_expired(self) -> bool:
+        return time.monotonic() >= self.deadline
+
+
 def _cap_response_body(solution: SolutionModel) -> None:
     max_bytes = settings.MAX_RESPONSE_BODY_MB * 1024 * 1024
     if max_bytes <= 0 or not solution.response:
@@ -152,7 +176,7 @@ class HybridSolverEngine:
         self._inflight: Dict[str, asyncio.Future] = {}
 
     async def process_request(self, req: V1Request) -> SolutionModel:
-        start_time = time.time()
+        budget = RequestBudget(req.maxTimeout or settings.BROWSER_TIMEOUT_MS)
         url = req.url
         method = req.cmd.split(".")[-1].upper() if "." in req.cmd else "GET"
 
@@ -190,7 +214,7 @@ class HybridSolverEngine:
         self._inflight[inflight_key] = future
 
         try:
-            res = await self._do_process_request(req, start_time, url, method)
+            res = await self._do_process_request(req, budget, url, method)
             _cap_response_body(res)
             if not future.done():
                 future.set_result(res)
@@ -206,7 +230,7 @@ class HybridSolverEngine:
         finally:
             self._inflight.pop(inflight_key, None)
 
-    async def _do_process_request(self, req: V1Request, start_time: float, url: str, method: str) -> SolutionModel:
+    async def _do_process_request(self, req: V1Request, budget: RequestBudget, url: str, method: str) -> SolutionModel:
         proxy_url = req.get_proxy_url()
 
         # Combine input cookies with cached domain cookies
@@ -231,8 +255,8 @@ class HybridSolverEngine:
 
         # Level 1 & 2: Try Fast TLS (curl_cffi) first unless forceBrowser requested
         if settings.ENABLE_FAST_TLS and not req.forceBrowser:
-            tls_timeout = min(15, int((req.maxTimeout or 60000) / 1000))
-            logger.info(f"[HybridEngine] Level 1/2 Fast TLS: Attempting direct HTTP request (timeout={tls_timeout}s)...")
+            tls_timeout = max(1, min(10, int(budget.remaining_s)))
+            logger.info(f"[HybridEngine] Level 1/2 Fast TLS: Attempting direct HTTP request (timeout={tls_timeout}s, remaining_budget={budget.remaining_s:.1f}s)...")
             
             is_cf_challenge, solution = await fast_tls_engine.request(
                 url=url,
@@ -246,7 +270,7 @@ class HybridSolverEngine:
             )
 
             if not is_cf_challenge and solution and (solution.status < 400 or solution.status == 404):
-                elapsed_ms = (time.time() - start_time) * 1000
+                elapsed_ms = budget.elapsed_ms
                 tier_name = "tier2_cache" if had_cache else "tier1_fast_tls"
                 if had_cache:
                     metrics.record_cache(elapsed_ms)
@@ -267,7 +291,7 @@ class HybridSolverEngine:
                 return solution
 
             if req.fastTlsOnly:
-                elapsed_ms = (time.time() - start_time) * 1000
+                elapsed_ms = budget.elapsed_ms
                 if solution:
                     metrics.record_fast(elapsed_ms)
                     logger.info("[HybridEngine] fastTlsOnly=True requested. Returning Fast TLS solution without browser escalation.")
@@ -297,6 +321,10 @@ class HybridSolverEngine:
             logger.info(f"[HybridEngine] Skipping Level 1/2 Fast TLS ({reason}). Proceeding directly to Level 3 Stealth Browser...")
 
         # Level 3: Stealth Camoufox / Playwright Browser Solve
+        if budget.is_expired or budget.remaining_s < 1.0:
+            raise TimeoutError(f"Request timeout budget exhausted ({budget.elapsed_ms:.0f}ms elapsed)")
+
+        browser_timeout_ms = max(3000, budget.remaining_ms)
         try:
             solution = await browser_pool.solve(
                 url=url,
@@ -304,7 +332,7 @@ class HybridSolverEngine:
                 post_data=req.postData,
                 cookies=combined_cookies,
                 proxy={"url": proxy_url} if proxy_url else None,
-                timeout_ms=req.maxTimeout or settings.BROWSER_TIMEOUT_MS,
+                timeout_ms=browser_timeout_ms,
                 user_agent=req.userAgent,
                 headers=req.headers,
                 wait_selector=req.wait_selector,
@@ -312,7 +340,7 @@ class HybridSolverEngine:
                 capture_screenshot=bool(req.screenshot)
             )
             
-            elapsed_ms = (time.time() - start_time) * 1000
+            elapsed_ms = budget.elapsed_ms
             metrics.record_browser(elapsed_ms, solution.challengeType)
             logger.info(f"[HybridEngine] Level 3 Stealth Browser SUCCESS in {elapsed_ms:.1f}ms | Status: {solution.status} | Challenge: {solution.challengeType or 'none'}")
             solution.tier = "tier3_stealth_browser"
@@ -336,8 +364,9 @@ class HybridSolverEngine:
                 metrics.record_timeout()
             # Tier 4: Fallback Proxy Escalation if configured and direct attempt failed
             fallback_proxy = settings.FALLBACK_PROXY_URL
-            if fallback_proxy and not proxy_url:
-                logger.warning(f"[HybridEngine] Level 3 direct solve failed ({e}). Escalating to Tier 4 Fallback Proxy ({fallback_proxy})...")
+            if fallback_proxy and not proxy_url and not budget.is_expired and budget.remaining_s >= 2.0:
+                fallback_timeout_ms = max(3000, budget.remaining_ms)
+                logger.warning(f"[HybridEngine] Level 3 direct solve failed ({e}). Escalating to Tier 4 Fallback Proxy ({fallback_proxy}, remaining budget: {budget.remaining_s:.1f}s)...")
                 try:
                     solution = await browser_pool.solve(
                         url=url,
@@ -345,14 +374,14 @@ class HybridSolverEngine:
                         post_data=req.postData,
                         cookies=combined_cookies,
                         proxy={"url": fallback_proxy},
-                        timeout_ms=req.maxTimeout or settings.BROWSER_TIMEOUT_MS,
+                        timeout_ms=fallback_timeout_ms,
                         user_agent=req.userAgent,
                         headers=req.headers,
                         wait_selector=req.wait_selector,
                         wait_delay_ms=req.wait_delay_ms,
                         capture_screenshot=bool(req.screenshot)
                     )
-                    elapsed_ms = (time.time() - start_time) * 1000
+                    elapsed_ms = budget.elapsed_ms
                     metrics.record_fallback_proxy(elapsed_ms)
                     logger.info(f"[HybridEngine] Tier 4 Fallback Proxy SUCCESS in {elapsed_ms:.1f}ms | Status: {solution.status}")
                     solution.tier = "tier4_fallback_proxy"

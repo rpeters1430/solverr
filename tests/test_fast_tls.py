@@ -112,5 +112,57 @@ class TestFastTLSChallengeDetection(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(sol.cookies), 1)
 
 
+class TestFastTLSSessionPool(unittest.IsolatedAsyncioTestCase):
+    async def test_session_reused_across_requests_for_same_domain(self):
+        from unittest.mock import AsyncMock, patch, MagicMock
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = "<html><head><title>OK</title></head><body>Hello</body></html>"
+        mock_resp.headers = {}
+        mock_resp.cookies = {}
+        mock_resp.url = "https://example.com"
+
+        mock_session = AsyncMock()
+        mock_session.get = AsyncMock(return_value=mock_resp)
+        mock_session.close = AsyncMock()
+
+        engine = FastTLSEngine()
+        engine._pool_enabled = True
+
+        with patch("app.solver.fast_tls.AsyncSession", return_value=mock_session) as session_ctor:
+            await engine.request("https://example.com/page1")
+            await engine.request("https://example.com/page2")
+            # Session constructor should only be called once due to pooling
+            self.assertEqual(session_ctor.call_count, 1)
+            self.assertIn("example.com", list(engine._sessions.keys())[0])
+
+    async def test_session_evicted_on_failure(self):
+        from unittest.mock import AsyncMock, patch, MagicMock
+        mock_session = AsyncMock()
+        mock_session.get = AsyncMock(side_effect=RuntimeError("Connection reset"))
+        mock_session.close = AsyncMock()
+
+        engine = FastTLSEngine()
+        engine._pool_enabled = True
+
+        with patch("app.solver.fast_tls.AsyncSession", return_value=mock_session):
+            is_challenge, sol = await engine.request("https://fail.com")
+            self.assertTrue(is_challenge)
+            self.assertIsNone(sol)
+            self.assertEqual(len(engine._sessions), 0)
+
+    async def test_close_shuts_down_all_pooled_sessions(self):
+        from unittest.mock import AsyncMock
+        mock_session = AsyncMock()
+        mock_session.close = AsyncMock()
+
+        engine = FastTLSEngine()
+        engine._sessions["test.com:firefox:"] = mock_session
+
+        await engine.close()
+        mock_session.close.assert_awaited_once()
+        self.assertEqual(len(engine._sessions), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

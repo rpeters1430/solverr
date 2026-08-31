@@ -18,7 +18,7 @@
                 <div class="brand-icon">⚡</div>
                 <div class="brand-text">
                     <h1>SOLVERR</h1>
-                    <span class="version-tag" id="val-version-tag">v1.6.0-ultra</span>
+                    <span class="version-tag" id="val-version-tag">v1.7.0-ultra</span>
                 </div>
             </div>
 
@@ -37,7 +37,7 @@
                 </button>
                 <button class="nav-item" data-tab="setup">
                     <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
-                    <span>Synology NAS Guide</span>
+                    <span>NAS &amp; Docker Setup</span>
                 </button>
             </nav>
 
@@ -261,6 +261,13 @@
                         <p>Test any Cloudflare, Turnstile, or CAPTCHA-protected URL live and inspect response headers &amp; captured <code>cf_clearance</code> tokens.</p>
                     </div>
 
+                    <div class="presets-row" style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px;">
+                        <span style="font-size: 0.8rem; color: var(--text-muted); align-self: center; font-weight: 500;">Quick Presets:</span>
+                        <button type="button" class="btn btn-secondary btn-sm test-preset" data-url="https://nowsecure.nl" data-method="GET" style="font-size: 0.75rem; padding: 4px 10px;">Cloudflare Turnstile</button>
+                        <button type="button" class="btn btn-secondary btn-sm test-preset" data-url="https://check.ddos-guard.net/" data-method="GET" style="font-size: 0.75rem; padding: 4px 10px;">DDoS-GUARD</button>
+                        <button type="button" class="btn btn-secondary btn-sm test-preset" data-url="https://www.google.com/recaptcha/api2/demo" data-method="GET" style="font-size: 0.75rem; padding: 4px 10px;">reCAPTCHA v2</button>
+                    </div>
+
                     <form id="tester-form" class="tester-form">
                         <div class="form-row">
                             <div class="form-group flex-3">
@@ -372,33 +379,35 @@
                 </div>
             </section>
 
-            <!-- TAB 4: SYNOLOGY NAS GUIDE -->
+            <!-- TAB 4: NAS & DOCKER GUIDE -->
             <section id="tab-setup" class="tab-page">
                 <div class="panel">
                     <div class="panel-header">
-                        <h3>Deploying Solverr on Synology NAS &amp; Docker</h3>
+                        <h3>Deploying Solverr on UGREEN NASync, Synology &amp; Docker Compose</h3>
                     </div>
                     <div class="guide-content">
-                        <h4>Method 1: Synology Container Manager (GUI)</h4>
-                        <ol class="setup-steps">
-                            <li>Open <strong>Container Manager</strong> on your Synology NAS DSM.</li>
-                            <li>Go to <strong>Project</strong> &rarr; Click <strong>Create</strong>.</li>
-                            <li>Set Project Name: <code>solverr</code>.</li>
-                            <li>Choose path or create a folder: <code>/docker/solverr</code>.</li>
-                            <li>Select <strong>Create docker-compose.yml</strong> and paste the following snippet:</li>
-                        </ol>
+                        <h4>Docker Compose (UGREEN UGOS Pro / Portainer / Dockge / Synology)</h4>
+                        <p>Recommended production configuration featuring RAM-disk (<code>tmpfs</code>) scratchpad to eliminate SSD write wear and prevent HDD spin-up:</p>
 
-                        <pre class="code-block"><code>version: '3.8'
-services:
+                        <pre class="code-block"><code>services:
   solverr:
-    image: solverr:latest  # or build locally
+    image: ghcr.io/rpeters1430/solverr:latest
     container_name: solverr
     restart: unless-stopped
     ports:
       - "8191:8191"
+    shm_size: '2gb'
+    security_opt:
+      - no-new-privileges:true
+    # Keep ephemeral browser scratchpad in RAM to protect NAS storage:
+    tmpfs:
+      - /tmp:size=512M,mode=1777
+      - /app/.cache/camoufox/tmp:size=512M,mode=1777
     environment:
       - PORT=8191
+      - LOG_LEVEL=INFO
       - MAX_BROWSER_WORKERS=auto
+      - NAS_MODE=true
       - ENABLE_FAST_TLS=true
       - COOKIE_CACHE_TTL=7200
     volumes:
@@ -410,10 +419,11 @@ services:
       retries: 3</code></pre>
 
                         <h4>Prowlarr / Jackett / Sonarr Integration</h4>
-                        <p>In Prowlarr or Jackett settings:</p>
+                        <p>In Prowlarr or Jackett settings (<strong>Settings &rarr; Indexers &rarr; Add FlareSolverr Proxy</strong>):</p>
                         <ul>
-                            <li><strong>FlareSolverr Server URL:</strong> <code>http://YOUR-NAS-IP:8191</code></li>
-                            <li><strong>Tags:</strong> <code>flaresolverr</code> (or leave default)</li>
+                            <li><strong>Name:</strong> <code>Solverr</code></li>
+                            <li><strong>FlareSolverr Server URL:</strong> <code>http://YOUR-NAS-IP:8191</code> (or <code>http://solverr:8191</code> if on same Docker network)</li>
+                            <li><strong>Tags:</strong> <code>flaresolverr</code> (or leave blank for all indexers)</li>
                             <li>Click <strong>Test</strong> and save. Enjoy 10x-50x faster indexer search speeds!</li>
                         </ul>
                     </div>
@@ -422,6 +432,6 @@ services:
         </main>
     </div>
 
-    <script src="/static/app.js?v=1.4.0"></script>
+    <script src="/static/app.js?v=1.7.0"></script>
 </body>
 </html>

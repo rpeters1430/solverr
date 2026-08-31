@@ -1,6 +1,9 @@
 #!/usr/bin/env sh
 set -eu
 
+# Ensure files written to bind mounts (/app/data) are group/world readable on host
+umask 0002
+
 if [ -n "${PUID:-}" ] || [ -n "${PGID:-}" ]; then
   if [ -z "${PUID:-}" ] || [ -z "${PGID:-}" ]; then
     echo "Both PUID and PGID must be set together." >&2

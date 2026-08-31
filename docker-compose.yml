@@ -11,6 +11,11 @@ services:
     shm_size: '2gb' # Recommended 1gb-2gb for Camoufox multi-worker rendering
     security_opt:
       - no-new-privileges:true
+    # Mount ephemeral browser scratchpad into RAM (tmpfs) to eliminate SSD write wear
+    # and prevent spinning HDDs from spinning up during solves on NAS deployments.
+    tmpfs:
+      - /tmp:size=512M,mode=1777
+      - /app/.cache/camoufox/tmp:size=512M,mode=1777
     # cap_drop: [ALL] is intentionally NOT enabled by default here: verified
     # working when the container runs as root (the default, no PUID/PGID),
     # but Camoufox's Firefox sandbox hangs indefinitely under cap_drop:ALL
@@ -23,7 +28,8 @@ services:
       - PORT=8191
       - HOST=0.0.0.0
       - LOG_LEVEL=INFO
-      - MAX_BROWSER_WORKERS=auto # Auto-scales across CPU cores, clamped to what host RAM supports (DXP4800 Pro is 6c/8t + 8GB DDR5 stock -> auto lands well below 8)
+      - MAX_BROWSER_WORKERS=auto # Auto-scales across CPU cores, clamped to 2-3 workers in NAS mode
+      - NAS_MODE=true            # Conservative worker budgeting for UGREEN NASync / Synology / Unraid
       - HEADLESS=true
       - ENABLE_FAST_TLS=true
       - COOKIE_CACHE_TTL=7200

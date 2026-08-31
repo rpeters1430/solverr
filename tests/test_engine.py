@@ -83,6 +83,29 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(r.status == 200 for r in results))
             browser_mock.assert_called_once()
 
+    async def test_request_budget_propagates_remaining_timeout_to_browser(self):
+        with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock(return_value=_sol(200))) as browser_mock:
+            req = V1Request(cmd="request.get", url="https://example.com", maxTimeout=20000)
+            await self.engine.process_request(req)
+            browser_mock.assert_called_once()
+            called_kwargs = browser_mock.call_args.kwargs
+            # Timeout passed to browser should be positive and <= 20000
+            self.assertGreater(called_kwargs["timeout_ms"], 0)
+            self.assertLessEqual(called_kwargs["timeout_ms"], 20000)
+
+
+class TestRequestBudget(unittest.TestCase):
+    def test_budget_properties(self):
+        from app.solver.engine import RequestBudget
+        import time
+        budget = RequestBudget(5000)
+        self.assertAlmostEqual(budget.total_timeout_s, 5.0, places=1)
+        self.assertGreater(budget.remaining_s, 4.0)
+        self.assertGreater(budget.remaining_ms, 4000)
+        self.assertFalse(budget.is_expired)
+        self.assertGreaterEqual(budget.elapsed_ms, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

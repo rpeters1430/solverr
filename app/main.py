@@ -14,6 +14,7 @@ from app.config import settings
 from app.api.flaresolverr import router as flaresolverr_router
 from app.api.dashboard import router as dashboard_router
 from app.solver.browser import browser_pool, CAMOUFOX_AVAILABLE
+from app.solver.fast_tls import fast_tls_engine
 from app.metrics import generate_prometheus_metrics
 from app.logging_config import setup_logging, set_request_id
 from app.solver.sessions import session_manager
@@ -50,6 +51,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down Solverr Engine...")
     cleanup_task.cancel()
     await browser_pool.close()
+    await fast_tls_engine.close()
 
 app = FastAPI(
     title="Solverr",

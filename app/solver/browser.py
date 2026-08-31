@@ -22,7 +22,7 @@ except ImportError:
 
 logger = logging.getLogger("solverr.browser")
 
-@dataclasses.dataclass
+@dataclasses.dataclass(eq=False)
 class _PooledCamoufox:
     cm: Any
     browser: Any
@@ -48,6 +48,7 @@ class CamoufoxPool:
     def __init__(self, size: int):
         self.size = max(1, size)
         self._idle: "asyncio.Queue[_PooledCamoufox]" = asyncio.Queue()
+        self._all_instances: "set[_PooledCamoufox]" = set()
         self._created = 0
         self._lock = asyncio.Lock()
         self.recycles_total = 0
@@ -64,6 +65,7 @@ class CamoufoxPool:
             if self._created < self.size:
                 inst = await self._launch_instance()
                 self._created += 1
+                self._all_instances.add(inst)
                 inst.uses += 1
                 return inst
 
@@ -75,25 +77,21 @@ class CamoufoxPool:
     async def release(self, inst: _PooledCamoufox):
         if self._should_recycle(inst):
             self.recycles_total += 1
+            self._all_instances.discard(inst)
             await self._close_instance(inst)
             async with self._lock:
                 self._created -= 1
                 fresh = await self._relaunch_with_retry()
                 if fresh is not None:
                     self._created += 1
+                    self._all_instances.add(fresh)
             if fresh is not None:
                 self._idle.put_nowait(fresh)
             return
         self._idle.put_nowait(inst)
 
     async def _relaunch_with_retry(self, attempts: int = 3, backoff_seconds: float = 1.0) -> Optional[_PooledCamoufox]:
-        """Retry a recycled instance's relaunch a few times before giving up.
-
-        A bare launch failure (transient resource pressure - exactly what's
-        likely on a small NAS) used to permanently drop this slot from the
-        pool with no retry, which could also strand a concurrent waiter
-        blocked on `_idle.get()` since nothing else replenishes it.
-        """
+        """Retry a recycled instance's relaunch a few times before giving up."""
         for attempt in range(1, attempts + 1):
             try:
                 return await self._launch_instance()
@@ -111,15 +109,10 @@ class CamoufoxPool:
     def _should_recycle(self, inst: _PooledCamoufox) -> bool:
         return (
             inst.uses >= settings.CAMOUFOX_POOL_RECYCLE_USES
-            or (time.time() - inst.created_at) >= settings.CAMOUFOX_POOL_RECYCLE_SECONDS
+            or (time.monotonic() - inst.created_at) >= settings.CAMOUFOX_POOL_RECYCLE_SECONDS
         )
 
     async def _launch_instance(self) -> _PooledCamoufox:
-        # os="linux" pins fingerprint generation to Linux only (Camoufox
-        # otherwise randomizes across windows/macos/linux per launch). This
-        # container always runs on Linux, so claiming Linux avoids any
-        # OS/host mismatch leaking through elsewhere, and lets the Dockerfile
-        # ship only the Linux font set instead of all three (~890MB smaller).
         cm = AsyncCamoufox(
             headless=settings.HEADLESS,
             humanize=True,
@@ -131,9 +124,6 @@ class CamoufoxPool:
         try:
             browser = await asyncio.wait_for(cm.__aenter__(), timeout=CAMOUFOX_LAUNCH_TIMEOUT_SECONDS)
         except asyncio.TimeoutError as e:
-            # __aenter__ never completed, so __aexit__ won't be called by an
-            # `async with` anywhere - close it ourselves to avoid leaking a
-            # half-started Firefox process.
             try:
                 await cm.__aexit__(None, None, None)
             except Exception:
@@ -142,7 +132,7 @@ class CamoufoxPool:
                 f"Camoufox launch did not complete within {CAMOUFOX_LAUNCH_TIMEOUT_SECONDS}s"
             ) from e
         logger.info(f"[CamoufoxPool] Warmed stealth browser instance ({self._created + 1}/{self.size})")
-        return _PooledCamoufox(cm=cm, browser=browser, created_at=time.time())
+        return _PooledCamoufox(cm=cm, browser=browser, created_at=time.monotonic())
 
     async def _close_instance(self, inst: _PooledCamoufox):
         try:
@@ -151,13 +141,18 @@ class CamoufoxPool:
             logger.debug(f"[CamoufoxPool] Instance close notice: {e}")
 
     async def close(self):
+        """Close all pooled instances (idle and in-use) cleanly."""
         async with self._lock:
+            # Drain queue
             while True:
                 try:
-                    inst = self._idle.get_nowait()
+                    self._idle.get_nowait()
                 except asyncio.QueueEmpty:
                     break
+            # Close all instances
+            for inst in list(self._all_instances):
                 await self._close_instance(inst)
+            self._all_instances.clear()
             self._created = 0
             logger.info("[CamoufoxPool] Pool stopped.")
 
@@ -351,20 +346,20 @@ class BrowserPool:
         if not CAMOUFOX_AVAILABLE:
             return {"ok": False, "error": "Camoufox import failed - stealth engine unavailable"}
 
-        start = time.time()
+        start = time.monotonic()
         try:
             return await asyncio.wait_for(self._self_test_inner(start), timeout=SOLVE_WALLCLOCK_GRACE_SECONDS + 30)
         except asyncio.TimeoutError:
             return {
                 "ok": False,
                 "error": "Browser self-test timed out - Camoufox launch or IPC handshake did not complete",
-                "duration_ms": round((time.time() - start) * 1000, 1)
+                "duration_ms": round((time.monotonic() - start) * 1000, 1)
             }
         except Exception as e:
             return {
                 "ok": False,
                 "error": f"{type(e).__name__}: {e}",
-                "duration_ms": round((time.time() - start) * 1000, 1)
+                "duration_ms": round((time.monotonic() - start) * 1000, 1)
             }
 
     async def _self_test_inner(self, start: float) -> Dict[str, Any]:
@@ -386,7 +381,7 @@ class BrowserPool:
         return {
             "ok": result == 2,
             "user_agent": ua,
-            "duration_ms": round((time.time() - start) * 1000, 1)
+            "duration_ms": round((time.monotonic() - start) * 1000, 1)
         }
 
     async def solve(
@@ -403,11 +398,11 @@ class BrowserPool:
         wait_delay_ms: Optional[int] = None,
         capture_screenshot: bool = False
     ) -> SolutionModel:
-        wait_start = time.time()
+        wait_start = time.monotonic()
         async with self.semaphore:
-            self._queue_wait_total_s += time.time() - wait_start
+            self._queue_wait_total_s += time.monotonic() - wait_start
             self._queue_wait_count += 1
-            start_time = time.time()
+            start_time = time.monotonic()
             active_ua = user_agent or settings.DEFAULT_USER_AGENT
             pw_proxy = None
             if proxy and "url" in proxy and proxy["url"]:
@@ -731,7 +726,7 @@ class BrowserPool:
         # Multi-WAF challenge detection and auto-resolver loop
         max_wait = timeout_ms / 1000.0
         step = 0.2
-        loop_start = time.time()
+        loop_start = time.monotonic()
         iteration = 0
         content_check_every = 4
         last_click_ts = 0.0
@@ -740,7 +735,7 @@ class BrowserPool:
         last_detected_challenge: Optional[str] = None
         cleared = False
 
-        while (time.time() - loop_start) < max_wait:
+        while (time.monotonic() - loop_start) < max_wait:
             check_content = (iteration % content_check_every) == 0
             iteration += 1
             
@@ -785,12 +780,12 @@ class BrowserPool:
                 if page_ready:
                     # If an age gate was already clicked or no modal is blocking, we are done!
                     if age_gate_clicked or not has_age_gate_marker(content_lower, check_content):
-                        elapsed = time.time() - loop_start
+                        elapsed = time.monotonic() - loop_start
                         logger.info(f"[BrowserPool] Challenge cleared! Final Title: '{title}' in {elapsed:.2f}s")
                         cleared = True
                         break
 
-            now_ts = time.time()
+            now_ts = time.monotonic()
             if (now_ts - last_logged_step) >= 3.0:
                 elapsed = now_ts - loop_start
                 state_label = active_challenge or ("age_gate" if not age_gate_clicked else "page_stabilizing")
@@ -958,8 +953,8 @@ class BrowserPool:
         if not cleared and captcha_solver.enabled and last_detected_challenge in CAPTCHA_SOLVER_WIDGETS:
             solved = await self._try_captcha_solver_escalation(page, url, last_detected_challenge)
             if solved:
-                settle_deadline = time.time() + 8.0
-                while time.time() < settle_deadline:
+                settle_deadline = time.monotonic() + 8.0
+                while time.monotonic() < settle_deadline:
                     try:
                         settle_title = await page.title()
                     except Exception:
@@ -1073,7 +1068,7 @@ class BrowserPool:
         else:
             status_code = 200 if final_title and "just a moment" not in final_title.lower() else 503
 
-        solve_duration = time.time() - start_time
+        solve_duration = time.monotonic() - start_time
         cookie_names = [c.name for c in captured_cookies]
         cookie_summary = f"[{', '.join(cookie_names[:5])}{'...' if len(cookie_names) > 5 else ''}]"
         logger.info(f"[BrowserPool] Solve finished in {solve_duration:.2f}s | Final Title: '{final_title}' | Status: {status_code} | Challenge: {last_detected_challenge or 'none'} | Captured {len(captured_cookies)} cookies {cookie_summary}")

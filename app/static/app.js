@@ -201,7 +201,23 @@ document.addEventListener('DOMContentLoaded', () => {
 
     initEventStream();
 
-    // Live URL Tester Form
+    // Live URL Tester Form & Presets
+    document.querySelectorAll('.test-preset').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const url = btn.getAttribute('data-url');
+            const method = btn.getAttribute('data-method') || 'GET';
+            if (url) {
+                document.getElementById('test-url').value = url;
+                document.getElementById('test-method').value = method;
+                const postContainer = document.getElementById('post-data-container');
+                if (postContainer) {
+                    if (method === 'POST') postContainer.classList.remove('hidden');
+                    else postContainer.classList.add('hidden');
+                }
+            }
+        });
+    });
+
     const testerForm = document.getElementById('tester-form');
     const testResults = document.getElementById('test-results');
     const testSpinner = document.getElementById('test-spinner');

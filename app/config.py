@@ -62,20 +62,22 @@ class Settings:
         else (round(psutil.virtual_memory().total / (1024**3), 1) if hasattr(psutil, "virtual_memory") else 8.0)
     )
 
+    # NAS Mode: When enabled (default in docker-compose.yml for NAS deployments),
+    # caps auto workers to a conservative 2-3 instances so Solverr never
+    # competes with media transcode pipelines (Plex/Jellyfin) or NAS caches.
+    NAS_MODE: bool = os.getenv("NAS_MODE", "false").lower() in ("true", "1", "yes")
+
     # Worker Auto-Tuning: "auto" or 0 calculates based on effective CPU cores
     # (host, or the container's cgroup CPU quota when lower) - min 1, max 16
     # - then clamps to what effective RAM can actually support. Each worker
-    # is a warm Camoufox (Firefox) process - budget ~1GB/worker and always
-    # leave ~2GB of RAM for the OS, the container runtime, and any other
+    # is a warm Camoufox (Firefox) process - budget ~1GB/worker (or 2GB/worker in NAS_MODE)
+    # and always leave ~2GB of RAM for the OS, the container runtime, and any other
     # services (Sonarr/Radarr/Prowlarr, etc.) sharing the box.
-    RAM_PER_WORKER_GB: float = float(os.getenv("RAM_PER_WORKER_GB", "1.0"))
+    RAM_PER_WORKER_GB: float = float(os.getenv("RAM_PER_WORKER_GB", "2.0" if NAS_MODE else "1.0"))
     RAM_RESERVED_GB: float = float(os.getenv("RAM_RESERVED_GB", "2.0"))
 
-    # Previously forced a minimum of 4 regardless of how few cores were
-    # actually available (e.g. a 2-core cgroup limit still got 4 workers
-    # queued onto it) - min(1, ...) instead lets a genuinely small
-    # allocation size down instead of oversubscribing it.
-    _cpu_based_workers: int = min(16, max(1, TOTAL_CPU_CORES))
+    _max_nas_workers: int = 3 if NAS_MODE else 16
+    _cpu_based_workers: int = min(_max_nas_workers, max(1, TOTAL_CPU_CORES))
     _usable_ram_gb: float = TOTAL_RAM_GB - RAM_RESERVED_GB
     _ram_based_workers: int = (
         max(1, int(_usable_ram_gb // RAM_PER_WORKER_GB))
@@ -172,13 +174,15 @@ class Settings:
     CAPTCHA_SOLVER_TIMEOUT: int = int(os.getenv("CAPTCHA_SOLVER_TIMEOUT", "120"))
     CAPTCHA_SOLVER_POLL_INTERVAL: int = int(os.getenv("CAPTCHA_SOLVER_POLL_INTERVAL", "5"))
 
-    # Telemetry
-    PROMETHEUS_ENABLED: bool = os.getenv("PROMETHEUS_ENABLED", "true").lower() in ("true", "1", "yes")
+    # Fast TLS connection pool: Reuses curl_cffi AsyncSessions per (domain, target, proxy)
+    # to avoid repeating TLS/HTTP2 handshakes on recurring indexer queries.
+    FAST_TLS_POOL_ENABLED: bool = os.getenv("FAST_TLS_POOL_ENABLED", "true").lower() in ("true", "1", "yes")
+    FAST_TLS_POOL_SIZE: int = int(os.getenv("FAST_TLS_POOL_SIZE", "50"))
 
     # API Version - plain semver, no "v" prefix or edition suffix baked in, so
     # it can be embedded directly (e.g. "vX.Y.Z" or "X.Y.Z-ultra" strings
     # elsewhere would otherwise double up the prefix/suffix).
-    VERSION: str = "1.6.0"
+    VERSION: str = "1.7.0"
     EDITION: str = "ultra"
     DISPLAY_VERSION: str = f"{VERSION}-{EDITION}"
 
