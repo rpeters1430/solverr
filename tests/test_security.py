@@ -40,6 +40,77 @@ class TestSSRFProtection(unittest.TestCase):
     def test_unresolvable_host_does_not_raise(self):
         check_target_url("http://this-host-does-not-exist.invalid/")  # must not raise
 
+    def test_scheme_less_loopback_blocked(self):
+        # urlparse() only populates .hostname when a "//" authority marker
+        # is present - a bare "host:port" (a legitimate way to write a
+        # proxy endpoint) must still be recognized, not silently pass
+        # through unchecked.
+        with self.assertRaises(SSRFBlockedError):
+            check_target_url("127.0.0.1:8080")
+
+    def test_scheme_less_public_host_allowed(self):
+        check_target_url("example.com:8080")  # must not raise
+
+
+class TestProxySSRFProtection(unittest.IsolatedAsyncioTestCase):
+    """The `proxy` field is just as capable of reaching internal targets as
+    `url` (it becomes the actual solve egress point), so it must be checked
+    too - see HybridSolverEngine.process_request."""
+
+    async def test_internal_proxy_blocked(self):
+        from unittest.mock import AsyncMock, patch
+        from app.models.flaresolverr import V1Request
+        from app.solver.engine import HybridSolverEngine
+
+        engine = HybridSolverEngine()
+        req = V1Request(cmd="request.get", url="https://example.com", proxy={"url": "http://127.0.0.1:6379"})
+        with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock()) as fast_mock:
+            with self.assertRaises(SSRFBlockedError):
+                await engine.process_request(req)
+            fast_mock.assert_not_called()
+
+    async def test_internal_proxy_via_metadata_ip_blocked(self):
+        from unittest.mock import AsyncMock, patch
+        from app.models.flaresolverr import V1Request
+        from app.solver.engine import HybridSolverEngine
+
+        engine = HybridSolverEngine()
+        req = V1Request(cmd="request.get", url="https://example.com", proxy="http://169.254.169.254/")
+        with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock()) as fast_mock:
+            with self.assertRaises(SSRFBlockedError):
+                await engine.process_request(req)
+            fast_mock.assert_not_called()
+
+    async def test_scheme_less_internal_proxy_blocked(self):
+        from unittest.mock import AsyncMock, patch
+        from app.models.flaresolverr import V1Request
+        from app.solver.engine import HybridSolverEngine
+
+        engine = HybridSolverEngine()
+        req = V1Request(cmd="request.get", url="https://example.com", proxy="127.0.0.1:6379")
+        with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock()) as fast_mock:
+            with self.assertRaises(SSRFBlockedError):
+                await engine.process_request(req)
+            fast_mock.assert_not_called()
+
+    async def test_public_proxy_allowed(self):
+        from unittest.mock import AsyncMock, patch
+        from app.models.flaresolverr import V1Request
+        from app.solver.engine import HybridSolverEngine
+
+        engine = HybridSolverEngine()
+        req = V1Request(cmd="request.get", url="https://example.com", proxy="http://proxy.example.com:8080")
+        # Pin every downstream call so this stays a fast, deterministic unit
+        # test of the SSRF check itself, not an accidental integration test
+        # of the browser/fallback-proxy tiers.
+        with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(False, None))) as fast_mock, \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock(side_effect=RuntimeError("browser should not be reached in this test"))) as browser_mock, \
+             patch.object(settings, "FALLBACK_PROXY_URL", None):
+            with self.assertRaises(RuntimeError):
+                await engine.process_request(req)
+            fast_mock.assert_called_once()
+            browser_mock.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
