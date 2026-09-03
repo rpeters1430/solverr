@@ -77,9 +77,15 @@ async def navigate_to_target(
     if method.upper() == "POST" and post_data:
         try:
             form_html = _build_post_form_html(url, post_data)
-            await page.set_content(form_html)
             try:
-                response = await page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+                # page.set_content() itself doesn't navigate - the injected
+                # <script> auto-submitting the form is what triggers the real
+                # navigation, so expect_navigation() has to wrap the
+                # set_content() call to observe it and hand back its Response
+                # (wait_for_load_state() would not - it always returns None).
+                async with page.expect_navigation(wait_until="domcontentloaded", timeout=timeout_ms) as nav_info:
+                    await page.set_content(form_html)
+                response = await nav_info.value
                 initial_status = response.status if response else 0
             except Exception:
                 initial_status = 0

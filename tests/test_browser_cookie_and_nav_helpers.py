@@ -1,8 +1,9 @@
 import unittest
+from unittest.mock import AsyncMock, MagicMock
 
 from app.models.flaresolverr import CookieModel
 from app.solver.browser.cookies import build_playwright_cookies, extract_captured_cookies
-from app.solver.browser.navigation import _build_post_form_html
+from app.solver.browser.navigation import _build_post_form_html, navigate_to_target
 
 
 class TestBuildPlaywrightCookies(unittest.TestCase):
@@ -69,6 +70,73 @@ class TestBuildPostFormHtml(unittest.TestCase):
     def test_opaque_body_falls_back_to_single_data_field(self):
         html_out = _build_post_form_html("https://example.com/submit", "just-some-raw-text")
         self.assertIn('name="data" value="just-some-raw-text"', html_out)
+
+
+class FakeNavigationContext:
+    """Mimics Playwright's AsyncEventContextManager returned by
+    page.expect_navigation(): an async context manager whose `.value`
+    attribute is itself awaitable to the captured Response (or None, e.g.
+    for a same-page anchor navigation)."""
+
+    def __init__(self, response):
+        self.value = self._make_value(response)
+
+    @staticmethod
+    async def _make_value(response):
+        return response
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class TestNavigateToTarget(unittest.IsolatedAsyncioTestCase):
+    async def test_post_navigation_captures_response_status(self):
+        # Regression test for the bug Copilot flagged on PR #29:
+        # page.wait_for_load_state() always returns None, so the POST path
+        # never actually captured a status. expect_navigation() should.
+        fake_response = MagicMock(status=201)
+        page = MagicMock()
+        page.set_content = AsyncMock()
+        page.expect_navigation = MagicMock(return_value=FakeNavigationContext(fake_response))
+
+        response, status = await navigate_to_target(page, "https://example.com/submit", "POST", "a=1", 5000)
+
+        page.set_content.assert_awaited_once()
+        self.assertEqual(status, 201)
+        self.assertIs(response, fake_response)
+
+    async def test_post_navigation_no_response_falls_back_to_zero(self):
+        page = MagicMock()
+        page.set_content = AsyncMock()
+        page.expect_navigation = MagicMock(return_value=FakeNavigationContext(None))
+
+        response, status = await navigate_to_target(page, "https://example.com/submit", "POST", "a=1", 5000)
+
+        self.assertEqual(status, 0)
+        self.assertIsNone(response)
+
+    async def test_get_navigation_uses_goto(self):
+        fake_response = MagicMock(status=200)
+        page = MagicMock()
+        page.goto = AsyncMock(return_value=fake_response)
+
+        response, status = await navigate_to_target(page, "https://example.com", "GET", None, 5000)
+
+        page.goto.assert_awaited_once_with("https://example.com", wait_until="domcontentloaded", timeout=5000)
+        self.assertEqual(status, 200)
+        self.assertIs(response, fake_response)
+
+    async def test_navigation_error_falls_back_to_zero_status(self):
+        page = MagicMock()
+        page.goto = AsyncMock(side_effect=RuntimeError("boom"))
+
+        response, status = await navigate_to_target(page, "https://example.com", "GET", None, 5000)
+
+        self.assertEqual(status, 0)
+        self.assertIsNone(response)
 
 
 if __name__ == "__main__":
