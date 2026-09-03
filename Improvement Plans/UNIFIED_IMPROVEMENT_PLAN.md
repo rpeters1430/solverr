@@ -20,9 +20,11 @@ bug reproduced in the current code at the time.
   to CI; bandit added as non-blocking; load testing and full pytest
   coverage tracking not done.
 - **Phase 1** (architecture/maintainability): partially done — `tier`
-  field, exception-detail redaction. The `browser.py` package split, typed
-  exception hierarchy, and request-wide timeout budgeting were **not**
-  attempted — see "Deliberately not done" below.
+  field, exception-detail redaction, and (2026-09-03) the `browser.py`
+  package split are done. A typed exception hierarchy was **not**
+  attempted — see "Deliberately not done" below. Request-wide timeout
+  budgeting shipped separately in v1.7.0 (`RequestBudget` in
+  `app/solver/engine.py`).
 
 ## ⚠️ Finding from this pass: PUID/PGID + Camoufox can hang indefinitely
 
@@ -78,22 +80,43 @@ Done:
   instead) — was leaking internal paths/details.
 - `app/security.py`'s `SSRFBlockedError` is the first typed solver error.
 
+Done (2026-09-03):
+- Split `app/solver/browser.py` (1091 lines by then) into
+  `app/solver/browser/` — `pool.py` (Camoufox process lifecycle),
+  `models.py` (`_PooledCamoufox`), `challenges.py` (pure WAF/age-gate
+  detection), `captcha.py` (paid-solver escalation), `cookies.py`
+  (Playwright↔`CookieModel` conversion), `navigation.py` (GET/POST
+  navigation + media blocking), `interactions.py` (challenge-widget click
+  dispatch), and `browser.py` (`BrowserPool`, now delegating to the above
+  instead of inlining ~500 lines in `_execute_solve_flow`). Done as a
+  behavior-preserving move (verbatim code relocated into functions, no
+  control-flow rewrite) specifically to keep the regression risk called
+  out below low: `__init__.py` re-exports the exact prior public API so
+  every existing import site (`app/main.py`, `app/metrics.py`,
+  `app/api/dashboard.py`, `app/solver/engine.py`, `app/solver/fast_tls.py`,
+  and all `tests/test_*.py` files that imported from `app.solver.browser`)
+  needed zero changes. Added `tests/test_browser_cookie_and_nav_helpers.py`
+  covering the newly-extracted pure `cookies.py`/`navigation.py` helpers.
+  Full existing suite (111 tests) still passes unchanged (120 with the new
+  file) — verified before and after.
+
 Not done (deliberately deferred — see below):
-- Splitting `app/solver/browser.py` (979 lines) into a package.
 - A full typed-exception hierarchy (`NavigationError`, `BrowserPoolError`,
   etc.) replacing broad `except Exception` throughout the solve flow.
-- Request-wide timeout budgeting (`deadline = time.monotonic() + maxTimeout`
-  shared across stages) — today each stage still has its own timeout.
 - `time.time()` vs `time.monotonic()` audit for latency/timeout math.
 
-**Why deferred:** `browser.py` is the most state-heavy module in the
-codebase (pool lifecycle, challenge-detection loop, captcha escalation) —
-splitting it and reworking exception handling both carry real regression
-risk that's hard to fully retire without extensive hardware-in-the-loop
-testing (which this pass did do for Docker/cgroup changes, but a full
-control-flow refactor is a different order of risk). Recommend a dedicated
-follow-up session scoped to just this, with the existing 100-test suite
-plus new tests written *before* the refactor as a safety net.
+Done separately in v1.7.0 (not part of this plan's pass, but closing this
+item): request-wide timeout budgeting — `RequestBudget` in
+`app/solver/engine.py` (`deadline = time.monotonic() + maxTimeout` shared
+across stages).
+
+**Why the exception hierarchy is still deferred:** reworking
+`except Exception` handling throughout the solve flow (as opposed to
+relocating code, which the browser.py split above did) is a genuine
+control-flow change with real regression risk that needs the same kind of
+hardware-in-the-loop verification the Docker/cgroup changes got. Recommend
+scoping it as its own follow-up rather than folding it into further
+`browser/` package work.
 
 ## Phase 2 — Browser Pool Hardening (done)
 
@@ -227,15 +250,21 @@ Not done (deliberately deferred):
 
 ## Recommended next session
 
-1. **Root-cause the PUID/PGID Camoufox hang.** This is the single
+1. **Root-cause the PUID/PGID Camoufox hang.** Still the single
    highest-value remaining item — it's a production correctness risk for
    exactly the NAS/self-hosted audience this project targets, and it
    wasn't understood, only worked around (timeout) for the one endpoint
-   that lacked protection.
-2. **`browser.py` package split** — write characterization tests for the
-   current behavior first, then split, verifying against both the test
-   suite and a real Docker smoke test (as validated in this pass) at each
-   step.
+   that lacked protection. Decision made 2026-09-03: keep PUID/PGID
+   support as-is (it's fine for Fast-TLS-only/proxy-only deployments that
+   never touch Tier 3) rather than removing it, with CLAUDE.md's existing
+   root-required warning staying the guidance for Tier 3 browser solving.
+   Needs a real non-root container + strace/debug session to progress —
+   not reproducible in a sandbox without a Docker daemon.
+2. ~~`browser.py` package split~~ — done 2026-09-03, see Phase 1 above.
 3. Load testing script + more browser-pool failure-mode tests.
 4. `CookieStore` interface extraction, if the dual-mode logic ever needs
    a third backend.
+5. Typed exception hierarchy for the solve flow (see Phase 1's "not done"
+   list) — now a more natural next step since `browser/` is already split
+   into focused modules, each of which is a smaller surface to retrofit
+   typed errors into than the old single file.
