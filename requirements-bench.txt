@@ -1,0 +1,4 @@
+# Benchmark-only dependencies (see benchmarks/ and .github/workflows/codspeed.yml).
+# Installed on top of requirements.txt; not part of the runtime image.
+pytest==9.1.1
+pytest-codspeed==5.0.3

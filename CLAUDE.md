@@ -19,6 +19,13 @@ python -m unittest tests.test_engine
 python -m unittest tests.test_engine.EngineTests.test_specific_case
 ```
 
+Running benchmarks (CodSpeed, CPU simulation):
+```
+pip install -r requirements.txt -r requirements-bench.txt
+python -m pytest benchmarks/ --codspeed
+```
+`benchmarks/` holds `pytest-codspeed` benchmarks for the CPU-bound hot paths (challenge detection, cookie cache, sessions, request/response models, `/scrape` extraction, Tier 1 profile selection, SSRF checks, metrics rendering, cursor geometry). They are deliberately kept out of `tests/` so `python -m unittest discover -s tests` is unaffected. `.github/workflows/codspeed.yml` runs them on every push/PR.
+
 Local run:
 ```
 pip install -r requirements.txt
