@@ -1,5 +1,7 @@
 # ⚡ Solverr
 
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/rpeters1430/solverr?utm_source=badge)
+
 **Solverr** is an ultra-fast, lightweight, next-generation replacement for **FlareSolverr**, **TRAWL**, and **Byparr**. Designed specifically for high-efficiency deployments on home servers, NAS hardware (**UGREEN NASync DXP4800 Pro / UGOS Pro**, Synology, TrueNAS, Unraid), and unthrottled desktop/Docker environments.
 
 ---
@@ -260,6 +262,19 @@ curl -N http://localhost:8191/api/events
 | `CAPTCHA_SOLVER_BASE_URL` | `https://2captcha.com` | API base URL - point at another provider's 2captcha-compatible endpoint (e.g. CapSolver) here |
 | `HEADLESS` | `true` | Run browser in headless mode |
 | `LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+
+---
+
+## 🏎️ Performance Benchmarks
+
+Solverr's CPU-bound hot paths are continuously benchmarked with [CodSpeed](https://app.codspeed.io/rpeters1430/solverr) on every push and pull request, so a change that makes challenge detection, the cookie cache, or request/response handling slower shows up as a regression in the PR instead of as latency on your NAS.
+
+```bash
+pip install -r requirements.txt -r requirements-bench.txt
+python -m pytest benchmarks/ --codspeed
+```
+
+The suite lives in `benchmarks/` and covers multi-WAF challenge detection, the Tier 2 cookie cache and session store, Pydantic request/response handling, `/scrape` HTML extraction, Tier 1 TLS-profile selection, the SSRF guard, Prometheus metrics rendering, and Bézier cursor generation. It runs separately from the unit tests (`python -m unittest discover -s tests`).
 
 ---
 
