@@ -179,6 +179,12 @@ class Settings:
     FAST_TLS_POOL_ENABLED: bool = os.getenv("FAST_TLS_POOL_ENABLED", "true").lower() in ("true", "1", "yes")
     FAST_TLS_POOL_SIZE: int = int(os.getenv("FAST_TLS_POOL_SIZE", "50"))
 
+    # MCP (Model Context Protocol) server: exposes solving/scraping as tools
+    # an AI agent can call directly, mounted at /mcp alongside the existing
+    # FlareSolverr/native HTTP API. Subject to the same X-Api-Key gate as the
+    # rest of the API when API_KEY is set (see app/main.py's middleware).
+    ENABLE_MCP: bool = os.getenv("ENABLE_MCP", "true").lower() in ("true", "1", "yes")
+
     # API Version - plain semver, no "v" prefix or edition suffix baked in, so
     # it can be embedded directly (e.g. "vX.Y.Z" or "X.Y.Z-ultra" strings
     # elsewhere would otherwise double up the prefix/suffix).

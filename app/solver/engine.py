@@ -62,7 +62,8 @@ class PerformanceMetrics:
             "geetest": 0,
             "imperva": 0,
             "datadome": 0,
-            "akamai": 0
+            "akamai": 0,
+            "aws_waf": 0
         }
 
     def record_fast(self, duration_ms: float):

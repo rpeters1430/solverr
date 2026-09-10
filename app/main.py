@@ -5,6 +5,7 @@ import hmac
 import asyncio
 import logging
 import traceback
+import contextlib
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
@@ -35,23 +36,38 @@ async def periodic_session_cleanup():
         except Exception as e:
             logger.warning(f"Error in session cleanup task: {e}")
 
+# MCP server (optional, on by default - see ENABLE_MCP in app/config.py). The
+# ASGI app must be built before mcp_server.session_manager is accessible, so
+# this happens at import time; the lifespan below enters that session
+# manager's run() context, which mounting alone does not do for a
+# Starlette/FastAPI sub-app (its lifespan is only invoked when the ASGI
+# server runs it directly, not when merely mounted into a parent app).
+mcp_asgi_app = None
+if settings.ENABLE_MCP:
+    from app.mcp_server import create_mcp_asgi_app, mcp_server
+    mcp_asgi_app = create_mcp_asgi_app()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info(f"Initializing Solverr Engine v{settings.DISPLAY_VERSION}...")
-    logger.info(f"Configuration | Host: {settings.HOST}:{settings.PORT} | Log Level: {settings.LOG_LEVEL.upper()} | Workers: {settings.MAX_BROWSER_WORKERS} | Fast TLS: {settings.ENABLE_FAST_TLS}")
-    cleanup_task = asyncio.create_task(periodic_session_cleanup())
-    if CAMOUFOX_AVAILABLE:
-        # The warm Camoufox pool launches its instances lazily on first
-        # solve (see CamoufoxPool.acquire), instead of paying that cost on
-        # every process start.
-        logger.info("Camoufox stealth engine ready; the warm browser pool launches lazily on first solve.")
-    else:
-        logger.error("Camoufox stealth engine is not available (import failed) - Tier 3 browser-based solving will fail for every request until this is fixed.")
-    yield
-    logger.info("Shutting down Solverr Engine...")
-    cleanup_task.cancel()
-    await browser_pool.close()
-    await fast_tls_engine.close()
+    async with contextlib.AsyncExitStack() as stack:
+        logger.info(f"Initializing Solverr Engine v{settings.DISPLAY_VERSION}...")
+        logger.info(f"Configuration | Host: {settings.HOST}:{settings.PORT} | Log Level: {settings.LOG_LEVEL.upper()} | Workers: {settings.MAX_BROWSER_WORKERS} | Fast TLS: {settings.ENABLE_FAST_TLS}")
+        cleanup_task = asyncio.create_task(periodic_session_cleanup())
+        if CAMOUFOX_AVAILABLE:
+            # The warm Camoufox pool launches its instances lazily on first
+            # solve (see CamoufoxPool.acquire), instead of paying that cost on
+            # every process start.
+            logger.info("Camoufox stealth engine ready; the warm browser pool launches lazily on first solve.")
+        else:
+            logger.error("Camoufox stealth engine is not available (import failed) - Tier 3 browser-based solving will fail for every request until this is fixed.")
+        if mcp_asgi_app is not None:
+            await stack.enter_async_context(mcp_server.session_manager.run())
+            logger.info("MCP server ready at /mcp (set ENABLE_MCP=false to disable).")
+        yield
+        logger.info("Shutting down Solverr Engine...")
+        cleanup_task.cancel()
+        await browser_pool.close()
+        await fast_tls_engine.close()
 
 app = FastAPI(
     title="Solverr",
@@ -139,6 +155,12 @@ if os.path.exists(static_dir):
 # Mount Routers
 app.include_router(flaresolverr_router)
 app.include_router(dashboard_router, prefix="/api")
+
+# Mount MCP Server (optional - see ENABLE_MCP). Subject to the same
+# X-Api-Key gate as every other endpoint below, since "/mcp" isn't in
+# _ALWAYS_UNAUTHENTICATED_PATHS.
+if mcp_asgi_app is not None:
+    app.mount("/mcp", mcp_asgi_app)
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard_index():

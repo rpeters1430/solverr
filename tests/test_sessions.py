@@ -60,5 +60,37 @@ class TestSessionManager(unittest.TestCase):
             self.assertNotIn(sid1, active)
             self.assertIn(sid3, active)
 
+    def test_redis_reconnects_after_initial_failure(self):
+        # Mirrors CookieCache's equivalent test (tests/test_cache.py): a
+        # Redis outage at startup must be retried, not permanent for the
+        # process's whole lifetime.
+        class FakeRedisClient:
+            def __init__(self, healthy):
+                self.healthy = healthy
+
+            def ping(self):
+                if not self.healthy:
+                    raise ConnectionError("redis down")
+
+        attempts = {"n": 0}
+
+        def fake_from_url(*args, **kwargs):
+            attempts["n"] += 1
+            return FakeRedisClient(healthy=attempts["n"] > 1)
+
+        with patch("redis.Redis.from_url", side_effect=fake_from_url):
+            mgr = SessionManager(redis_url="redis://fake-host:6379/0")
+            self.assertIsNone(mgr.redis_client)
+            self.assertEqual(attempts["n"], 1)
+
+            self.assertIsNone(mgr._redis())
+            self.assertEqual(attempts["n"], 1)
+
+            mgr._redis_last_attempt = 0
+            client = mgr._redis()
+            self.assertIsNotNone(client)
+            self.assertEqual(attempts["n"], 2)
+            self.assertIs(mgr.redis_client, client)
+
 if __name__ == "__main__":
     unittest.main()

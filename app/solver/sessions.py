@@ -11,6 +11,12 @@ logger = logging.getLogger("solverr.sessions")
 
 REDIS_KEY_PREFIX = "solverr:session:"
 
+# Minimum interval between Redis reconnection attempts once the client is
+# down - mirrors CookieCache's retry cooldown (app/solver/cache.py) so a
+# transient Redis outage at startup doesn't permanently strand sessions
+# in-memory-only for the rest of the process's lifetime.
+REDIS_RECONNECT_INTERVAL_SECONDS = 30.0
+
 class Session:
     def __init__(self, session_id: str, proxy: Optional[str] = None, ttl: int = 7200):
         self.session_id: str = session_id
@@ -65,40 +71,58 @@ class SessionManager:
     def __init__(self, redis_url: Optional[str] = None):
         self._sessions: Dict[str, Session] = {}
         self.redis_client = None
-        redis_url = redis_url if redis_url is not None else settings.REDIS_URL
-        if redis_url:
-            self._init_redis(redis_url)
+        self._redis_last_attempt = 0.0
+        self.redis_url = redis_url if redis_url is not None else settings.REDIS_URL
+        if self.redis_url:
+            self._redis()
 
-    def _init_redis(self, redis_url: str):
+    def _redis(self):
+        """Return a live Redis client, retrying the connection on a cooldown
+        if the last attempt failed. Previously a failed connection at
+        __init__ time permanently disabled Redis for the process's entire
+        lifetime - this makes that recoverable without a restart (see
+        CookieCache._redis() in cache.py for the same pattern)."""
+        if self.redis_client is not None:
+            return self.redis_client
+        if not self.redis_url:
+            return None
+        now = time.time()
+        if now - self._redis_last_attempt < REDIS_RECONNECT_INTERVAL_SECONDS:
+            return None
+        self._redis_last_attempt = now
         try:
             import redis
-            self.redis_client = redis.Redis.from_url(redis_url, decode_responses=True, socket_connect_timeout=2)
-            self.redis_client.ping()
-            logger.info(f"[SessionManager] Connected to distributed Redis session backend at {redis_url}")
+            client = redis.Redis.from_url(self.redis_url, decode_responses=True, socket_connect_timeout=2)
+            client.ping()
+            self.redis_client = client
+            logger.info(f"[SessionManager] Connected to distributed Redis session backend at {self.redis_url}")
+            return client
         except Exception as e:
-            logger.warning(f"[SessionManager] Redis connection failed ({e}). Sessions will be in-memory only for this process.")
-            self.redis_client = None
+            logger.warning(f"[SessionManager] Redis connection attempt failed ({e}). Sessions are in-memory only for this process until the next retry.")
+            return None
 
     def _persist(self, sess: Session):
-        if not self.redis_client:
+        redis_client = self._redis()
+        if not redis_client:
             return
         try:
             key = f"{REDIS_KEY_PREFIX}{sess.session_id}"
-            self.redis_client.set(key, json.dumps(sess.to_dict()), ex=sess.ttl)
+            redis_client.set(key, json.dumps(sess.to_dict()), ex=sess.ttl)
         except Exception as e:
             logger.debug(f"[SessionManager] Redis persist error for '{sess.session_id}': {e}")
 
     def _load_from_redis(self, session_id: str) -> Optional[Session]:
-        if not self.redis_client:
+        redis_client = self._redis()
+        if not redis_client:
             return None
         try:
             key = f"{REDIS_KEY_PREFIX}{session_id}"
-            raw = self.redis_client.get(key)
+            raw = redis_client.get(key)
             if not raw:
                 return None
             sess = Session.from_dict(json.loads(raw))
             if sess.is_expired():
-                self.redis_client.delete(key)
+                redis_client.delete(key)
                 return None
             return sess
         except Exception as e:
@@ -153,9 +177,10 @@ class SessionManager:
 
     def _delete(self, session_id: str):
         self._sessions.pop(session_id, None)
-        if self.redis_client:
+        redis_client = self._redis()
+        if redis_client:
             try:
-                self.redis_client.delete(f"{REDIS_KEY_PREFIX}{session_id}")
+                redis_client.delete(f"{REDIS_KEY_PREFIX}{session_id}")
             except Exception as e:
                 logger.debug(f"[SessionManager] Redis delete error for '{session_id}': {e}")
 
@@ -171,12 +196,13 @@ class SessionManager:
     def list_sessions(self) -> List[str]:
         self.prune_expired_sessions()
         session_ids = set(self._sessions.keys())
-        if self.redis_client:
+        redis_client = self._redis()
+        if redis_client:
             try:
                 # SCAN, not KEYS: KEYS blocks the single-threaded Redis
                 # server for the whole keyspace scan, which is fine on a
                 # dev box but a real problem on a shared/production Redis.
-                for key in self.redis_client.scan_iter(match=f"{REDIS_KEY_PREFIX}*", count=200):
+                for key in redis_client.scan_iter(match=f"{REDIS_KEY_PREFIX}*", count=200):
                     session_ids.add(key[len(REDIS_KEY_PREFIX):])
             except Exception as e:
                 logger.debug(f"[SessionManager] Redis list error: {e}")

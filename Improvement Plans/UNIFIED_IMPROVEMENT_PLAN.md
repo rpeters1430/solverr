@@ -9,9 +9,14 @@ bug reproduced in the current code at the time.
 `app/config.py:185`): status summary and phase notes below updated to match
 what has landed since the 2026-08-23/2026-09-03 passes — the CodSpeed
 benchmark suite, the unused-Jinja dependency removal, and confirmation of
-which "not done" items are still genuinely open. See the new "Competitive
-scan — TRAWL" section at the bottom for what TRAWL's 2026-09-04 `v1.5.0`
-release adds that Solverr doesn't have yet.
+which "not done" items are still genuinely open. See the "Competitive scan
+— TRAWL" section at the bottom for what TRAWL's 2026-09-04 `v1.5.0` release
+adds relative to Solverr.
+
+**Same-day follow-up (2026-09-10):** AWS WAF detection, Redis reconnection
+resilience, and MCP server support (the TRAWL-scan items 1-3 below) were
+implemented right after the scan above — see each item's "done" note for
+what shipped and how it was verified.
 
 ## Status summary
 
@@ -294,14 +299,9 @@ Not done (deliberately deferred):
    list) — now a more natural next step since `browser/` is already split
    into focused modules, each of which is a smaller surface to retrofit
    typed errors into than the old single file.
-6. Redis reconnection resilience for `CookieCache`/`SessionManager` (see
-   "Competitive scan — TRAWL" below, item 3) — a real gap for anyone
-   running the `distributed` compose profile: today a Redis blip at
-   process startup permanently drops that replica to local-only cache for
-   its whole lifetime instead of retrying.
-7. Evaluate AWS WAF challenge detection (item 1 below) — cheap addition to
-   `app/solver/browser/challenges.py` in the same style as the existing
-   DataDome/Akamai signature lists.
+6. ~~Redis reconnection resilience for `CookieCache`/`SessionManager`~~ —
+   done 2026-09-10, see "Competitive scan — TRAWL" below, item 3.
+7. ~~AWS WAF challenge detection~~ — done 2026-09-10, see item 1 below.
 
 ## Competitive scan — TRAWL `v1.5.0` (released 2026-09-04)
 
@@ -313,40 +313,51 @@ already covered. Solverr already has DataDome and Akamai detection
 (`app/solver/browser/challenges.py`'s `WAF_SIGNATURES`, counted in
 `engine.py`), so those aren't gaps — the items below are.
 
-1. **AWS WAF challenge detection — genuine gap.** TRAWL 1.5.0 added
-   dedicated AWS WAF (`aws-waf-token`/`awswaf`-style challenge page)
-   detection alongside its existing DataDome support. `challenges.py` has
-   no AWS WAF signature entry today. Low-risk, additive change: add an
-   `"aws_waf"` entry to the existing signature-list pattern (same shape as
-   `"datadome": ["datadome", "geo.captcha-delivery.com"]`) once real AWS
-   WAF challenge-page markup is confirmed (the `x-amzn-waf-action` header
-   and `aws-waf-token` cookie name are the usual tells) — needs a live
-   sample to get the signature right rather than guessing.
+1. **AWS WAF challenge detection — done 2026-09-10.** Added an `"aws_waf"`
+   entry to `CHALLENGE_MARKERS` in `app/solver/browser/challenges.py`,
+   keyed on the `window.gokuProps` JS variable AWS WAF's challenge page
+   sets ("goku" is its internal codename) plus the `aws-waf-token` cookie
+   name/`awswaf` substring, mirroring the existing DataDome/Akamai entries.
+   Counted in `PerformanceMetrics.challenges_solved["aws_waf"]`
+   (`engine.py`). Covered by `tests/test_challenge_detection.py`.
 
-2. **MCP (Model Context Protocol) server — bigger, optional item.** TRAWL
-   1.5.0's headline feature is first-class MCP tools (`read`, `scrape`,
-   `screenshot`, `inspect`) so an AI agent can drive it directly instead of
-   only through the FlareSolverr/`/scrape` HTTP API. Solverr has no MCP
-   surface at all. This is a real differentiator worth considering, but
-   it's a new subsystem (an MCP server process/endpoint, tool schemas
-   mapping onto the existing `/scrape` capabilities), not a bug fix or
-   small addition — scope it as its own phase/RFC rather than folding it
-   into this plan's existing phases if it's pursued.
+2. **MCP (Model Context Protocol) server — done 2026-09-10.** Added
+   `app/mcp_server.py` using the `mcp` package's `MCPServer` (the `mcp` 2.x
+   successor to 1.x's `FastMCP` — verified directly against the installed
+   `mcp==2.2.0` API rather than assumed, since this is a fast-moving SDK),
+   mounted at `/mcp` in `app/main.py` and gated by `ENABLE_MCP` (default
+   on). Four tools: `solverr_scrape`, `solverr_screenshot`,
+   `solverr_get_cookies`, `solverr_get_stats` — all calling directly into
+   the same `solver_engine`/`cookie_cache`/`browser_pool` singletons the
+   HTTP routes use. Two integration details that would otherwise silently
+   break this in production, both verified end-to-end with a real
+   `TestClient` against the actual pinned dependency versions before
+   shipping: (a) mounting a Starlette sub-app does **not** invoke its own
+   lifespan, so `mcp_server.session_manager.run()` must be entered
+   explicitly from `app/main.py`'s lifespan via `contextlib.AsyncExitStack`
+   — without this, every request 500s with "Task group is not
+   initialized"; (b) `streamable_http_app()` auto-enables DNS-rebinding
+   Host-header validation when `host="127.0.0.1"` (its default), which
+   would reject nearly every real request to Solverr's network-exposed
+   deployment (Docker network alias, NAS IP, reverse-proxy hostname) with
+   a 421 — disabled explicitly via `TransportSecuritySettings` since that
+   protection targets a different threat model (a localhost desktop MCP
+   server against browser-based DNS rebinding) than Solverr's
+   already-`X-Api-Key`-gated network service. Covered by
+   `tests/test_mcp_server.py` (tool registration, a cache-backed tool call,
+   and the API-key gate applying to `/mcp` like every other route).
 
-3. **Redis reconnection resilience — genuine gap, small fix.** TRAWL 1.5.0
-   changelog: "Redis reconnection after startup failures instead of
-   permanent cache disabling." Solverr's `CookieCache._init_redis()`
-   (`app/solver/cache.py`) and `SessionManager._init_redis()`
-   (`app/solver/sessions.py`) both do the same thing today: if the initial
-   `redis.Redis.from_url(...).ping()` fails at construction time,
-   `self.redis_client` is set to `None` permanently for that process's
-   lifetime — a transient Redis restart during container startup (a real
-   scenario under `docker compose --profile distributed up`, where
-   `solverr` can start before `redis` is ready) silently and permanently
-   downgrades that replica to local-only cache/sessions until the whole
-   process is restarted. Fix would be a periodic retry (e.g. attempt
-   reconnection every N seconds/requests when `redis_client is None` and
-   `REDIS_URL` is set) rather than a one-shot check.
+3. **Redis reconnection resilience — done 2026-09-10.** `CookieCache`
+   (`app/solver/cache.py`) and `SessionManager` (`app/solver/sessions.py`)
+   each replaced their one-shot `_init_redis()` with a `_redis()` helper
+   that retries the connection on a 30s cooldown
+   (`REDIS_RECONNECT_INTERVAL_SECONDS`) instead of setting `redis_client`
+   to `None` permanently on the first failure — a transient Redis restart
+   during container startup (`docker compose --profile distributed up`,
+   where `solverr` can start before `redis` is ready) now self-heals
+   instead of stranding that replica on local-only cache/sessions until a
+   manual restart. Covered by a reconnection test in each of
+   `tests/test_cache.py` and `tests/test_sessions.py`.
 
 4. **Response/debug capture (console logs, network requests, redirect
    chain) — matches this plan's own Phase 3/6, not a new item.** TRAWL
@@ -369,8 +380,8 @@ already covered. Solverr already has DataDome and Akamai detection
    Bun/Tini process-management changes are runtime-specific to its Node/Bun
    stack and don't map onto Solverr's Python/`tini`-already-PID-1 setup.
 
-**Recommendation:** items 1 and 3 are small, additive, and worth doing in
-a normal pass. Item 4 is worth scoping as part of a future `/scrape`
-enhancement. Item 2 (MCP) is the one worth a real decision — it's
-valuable but sizable; raise it with the user before committing engineering
-time rather than assuming it belongs on the roadmap.
+**Status:** items 1-3 implemented 2026-09-10 (see above). Item 4 (response/
+debug capture) is still open and worth scoping as part of a future
+`/scrape` enhancement — an `inspect`-style MCP tool would be a natural
+consumer of it once it exists, alongside the HTTP API. Item 5 (MITM proxy,
+FFmpeg, Bun/Tini) remains not recommended, per the reasoning above.

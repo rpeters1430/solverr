@@ -16,31 +16,57 @@ logger = logging.getLogger("solverr.cache")
 # into a single write instead of one blocking json.dump() per call.
 DEBOUNCE_SECONDS = 2.0
 
+# Minimum interval between Redis reconnection attempts once the client is
+# down. Without this, a permanently-unreachable Redis would retry (and pay
+# the socket_connect_timeout) on every single cache lookup.
+REDIS_RECONNECT_INTERVAL_SECONDS = 30.0
+
 class CookieCache:
     def __init__(self, cache_file: str = settings.CACHE_FILE, redis_url: Optional[str] = settings.REDIS_URL):
         self.cache_file = cache_file
         self.redis_url = redis_url
         self.redis_client = None
+        self._redis_last_attempt = 0.0
         self._store: Dict[str, Dict[str, dict]] = {}
         self._write_lock = threading.Lock()
         self._save_pending = False
         self._save_task: Optional[asyncio.Task] = None
 
         if self.redis_url:
-            self._init_redis()
-        else:
+            self._redis()
+        if not self.redis_client:
+            # Either Redis isn't configured, or the initial connection attempt
+            # above failed - fall back to local disk so the process still
+            # functions. If Redis later comes back (see _redis()), new writes
+            # go there instead; anything written locally in the meantime isn't
+            # migrated over, but isn't lost either.
             self._load_from_disk()
 
-    def _init_redis(self):
+    def _redis(self):
+        """Return a live Redis client, retrying the connection on a cooldown
+        if the last attempt failed. Previously a failed connection at
+        __init__ time (e.g. Redis not up yet when this container started,
+        common under `docker compose --profile distributed up`) permanently
+        disabled Redis for the process's entire lifetime - this makes that
+        recoverable without a restart."""
+        if self.redis_client is not None:
+            return self.redis_client
+        if not self.redis_url:
+            return None
+        now = time.time()
+        if now - self._redis_last_attempt < REDIS_RECONNECT_INTERVAL_SECONDS:
+            return None
+        self._redis_last_attempt = now
         try:
             import redis
-            self.redis_client = redis.Redis.from_url(self.redis_url, decode_responses=True, socket_connect_timeout=2)
-            self.redis_client.ping()
+            client = redis.Redis.from_url(self.redis_url, decode_responses=True, socket_connect_timeout=2)
+            client.ping()
+            self.redis_client = client
             logger.info(f"[CookieCache] Connected to distributed Redis cache backend at {self.redis_url}")
+            return client
         except Exception as e:
-            logger.warning(f"[CookieCache] Redis connection failed ({e}). Falling back to local disk JSON cache.")
-            self.redis_client = None
-            self._load_from_disk()
+            logger.warning(f"[CookieCache] Redis connection attempt failed ({e}). Using local disk JSON cache until the next retry.")
+            return None
 
     def _cookie_key(self, cookie: CookieModel) -> str:
         # Identity is domain + path + name, not just name - two cookies with
@@ -68,7 +94,7 @@ class CookieCache:
         result: List[CookieModel] = []
         now = time.time()
 
-        if self.redis_client:
+        if self._redis():
             try:
                 keys = self._scan_keys(f"solverr:cookie:{target_domain}:*")
                 # Also check wildcard parent domains
@@ -116,7 +142,7 @@ class CookieCache:
         domain = self._normalize_domain(url_or_domain)
         now = time.time()
 
-        if self.redis_client:
+        if self._redis():
             try:
                 for c in cookies:
                     c_dict = c.model_dump()
@@ -166,7 +192,7 @@ class CookieCache:
             del cookies_for_domain[key]
 
     def clear(self):
-        if self.redis_client:
+        if self._redis():
             try:
                 keys = self._scan_keys("solverr:cookie:*")
                 if keys:
@@ -183,7 +209,7 @@ class CookieCache:
         out = {}
         now = time.time()
 
-        if self.redis_client:
+        if self._redis():
             try:
                 keys = self._scan_keys("solverr:cookie:*")
                 for key in keys:

@@ -17,6 +17,14 @@ class TestChallengeDetection(unittest.TestCase):
     def test_detects_datadome(self):
         self.assertEqual(detect_challenge("", "geo.captcha-delivery.com", check_content=True), "datadome")
 
+    def test_detects_aws_waf(self):
+        content = "<script>window.gokuProps = {key: 'abc'};</script>"
+        self.assertIsNone(detect_challenge("Request Blocked", content, check_content=False))
+        self.assertEqual(detect_challenge("Request Blocked", content, check_content=True), "aws_waf")
+
+    def test_detects_aws_waf_token_cookie_marker(self):
+        self.assertEqual(detect_challenge("", "document.cookie contains aws-waf-token=...", check_content=True), "aws_waf")
+
     def test_clean_page_has_no_challenge(self):
         self.assertIsNone(detect_challenge("My Cool Blog", "<h1>Welcome</h1>", check_content=True))
 

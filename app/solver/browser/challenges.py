@@ -11,7 +11,12 @@ CHALLENGE_MARKERS: Dict[str, List[str]] = {
     "geetest": ["geetest", "gt_captcha"],
     "imperva": ["incapsula", "_incapsula_resource", "visid_incap", "sec-cpt"],
     "datadome": ["datadome", "geo.captcha-delivery.com"],
-    "akamai": ["akamai", "ak_bmsc"]
+    "akamai": ["akamai", "ak_bmsc"],
+    # AWS WAF's challenge JS exposes its config as `window.gokuProps`
+    # ("goku" is AWS WAF's internal codename) and sets an `aws-waf-token`
+    # cookie - both are distinctive enough to key off without false-positives
+    # from unrelated AWS-hosted sites.
+    "aws_waf": ["gokuprops", "aws-waf-token", "awswaf"]
 }
 
 AGE_GATE_MARKERS = ["disclaimer-dialog", "close_enter_site_button", "btn-agree"]

@@ -1,0 +1,149 @@
+"""MCP (Model Context Protocol) server exposing Solverr's tiered solver as
+tools an AI agent can call directly, alongside the existing FlareSolverr
+(`/v1`, `/v2`) and native (`/scrape`) HTTP APIs. Mounted at `/mcp` by
+app/main.py when `settings.ENABLE_MCP` is true (the default).
+
+Uses the `mcp` package's `MCPServer` (the `mcp` 2.x successor to the 1.x
+`FastMCP` class - see the migration note in `mcp.server.fastmcp`). Tools
+reuse the same `solver_engine`/`cookie_cache`/`browser_pool` singletons the
+HTTP routes use, so a solve/cache hit through MCP shows up in the same
+`/metrics` and dashboard the rest of Solverr does.
+"""
+import base64
+import logging
+from typing import Any, Dict, Optional
+
+from mcp.server.mcpserver import Image, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.transport_security import TransportSecuritySettings
+from starlette.applications import Starlette
+
+from app.api.flaresolverr import _extract_data
+from app.config import settings
+from app.models.flaresolverr import ScrapeRequest
+from app.solver.browser import browser_pool
+from app.solver.cache import cookie_cache
+from app.solver.engine import metrics, solver_engine
+
+logger = logging.getLogger("solverr.mcp")
+
+mcp_server: MCPServer = MCPServer(
+    name="solverr",
+    version=settings.VERSION,
+    instructions=(
+        "Solverr solves Cloudflare (Turnstile, 5s interstitial), Google reCAPTCHA v2, "
+        "hCaptcha, GeeTest, Imperva, DataDome, Akamai, and AWS WAF challenges, then "
+        "returns the resulting page. Use solverr_scrape to fetch a URL's content, "
+        "solverr_screenshot for a visual capture, solverr_get_cookies to inspect "
+        "clearance cookies Solverr already holds for a domain, and solverr_get_stats "
+        "for engine/browser-pool health."
+    ),
+)
+
+
+@mcp_server.tool()
+async def solverr_scrape(
+    url: str,
+    method: str = "GET",
+    tier: str = "auto",
+    wait_selector: Optional[str] = None,
+    extract_rules: Optional[Dict[str, str]] = None,
+    max_timeout_ms: int = 60000,
+) -> Dict[str, Any]:
+    """Fetch a URL through Solverr's tiered solver, automatically clearing any
+    Cloudflare/CAPTCHA/WAF challenge in the way, and return its content.
+
+    tier: "auto" (default, escalates only as needed), "tier1_tls" (Fast TLS
+    only, no browser - fails rather than escalating if a challenge is hit),
+    "tier3_browser" (force a stealth browser solve), or "tier4_proxy".
+    extract_rules: optional {name: rule} map for pulling fields out of the
+    returned HTML - rule is a CSS selector (text), "selector@attr" (an
+    attribute), "selector[]" (a list of matches), or "regex:pattern".
+    """
+    try:
+        req = ScrapeRequest(
+            url=url,
+            method=method,
+            tier=tier,
+            wait_selector=wait_selector,
+            maxTimeout=max_timeout_ms,
+        ).to_v1_request()
+        solution = await solver_engine.process_request(req)
+    except Exception as e:
+        raise ToolError(f"Scrape failed for {url}: {e}") from e
+
+    extracted = None
+    if extract_rules and solution.response:
+        extracted = _extract_data(solution.response, extract_rules)
+
+    return {
+        "url": solution.url,
+        "http_status": solution.status,
+        "tier_used": solution.tier or "tier1_fast_tls",
+        "challenge_type": solution.challengeType,
+        "content": solution.response,
+        "extracted": extracted,
+        "cookie_count": len(solution.cookies),
+    }
+
+
+@mcp_server.tool()
+async def solverr_screenshot(url: str, max_timeout_ms: int = 60000) -> Image:
+    """Solve any challenge on a URL and return a PNG screenshot of the
+    resulting page. Always uses the stealth browser tier, since a screenshot
+    requires a real rendered page rather than a raw HTTP response."""
+    try:
+        req = ScrapeRequest(
+            url=url,
+            tier="tier3_browser",
+            screenshot=True,
+            maxTimeout=max_timeout_ms,
+        ).to_v1_request()
+        solution = await solver_engine.process_request(req)
+    except Exception as e:
+        raise ToolError(f"Screenshot failed for {url}: {e}") from e
+
+    if not solution.screenshot:
+        raise ToolError(f"No screenshot was captured for {url} (http_status={solution.status})")
+    return Image(data=base64.b64decode(solution.screenshot), format="png")
+
+
+@mcp_server.tool()
+def solverr_get_cookies(domain: str) -> Dict[str, str]:
+    """Return clearance cookies (e.g. cf_clearance) Solverr already has
+    cached for a domain, without making a new request. Empty if nothing is
+    cached yet for that domain."""
+    return cookie_cache.get_cookie_dict(domain)
+
+
+@mcp_server.tool()
+def solverr_get_stats() -> Dict[str, Any]:
+    """Return Solverr's current engine health: per-tier request counts,
+    challenge types solved, cache hit rate, timeouts, and browser pool
+    utilization."""
+    stats = metrics.to_dict()
+    stats["browser_pool"] = browser_pool.pool_stats()
+    return stats
+
+
+def create_mcp_asgi_app() -> Starlette:
+    """Build the MCP Streamable HTTP ASGI app. Must be called exactly once,
+    before `mcp_server.session_manager` is accessed - app/main.py's lifespan
+    enters that session manager's run() context alongside its own setup.
+
+    `stateless_http=True` avoids sticky-session requirements (each request
+    gets its own transport), which matters once Solverr runs multiple
+    replicas behind a load balancer (see the "Horizontal Scaling" README
+    section) with no guarantee two requests from the same MCP client land on
+    the same replica. DNS-rebinding protection is disabled: it defends a
+    desktop MCP server bound to localhost against a malicious webpage in a
+    browser rebinding DNS to reach it, which doesn't apply to Solverr's
+    network-exposed, X-Api-Key-gated deployment model (app/main.py's
+    middleware already covers this path exactly like every other endpoint).
+    """
+    return mcp_server.streamable_http_app(
+        streamable_http_path="/",
+        stateless_http=True,
+        json_response=True,
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    )

@@ -77,6 +77,41 @@ class TestCookieCache(unittest.TestCase):
         self.assertEqual(len(fetched), 1)
         self.assertEqual(fetched[0].value, "new_val")
 
+    def test_redis_reconnects_after_initial_failure(self):
+        # A Redis outage at process startup (e.g. `redis` not up yet under
+        # `docker compose --profile distributed up`) must not permanently
+        # strand the cache on local disk for the process's whole lifetime -
+        # it should retry and pick Redis back up once it's reachable.
+        class FakeRedisClient:
+            def __init__(self, healthy):
+                self.healthy = healthy
+
+            def ping(self):
+                if not self.healthy:
+                    raise ConnectionError("redis down")
+
+        attempts = {"n": 0}
+
+        def fake_from_url(*args, **kwargs):
+            attempts["n"] += 1
+            return FakeRedisClient(healthy=attempts["n"] > 1)
+
+        with patch("redis.Redis.from_url", side_effect=fake_from_url):
+            cache = CookieCache(cache_file=self.cache_file, redis_url="redis://fake-host:6379/0")
+            self.assertIsNone(cache.redis_client)
+            self.assertEqual(attempts["n"], 1)
+
+            # Still within the reconnect cooldown - no new attempt yet.
+            self.assertIsNone(cache._redis())
+            self.assertEqual(attempts["n"], 1)
+
+            # Cooldown elapsed - retries and succeeds this time.
+            cache._redis_last_attempt = 0
+            client = cache._redis()
+            self.assertIsNotNone(client)
+            self.assertEqual(attempts["n"], 2)
+            self.assertIs(cache.redis_client, client)
+
     def test_export_netscape_format(self):
         cookies = [
             CookieModel(name="cf_clearance", value="token123", domain=".example.com", path="/", secure=True, expires=1800000000)
