@@ -5,6 +5,14 @@ Merges `SOLVERR_REVIEW.md` (code-level review with line citations) and
 verified against `main` on 2026-08-23 before implementation — every cited
 bug reproduced in the current code at the time.
 
+**Re-verified against `main` on 2026-09-10** (now at `VERSION = "1.7.0"`,
+`app/config.py:185`): status summary and phase notes below updated to match
+what has landed since the 2026-08-23/2026-09-03 passes — the CodSpeed
+benchmark suite, the unused-Jinja dependency removal, and confirmation of
+which "not done" items are still genuinely open. See the new "Competitive
+scan — TRAWL" section at the bottom for what TRAWL's 2026-09-04 `v1.5.0`
+release adds that Solverr doesn't have yet.
+
 ## Status summary
 
 - **Phase 0** (correctness/security bugs): done.
@@ -17,8 +25,11 @@ bug reproduced in the current code at the time.
   hardening (`cap_drop: ALL`) investigated and deliberately **not**
   defaulted on — see the finding below.
 - **Phase 8** (CI/CD): ruff + a real Docker build/health smoke test added
-  to CI; bandit added as non-blocking; load testing and full pytest
-  coverage tracking not done.
+  to CI; bandit added as non-blocking; a CodSpeed micro-benchmark suite
+  (`benchmarks/`, `.github/workflows/codspeed.yml`) covering the CPU-bound
+  hot paths landed 2026-09-08 for continuous regression detection — this
+  is complementary to, not a substitute for, the still-not-done
+  concurrency-level load testing and full pytest coverage tracking below.
 - **Phase 1** (architecture/maintainability): partially done — `tier`
   field, exception-detail redaction, and (2026-09-03) the `browser.py`
   package split are done. A typed exception hierarchy was **not**
@@ -220,6 +231,15 @@ Done:
   to the real multi-tag push. Validated locally against this exact
   workflow logic (built image, ran the same curl-polling loop, confirmed
   pass/fail behavior) before committing it to CI.
+- **CodSpeed benchmark suite** (2026-09-08): `pytest-codspeed` benchmarks
+  in `benchmarks/` (kept out of `tests/` so `python -m unittest discover -s
+  tests` is unaffected) covering challenge detection, the cookie cache,
+  sessions, request/response models, `/scrape` extraction, Tier 1 profile
+  selection, SSRF checks, metrics rendering, and cursor geometry — run in
+  CI simulation mode on every push/PR via
+  `.github/workflows/codspeed.yml`. Catches CPU-hot-path regressions
+  automatically; still doesn't answer the concurrency/throughput questions
+  the "Not done" load-testing item below covers.
 
 Not done:
 - More browser-pool tests beyond the cancellation-safety one added in
@@ -232,10 +252,16 @@ Not done:
 ## Phase 9 — Versioning & Dependencies (partially done)
 
 Done:
-- `VERSION` is now plain semver (`"1.5.0"`), `EDITION` split out
-  (`"ultra"`), `DISPLAY_VERSION` (`"1.5.0-ultra"`) used for
-  human-facing display (startup log, dashboard) — fixes the `vv1.5.0-ultra`
-  bug at the source instead of patching the one call site.
+- `VERSION` is now plain semver (currently `"1.7.0"` as of this pass,
+  bumped from `"1.5.0"` when Phase 1's request-wide timeout budgeting
+  shipped), `EDITION` split out (`"ultra"`), `DISPLAY_VERSION`
+  (`"1.7.0-ultra"`) used for human-facing display (startup log,
+  dashboard) — fixes the `vv1.5.0-ultra` bug at the source instead of
+  patching the one call site.
+- Unused `Jinja2` dependency removed from `requirements.txt`
+  (2026-09-08) — the app doesn't use server-side Jinja templating
+  (`app/templates/index.html` is served as a static file), so this was
+  dead weight in the runtime image.
 
 Not done (deliberately deferred):
 - Full `pyproject.toml`/`uv.lock` migration with
@@ -268,3 +294,83 @@ Not done (deliberately deferred):
    list) — now a more natural next step since `browser/` is already split
    into focused modules, each of which is a smaller surface to retrofit
    typed errors into than the old single file.
+6. Redis reconnection resilience for `CookieCache`/`SessionManager` (see
+   "Competitive scan — TRAWL" below, item 3) — a real gap for anyone
+   running the `distributed` compose profile: today a Redis blip at
+   process startup permanently drops that replica to local-only cache for
+   its whole lifetime instead of retrying.
+7. Evaluate AWS WAF challenge detection (item 1 below) — cheap addition to
+   `app/solver/browser/challenges.py` in the same style as the existing
+   DataDome/Akamai signature lists.
+
+## Competitive scan — TRAWL `v1.5.0` (released 2026-09-04)
+
+TRAWL (`germondai/trawl`, the other project CLAUDE.md and the README name
+as a comparison point) shipped `v1.5.0` on 2026-09-04, six days before this
+pass. Its changelog and README (`dev` branch) were reviewed against
+Solverr's current `app/` to see what's genuinely missing here versus
+already covered. Solverr already has DataDome and Akamai detection
+(`app/solver/browser/challenges.py`'s `WAF_SIGNATURES`, counted in
+`engine.py`), so those aren't gaps — the items below are.
+
+1. **AWS WAF challenge detection — genuine gap.** TRAWL 1.5.0 added
+   dedicated AWS WAF (`aws-waf-token`/`awswaf`-style challenge page)
+   detection alongside its existing DataDome support. `challenges.py` has
+   no AWS WAF signature entry today. Low-risk, additive change: add an
+   `"aws_waf"` entry to the existing signature-list pattern (same shape as
+   `"datadome": ["datadome", "geo.captcha-delivery.com"]`) once real AWS
+   WAF challenge-page markup is confirmed (the `x-amzn-waf-action` header
+   and `aws-waf-token` cookie name are the usual tells) — needs a live
+   sample to get the signature right rather than guessing.
+
+2. **MCP (Model Context Protocol) server — bigger, optional item.** TRAWL
+   1.5.0's headline feature is first-class MCP tools (`read`, `scrape`,
+   `screenshot`, `inspect`) so an AI agent can drive it directly instead of
+   only through the FlareSolverr/`/scrape` HTTP API. Solverr has no MCP
+   surface at all. This is a real differentiator worth considering, but
+   it's a new subsystem (an MCP server process/endpoint, tool schemas
+   mapping onto the existing `/scrape` capabilities), not a bug fix or
+   small addition — scope it as its own phase/RFC rather than folding it
+   into this plan's existing phases if it's pursued.
+
+3. **Redis reconnection resilience — genuine gap, small fix.** TRAWL 1.5.0
+   changelog: "Redis reconnection after startup failures instead of
+   permanent cache disabling." Solverr's `CookieCache._init_redis()`
+   (`app/solver/cache.py`) and `SessionManager._init_redis()`
+   (`app/solver/sessions.py`) both do the same thing today: if the initial
+   `redis.Redis.from_url(...).ping()` fails at construction time,
+   `self.redis_client` is set to `None` permanently for that process's
+   lifetime — a transient Redis restart during container startup (a real
+   scenario under `docker compose --profile distributed up`, where
+   `solverr` can start before `redis` is ready) silently and permanently
+   downgrades that replica to local-only cache/sessions until the whole
+   process is restarted. Fix would be a periodic retry (e.g. attempt
+   reconnection every N seconds/requests when `redis_client is None` and
+   `REDIS_URL` is set) rather than a one-shot check.
+
+4. **Response/debug capture (console logs, network requests, redirect
+   chain) — matches this plan's own Phase 3/6, not a new item.** TRAWL
+   1.5.0 added optional response-body/console/network/redirect-chain
+   capture for its `inspect` MCP tool and API. Solverr's `/scrape` has no
+   equivalent today (confirmed: no `console`/`redirectChain`/network-log
+   fields in `app/models/flaresolverr.py` or the browser navigation code).
+   This overlaps with debugging/diagnostics rather than being urgent on
+   its own — worth folding into a future `/scrape` enhancement (e.g. an
+   optional `capture: ["console", "network", "redirects"]` request field)
+   rather than treating as a standalone priority.
+
+5. **Not applicable to Solverr's architecture:** TRAWL's MITM forward-proxy
+   mode (self-signed root CA, RFC 5280 cert-compat fixes in 1.5.0) has no
+   equivalent in Solverr's design — Solverr's `/proxy` is a transparent
+   HTTP proxy without a MITM CA, and introducing one would be a much larger
+   architectural change than anything else in this scan. Not recommended
+   unless a specific user need for MITM HTTPS interception surfaces.
+   Likewise TRAWL's bundled FFmpeg (for video-heavy scrape targets) and
+   Bun/Tini process-management changes are runtime-specific to its Node/Bun
+   stack and don't map onto Solverr's Python/`tini`-already-PID-1 setup.
+
+**Recommendation:** items 1 and 3 are small, additive, and worth doing in
+a normal pass. Item 4 is worth scoping as part of a future `/scrape`
+enhancement. Item 2 (MCP) is the one worth a real decision — it's
+valuable but sizable; raise it with the user before committing engineering
+time rather than assuming it belongs on the roadmap.

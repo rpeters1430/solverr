@@ -257,6 +257,7 @@ curl -N http://localhost:8191/api/events
 | `ALLOWED_HOSTS` | (empty) | Comma-separated hostnames exempted from the private-network block above |
 | `DENIED_HOSTS` | (empty) | Comma-separated hostnames always rejected, regardless of `ALLOW_PRIVATE_NETWORKS` |
 | `MAX_REQUEST_BODY_MB` | `10` | Reject incoming requests whose `Content-Length` exceeds this (`0` disables) |
+| `MAX_RESPONSE_BODY_MB` | `50` | Truncate an oversized solved response body before returning it |
 | `MAX_SCREENSHOT_MB` | `8` | Drop a captured screenshot instead of returning it if it exceeds this size |
 | `CAPTCHA_SOLVER_API_KEY` | `None` | Optional 2Captcha-compatible API key for the Tier 3.5 paid-solver escalation on interactive image challenges |
 | `CAPTCHA_SOLVER_BASE_URL` | `https://2captcha.com` | API base URL - point at another provider's 2captcha-compatible endpoint (e.g. CapSolver) here |
