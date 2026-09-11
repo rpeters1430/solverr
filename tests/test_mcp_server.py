@@ -63,7 +63,12 @@ class TestMCPServer(unittest.TestCase):
             self.assertIn("cf_clearance", content)
             self.assertIn("mcp_test_val", content)
         finally:
+            # cookie_cache is the process-global singleton (the same one a
+            # real dev/CI run persists to data/cookies_cache.json) - popping
+            # the in-memory entry alone would leave that test cookie on
+            # disk, leaking into later runs. Persist the removal too.
             cookie_cache._store.pop("mcp-test.example.com", None)
+            cookie_cache._save_to_disk()
 
     def test_get_stats_reports_engine_and_pool_health(self):
         resp = _rpc(self.client, "tools/call", {"name": "solverr_get_stats", "arguments": {}})

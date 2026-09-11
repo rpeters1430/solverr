@@ -82,21 +82,27 @@ class CookieCache:
         locally during the outage would simply stop being served the moment
         Redis reconnects - not lost from disk, but invisible to callers.
 
-        Two correctness details: (1) each entry keeps the *remaining* portion
-        of its original TTL window (based on its local `timestamp`), not a
-        fresh full COOKIE_CACHE_TTL - otherwise an entry that's nearly (or
-        already) expired locally would get resurrected with a brand new
-        lifetime in Redis. Already-expired entries are dropped instead of
-        migrated. (2) if Redis drops mid-migration, already-migrated entries
-        are removed from the local store but the rest are left in place (and
-        the client invalidated) for the next reconnect attempt to retry,
-        rather than either losing them or clearing the store regardless of
-        whether every write actually succeeded."""
+        Called synchronously from `_redis()`, itself called from the async
+        request path - one blocking call per entry (up to MAX_CACHE_DOMAINS *
+        MAX_COOKIES_PER_DOMAIN of them) would stall the event loop for
+        everyone else for however long that burst takes. A single pipelined
+        batch keeps it to one round trip.
+
+        Each entry keeps the *remaining* portion of its original TTL window
+        (based on its local `timestamp`), not a fresh full COOKIE_CACHE_TTL -
+        otherwise an entry that's nearly (or already) expired locally would
+        get resurrected with a brand new lifetime in Redis. Already-expired
+        entries are dropped without ever going to Redis. If the pipeline
+        itself fails (Redis drops mid-migration), a real connection failure
+        doesn't tell us which queued commands the server actually saw before
+        the connection died - so the whole batch is treated as not migrated,
+        the client is invalidated, and every entry is left in place for the
+        next reconnect to retry (re-sending an already-migrated SET is
+        harmless)."""
         if not self._store:
             return
         now = time.time()
-        migrated = 0
-        connection_failed = False
+        pending: List[tuple] = []  # (domain_key, cookie_key, entry, ttl)
         for domain_key in list(self._store.keys()):
             cookies_dict = self._store[domain_key]
             for cookie_key in list(cookies_dict.keys()):
@@ -105,20 +111,29 @@ class CookieCache:
                 if remaining_ttl <= 0:
                     del cookies_dict[cookie_key]
                     continue
-                if connection_failed:
-                    continue
-                try:
-                    client.set(f"solverr:cookie:{domain_key}:{cookie_key}", json.dumps(entry), ex=int(remaining_ttl))
-                    del cookies_dict[cookie_key]
-                    migrated += 1
-                except Exception as e:
-                    logger.warning(f"[CookieCache] Failed to migrate cookie '{cookie_key}' for domain '{domain_key}' to Redis: {e}")
-                    connection_failed = True
+                pending.append((domain_key, cookie_key, entry, int(remaining_ttl)))
         self._store = {d: c for d, c in self._store.items() if c}
-        if connection_failed:
-            self._invalidate_redis()
-        if migrated:
-            logger.info(f"[CookieCache] Migrated {migrated} locally-cached cookie(s) to Redis after (re)connecting")
+
+        if pending:
+            try:
+                pipe = client.pipeline(transaction=False)
+                for domain_key, cookie_key, entry, ttl in pending:
+                    pipe.set(f"solverr:cookie:{domain_key}:{cookie_key}", json.dumps(entry), ex=ttl)
+                pipe.execute()
+                for domain_key, cookie_key, _entry, _ttl in pending:
+                    cookies_dict = self._store.get(domain_key)
+                    if cookies_dict is not None:
+                        cookies_dict.pop(cookie_key, None)
+                self._store = {d: c for d, c in self._store.items() if c}
+                logger.info(f"[CookieCache] Migrated {len(pending)} locally-cached cookie(s) to Redis after (re)connecting")
+            except Exception as e:
+                logger.warning(f"[CookieCache] Failed to migrate {len(pending)} locally-cached cookie(s) to Redis, will retry on next reconnect: {e}")
+                self._invalidate_redis()
+
+        # Persist the compacted store (expired entries dropped, migrated
+        # ones removed) so the disk fallback doesn't serve stale data if
+        # Redis goes down again before anything else triggers a save.
+        self._save_to_disk()
 
     def _invalidate_redis(self):
         """Drop the current client after an operation failure (as opposed to

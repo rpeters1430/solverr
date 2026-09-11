@@ -111,28 +111,28 @@ class SessionManager:
         (create_session() always populates self._sessions in-memory even
         when _persist() is a no-op) stays invisible to other replicas and
         is lost on restart, until something happens to access it again and
-        re-trigger _persist(). Mirrors CookieCache._migrate_local_store_to_
-        redis()'s partial-failure handling: a session is only dropped from
-        further retry once its write actually succeeds."""
-        if not self._sessions:
+        re-trigger _persist().
+
+        Called synchronously from `_redis()`, itself called from the async
+        request path - one blocking call per session (up to MAX_SESSIONS of
+        them) would stall the event loop for everyone else. A single
+        pipelined batch keeps it to one round trip; if the pipeline itself
+        fails, a real connection failure gives no way to know which queued
+        commands the server saw before it died, so the whole batch is
+        treated as not migrated and left for the next reconnect to retry
+        (mirrors CookieCache._migrate_local_store_to_redis() in cache.py)."""
+        pending = [(sid, sess) for sid, sess in self._sessions.items() if not sess.is_expired()]
+        if not pending:
             return
-        migrated = 0
-        connection_failed = False
-        for sid, sess in list(self._sessions.items()):
-            if sess.is_expired():
-                continue
-            if connection_failed:
-                continue
-            try:
-                client.set(f"{REDIS_KEY_PREFIX}{sid}", json.dumps(sess.to_dict()), ex=sess.ttl)
-                migrated += 1
-            except Exception as e:
-                logger.warning(f"[SessionManager] Failed to migrate session '{sid}' to Redis: {e}")
-                connection_failed = True
-        if connection_failed:
+        try:
+            pipe = client.pipeline(transaction=False)
+            for sid, sess in pending:
+                pipe.set(f"{REDIS_KEY_PREFIX}{sid}", json.dumps(sess.to_dict()), ex=sess.ttl)
+            pipe.execute()
+            logger.info(f"[SessionManager] Migrated {len(pending)} locally-held session(s) to Redis after (re)connecting")
+        except Exception as e:
+            logger.warning(f"[SessionManager] Failed to migrate {len(pending)} locally-held session(s) to Redis, will retry on next reconnect: {e}")
             self._invalidate_redis()
-        if migrated:
-            logger.info(f"[SessionManager] Migrated {migrated} locally-held session(s) to Redis after (re)connecting")
 
     def _invalidate_redis(self):
         """Drop the current client after an operation failure (as opposed to
