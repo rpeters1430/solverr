@@ -7,6 +7,30 @@ from app.config import settings
 from app.models.flaresolverr import CookieModel
 from app.solver.cache import CookieCache
 
+
+class _FakePipeline:
+    """Mimics just enough of redis-py's Pipeline for the migration tests:
+    commands queue locally and only take effect (or fail) in execute() - a
+    connection failure there fails the whole batch, since a real Redis
+    pipeline gives no way to tell which queued commands the server actually
+    saw before the connection died."""
+
+    def __init__(self, client):
+        self._client = client
+        self._commands = []
+
+    def set(self, key, val, ex=None):
+        self._commands.append((key, val))
+        return self
+
+    def execute(self):
+        if not self._client.healthy:
+            raise ConnectionError("redis down")
+        for key, val in self._commands:
+            self._client.store[key] = val
+        return [True] * len(self._commands)
+
+
 class TestCookieCache(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -144,6 +168,9 @@ class TestCookieCache(unittest.TestCase):
                     raise ConnectionError("redis down")
                 return iter(k for k in self.store if fnmatch.fnmatch(k, match))
 
+            def pipeline(self, transaction=True):
+                return _FakePipeline(self)
+
         client = FakeRedisClient()
         with patch("redis.Redis.from_url", return_value=client):
             cache = CookieCache(cache_file=self.cache_file, redis_url="redis://fake-host:6379/0")
@@ -193,43 +220,38 @@ class TestCookieCache(unittest.TestCase):
         self.assertIs(cache.redis_client, client)
         self.assertEqual(cache._store, {}, "the expired entry should be dropped, not migrated")
 
-    def test_migration_leaves_failed_entries_for_the_next_attempt(self):
-        # If Redis drops mid-migration, entries that already migrated must
-        # not be re-sent (and shouldn't need to be), but the rest must stay
-        # in the local store for the next reconnect to retry - not be
-        # silently discarded along with the ones that succeeded.
-        class FlakyMidMigrationClient:
+    def test_migration_leaves_everything_for_retry_if_the_pipeline_fails(self):
+        # Migration is one pipelined batch (see _FakePipeline): if Redis
+        # drops during execute(), there's no way to know which of the
+        # queued commands the server actually applied before the connection
+        # died, so the whole batch must be treated as not migrated - nothing
+        # removed from the local store, client invalidated for retry.
+        class DyingMidPipelineClient:
             def __init__(self):
-                self.calls = 0
+                self.healthy = True
                 self.store = {}
 
             def ping(self):
                 pass
 
-            def set(self, key, val, ex=None):
-                self.calls += 1
-                if self.calls > 1:
-                    raise ConnectionError("redis down mid-migration")
-                self.store[key] = val
+            def pipeline(self, transaction=True):
+                return _FakePipeline(self)
 
-        client = FlakyMidMigrationClient()
+        client = DyingMidPipelineClient()
         with patch("redis.Redis.from_url", return_value=None):
             cache = CookieCache(cache_file=self.cache_file, redis_url=None)
         cache.set_cookies("https://a.example.com", [CookieModel(name="c", value="v1", domain=".a.example.com")])
         cache.set_cookies("https://b.example.com", [CookieModel(name="c", value="v2", domain=".b.example.com")])
         self.assertEqual(len(cache._store), 2)
 
+        client.healthy = False  # the pipeline's execute() will fail
         cache.redis_url = "redis://fake-host:6379/0"
         with patch("redis.Redis.from_url", return_value=client):
             cache._redis_last_attempt = 0
             cache._redis()
 
-        # The connection was invalidated after the failed second write.
-        self.assertIsNone(cache.redis_client)
-        # Exactly one domain migrated (removed from local store); the other
-        # is still there, ready to be retried on the next reconnect.
-        self.assertEqual(len(cache._store), 1)
-        self.assertEqual(client.calls, 2)
+        self.assertIsNone(cache.redis_client, "the client should be invalidated after a failed migration batch")
+        self.assertEqual(len(cache._store), 2, "nothing should be dropped when the whole batch fails")
 
     def test_redis_invalidated_and_retried_after_post_connect_outage(self):
         # A successful initial connection that later drops (Redis restarted,

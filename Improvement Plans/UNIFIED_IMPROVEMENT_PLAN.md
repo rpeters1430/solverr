@@ -454,6 +454,65 @@ already covered. Solverr already has DataDome and Akamai detection
    to the caller. Covered by a test asserting a planted secret string
    never appears in the tool result.
 
+   **Fourth correction (2026-09-11, PR review round 4):** both migration
+   methods call `_redis()` synchronously from the async solve path, then
+   issued one blocking Redis `SET` per entry before returning — with
+   `MAX_CACHE_DOMAINS=1000` * `MAX_COOKIES_PER_DOMAIN=100` (cache) or
+   `MAX_SESSIONS` (sessions), a prolonged outage could mean the first
+   request after reconnect blocks the whole event loop on thousands of
+   sequential round trips, stalling every other concurrent request. Fixed
+   by batching each migration into one `client.pipeline()` + one
+   `execute()` call instead of N separate calls. A genuine connection
+   failure during a pipeline gives no reliable way to tell which queued
+   commands the server actually processed before it died, so a failed
+   pipeline is now treated as "nothing migrated" (client invalidated,
+   every entry left for the next reconnect to retry) rather than the
+   previous per-entry partial-success bookkeeping, which pipelining made
+   moot anyway. Also fixed: `CookieCache`'s compacted local store (expired
+   entries dropped, migrated ones removed) was never persisted to disk
+   after migration, so a second Redis outage before any other write would
+   fall back to a stale/empty on-disk cache instead of the migration's own
+   result — `_save_to_disk()` is now called at the end of
+   `_migrate_local_store_to_redis()`. Covered by updated pipeline-aware
+   tests in `tests/test_cache.py` and `tests/test_sessions.py`.
+
+   **Two round-4 findings deliberately not fixed, with reasoning left on
+   the PR:**
+   - *AWS WAF detection can be missed between content checks* — verified
+     real: `browser.py`'s solve loop only re-checks `page.content()` every
+     4th iteration (`content_check_every`), and on the skipped iterations
+     `detect_challenge()` can only match via the page title. AWS WAF has no
+     title marker, so a page titled e.g. "Request Blocked" can read as
+     clean on an intervening iteration even though the challenge is still
+     up. Confirmed this is **not new or `aws_waf`-specific**: `recaptcha`,
+     `hcaptcha`, `geetest`, `imperva`, `datadome`, and `akamai` all have the
+     exact same gap already (only the Cloudflare/DDoS-Guard entries happen
+     to have title markers too) — `aws_waf` just adds one more instance of
+     a pre-existing systemic timing gap in the shared loop. A real fix
+     means changing that loop's clear-page logic (e.g. requiring the *last*
+     content check to have come back clean, not just the current
+     title-only check) for every challenge type at once — real regression
+     risk to the core tier-3 solve path, and deserves its own focused,
+     verified pass rather than being bundled into this PR. Tracked here as
+     a follow-up rather than fixed.
+   - *Migration can overwrite a newer value another replica wrote while
+     this one was disconnected* — verified, but found to be a
+     **pre-existing, systemic property of both classes' Redis writes, not
+     something migration introduces**: `CookieCache.set_cookies()`'s normal
+     (non-migration) Redis path already does an unconditional `client.set()`
+     for every cookie on every call, and `SessionManager._persist()`
+     already does the same for every session update — both are already
+     last-write-wins with no cross-replica conflict check, in completely
+     ordinary operation, Redis outage or not. Adding a compare-before-write
+     check (timestamp comparison, or a real CAS/`WATCH`) *only* to the
+     migration path would be inconsistent, narrow hardening that leaves the
+     much more common non-migration case exactly as "unsafe" as before.
+     A coherent fix needs a real distributed-consistency decision applied
+     uniformly to every write path in both classes (last-write-wins is
+     arguably an intentional, acceptable simplification for interchangeable
+     clearance cookies; less clearly so for session state) — scoped as its
+     own follow-up rather than a piecemeal change to migration alone.
+
 4. **Response/debug capture (console logs, network requests, redirect
    chain) — matches this plan's own Phase 3/6, not a new item.** TRAWL
    1.5.0 added optional response-body/console/network/redirect-chain

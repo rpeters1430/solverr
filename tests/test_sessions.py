@@ -5,6 +5,27 @@ from app.config import settings
 from app.models.flaresolverr import CookieModel
 from app.solver.sessions import REDIS_KEY_PREFIX, SessionManager
 
+
+class _FakePipeline:
+    """Mirrors tests/test_cache.py's _FakePipeline: commands queue locally,
+    a connection failure surfaces only in execute() and fails the batch."""
+
+    def __init__(self, client):
+        self._client = client
+        self._commands = []
+
+    def set(self, key, val, ex=None):
+        self._commands.append((key, val))
+        return self
+
+    def execute(self):
+        if not self._client.healthy:
+            raise ConnectionError("redis down")
+        for key, val in self._commands:
+            self._client.store[key] = val
+        return [True] * len(self._commands)
+
+
 class TestSessionManager(unittest.TestCase):
     def setUp(self):
         self.mgr = SessionManager()
@@ -110,6 +131,9 @@ class TestSessionManager(unittest.TestCase):
                 if not self.healthy:
                     raise ConnectionError("redis down")
                 self.store[key] = val
+
+            def pipeline(self, transaction=True):
+                return _FakePipeline(self)
 
         client = FakeRedisClient()
         with patch("redis.Redis.from_url", return_value=client):
