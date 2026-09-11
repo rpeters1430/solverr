@@ -165,6 +165,72 @@ class TestCookieCache(unittest.TestCase):
             self.assertEqual(len(migrated), 1)
             self.assertEqual(migrated[0].value, "outage_val")
 
+    def test_migration_skips_entries_already_expired_locally(self):
+        # An entry whose local cache-age TTL has already elapsed must not be
+        # resurrected with a brand new Redis TTL on migration.
+        class FakeRedisClient:
+            def ping(self):
+                pass
+
+            def set(self, key, val, ex=None):
+                raise AssertionError("an already-expired entry must not be written to Redis")
+
+        client = FakeRedisClient()
+        with patch("redis.Redis.from_url", return_value=None):
+            cache = CookieCache(cache_file=self.cache_file, redis_url=None)
+        cache.set_cookies(
+            "https://stale.example.com",
+            [CookieModel(name="cf_clearance", value="stale_val", domain=".stale.example.com")],
+        )
+        # Back-date the entry past COOKIE_CACHE_TTL.
+        entry = cache._store["stale.example.com"]["cf_clearance|/"]
+        entry["timestamp"] = time.time() - settings.COOKIE_CACHE_TTL - 60
+
+        cache.redis_url = "redis://fake-host:6379/0"
+        with patch("redis.Redis.from_url", return_value=client):
+            cache._redis_last_attempt = 0
+            cache._redis()
+        self.assertIs(cache.redis_client, client)
+        self.assertEqual(cache._store, {}, "the expired entry should be dropped, not migrated")
+
+    def test_migration_leaves_failed_entries_for_the_next_attempt(self):
+        # If Redis drops mid-migration, entries that already migrated must
+        # not be re-sent (and shouldn't need to be), but the rest must stay
+        # in the local store for the next reconnect to retry - not be
+        # silently discarded along with the ones that succeeded.
+        class FlakyMidMigrationClient:
+            def __init__(self):
+                self.calls = 0
+                self.store = {}
+
+            def ping(self):
+                pass
+
+            def set(self, key, val, ex=None):
+                self.calls += 1
+                if self.calls > 1:
+                    raise ConnectionError("redis down mid-migration")
+                self.store[key] = val
+
+        client = FlakyMidMigrationClient()
+        with patch("redis.Redis.from_url", return_value=None):
+            cache = CookieCache(cache_file=self.cache_file, redis_url=None)
+        cache.set_cookies("https://a.example.com", [CookieModel(name="c", value="v1", domain=".a.example.com")])
+        cache.set_cookies("https://b.example.com", [CookieModel(name="c", value="v2", domain=".b.example.com")])
+        self.assertEqual(len(cache._store), 2)
+
+        cache.redis_url = "redis://fake-host:6379/0"
+        with patch("redis.Redis.from_url", return_value=client):
+            cache._redis_last_attempt = 0
+            cache._redis()
+
+        # The connection was invalidated after the failed second write.
+        self.assertIsNone(cache.redis_client)
+        # Exactly one domain migrated (removed from local store); the other
+        # is still there, ready to be retried on the next reconnect.
+        self.assertEqual(len(cache._store), 1)
+        self.assertEqual(client.calls, 2)
+
     def test_redis_invalidated_and_retried_after_post_connect_outage(self):
         # A successful initial connection that later drops (Redis restarted,
         # network blip) must not be retried forever on every call with no

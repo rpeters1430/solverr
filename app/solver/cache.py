@@ -37,9 +37,9 @@ class CookieCache:
         if not self.redis_client:
             # Either Redis isn't configured, or the initial connection attempt
             # above failed - fall back to local disk so the process still
-            # functions. If Redis later comes back (see _redis()), new writes
-            # go there instead; anything written locally in the meantime isn't
-            # migrated over, but isn't lost either.
+            # functions. If Redis later comes back, _redis() migrates
+            # whatever accumulated here into it (see
+            # _migrate_local_store_to_redis) rather than leaving it stranded.
             self._load_from_disk()
 
     def _redis(self):
@@ -64,7 +64,12 @@ class CookieCache:
             self.redis_client = client
             logger.info(f"[CookieCache] Connected to distributed Redis cache backend at {self.redis_url}")
             self._migrate_local_store_to_redis(client)
-            return client
+            # _migrate_local_store_to_redis calls _invalidate_redis() (which
+            # clears self.redis_client) if Redis died again mid-migration -
+            # return the current value rather than the now-possibly-stale
+            # `client` reference so a caller never gets back a client this
+            # method has already given up on.
+            return self.redis_client
         except Exception as e:
             logger.warning(f"[CookieCache] Redis connection attempt failed ({e}). Using local disk JSON cache until the next retry.")
             return None
@@ -75,19 +80,45 @@ class CookieCache:
         to Redis exclusively once `_redis()` returns a live client (see
         get_cookies/get_all_entries below), so without this, anything cached
         locally during the outage would simply stop being served the moment
-        Redis reconnects - not lost from disk, but invisible to callers."""
+        Redis reconnects - not lost from disk, but invisible to callers.
+
+        Two correctness details: (1) each entry keeps the *remaining* portion
+        of its original TTL window (based on its local `timestamp`), not a
+        fresh full COOKIE_CACHE_TTL - otherwise an entry that's nearly (or
+        already) expired locally would get resurrected with a brand new
+        lifetime in Redis. Already-expired entries are dropped instead of
+        migrated. (2) if Redis drops mid-migration, already-migrated entries
+        are removed from the local store but the rest are left in place (and
+        the client invalidated) for the next reconnect attempt to retry,
+        rather than either losing them or clearing the store regardless of
+        whether every write actually succeeded."""
         if not self._store:
             return
+        now = time.time()
         migrated = 0
-        for domain_key, cookies_dict in self._store.items():
-            for cookie_key, entry in cookies_dict.items():
+        connection_failed = False
+        for domain_key in list(self._store.keys()):
+            cookies_dict = self._store[domain_key]
+            for cookie_key in list(cookies_dict.keys()):
+                entry = cookies_dict[cookie_key]
+                remaining_ttl = settings.COOKIE_CACHE_TTL - (now - entry.get("timestamp", 0))
+                if remaining_ttl <= 0:
+                    del cookies_dict[cookie_key]
+                    continue
+                if connection_failed:
+                    continue
                 try:
-                    client.set(f"solverr:cookie:{domain_key}:{cookie_key}", json.dumps(entry), ex=settings.COOKIE_CACHE_TTL)
+                    client.set(f"solverr:cookie:{domain_key}:{cookie_key}", json.dumps(entry), ex=int(remaining_ttl))
+                    del cookies_dict[cookie_key]
                     migrated += 1
                 except Exception as e:
                     logger.warning(f"[CookieCache] Failed to migrate cookie '{cookie_key}' for domain '{domain_key}' to Redis: {e}")
-        self._store = {}
-        logger.info(f"[CookieCache] Migrated {migrated} locally-cached cookie(s) to Redis after (re)connecting")
+                    connection_failed = True
+        self._store = {d: c for d, c in self._store.items() if c}
+        if connection_failed:
+            self._invalidate_redis()
+        if migrated:
+            logger.info(f"[CookieCache] Migrated {migrated} locally-cached cookie(s) to Redis after (re)connecting")
 
     def _invalidate_redis(self):
         """Drop the current client after an operation failure (as opposed to

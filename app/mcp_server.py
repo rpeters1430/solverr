@@ -80,7 +80,12 @@ async def solverr_scrape(
         ).to_v1_request()
         solution = await solver_engine.process_request(req)
     except Exception as e:
-        raise ToolError(f"Scrape failed for {url}: {e}") from e
+        # Never surface the raw exception to the MCP caller - like
+        # app/main.py's catch-all handler, it can carry internal paths or
+        # proxy credentials from deep in the solve pipeline. Full detail
+        # goes to the server log only.
+        logger.error(f"[MCP] solverr_scrape failed for {url}: {type(e).__name__}: {e}", exc_info=True)
+        raise ToolError(f"Scrape failed for {url}; see server logs for details.") from e
 
     extracted = None
     if extract_rules and solution.response:
@@ -111,7 +116,8 @@ async def solverr_screenshot(url: str, max_timeout_ms: int = 60000) -> Image:
         ).to_v1_request()
         solution = await solver_engine.process_request(req)
     except Exception as e:
-        raise ToolError(f"Screenshot failed for {url}: {e}") from e
+        logger.error(f"[MCP] solverr_screenshot failed for {url}: {type(e).__name__}: {e}", exc_info=True)
+        raise ToolError(f"Screenshot failed for {url}; see server logs for details.") from e
 
     if not solution.screenshot:
         raise ToolError(f"No screenshot was captured for {url} (http_status={solution.status})")

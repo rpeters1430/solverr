@@ -96,10 +96,43 @@ class SessionManager:
             client.ping()
             self.redis_client = client
             logger.info(f"[SessionManager] Connected to distributed Redis session backend at {self.redis_url}")
-            return client
+            self._migrate_local_sessions_to_redis(client)
+            # See CookieCache._redis() in cache.py for why this returns
+            # self.redis_client rather than the local `client` reference -
+            # migration may have invalidated it if Redis died again mid-way.
+            return self.redis_client
         except Exception as e:
             logger.warning(f"[SessionManager] Redis connection attempt failed ({e}). Sessions are in-memory only for this process until the next retry.")
             return None
+
+    def _migrate_local_sessions_to_redis(self, client):
+        """Persist any sessions created while Redis was unreachable, now
+        that it's back. Without this, a session created during an outage
+        (create_session() always populates self._sessions in-memory even
+        when _persist() is a no-op) stays invisible to other replicas and
+        is lost on restart, until something happens to access it again and
+        re-trigger _persist(). Mirrors CookieCache._migrate_local_store_to_
+        redis()'s partial-failure handling: a session is only dropped from
+        further retry once its write actually succeeds."""
+        if not self._sessions:
+            return
+        migrated = 0
+        connection_failed = False
+        for sid, sess in list(self._sessions.items()):
+            if sess.is_expired():
+                continue
+            if connection_failed:
+                continue
+            try:
+                client.set(f"{REDIS_KEY_PREFIX}{sid}", json.dumps(sess.to_dict()), ex=sess.ttl)
+                migrated += 1
+            except Exception as e:
+                logger.warning(f"[SessionManager] Failed to migrate session '{sid}' to Redis: {e}")
+                connection_failed = True
+        if connection_failed:
+            self._invalidate_redis()
+        if migrated:
+            logger.info(f"[SessionManager] Migrated {migrated} locally-held session(s) to Redis after (re)connecting")
 
     def _invalidate_redis(self):
         """Drop the current client after an operation failure (as opposed to

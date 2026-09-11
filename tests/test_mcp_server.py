@@ -1,6 +1,6 @@
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -94,6 +94,27 @@ class TestMCPServer(unittest.TestCase):
         result = resp.json()["result"]
         self.assertTrue(result.get("isError"))
         self.assertIn("Unsupported method", result["content"][0]["text"])
+
+    def test_scrape_failure_does_not_leak_the_raw_exception_to_the_caller(self):
+        # Mirrors app/main.py's own no-raw-exception policy: a solver
+        # exception can carry internal paths or proxy credentials, so only
+        # a sanitized message may reach the MCP client.
+        secret = "proxy://user:hunter2@internal-proxy.corp:8080 /etc/shadow"
+        with patch(
+            "app.mcp_server.solver_engine.process_request",
+            new=AsyncMock(side_effect=RuntimeError(secret)),
+        ):
+            resp = _rpc(
+                self.client,
+                "tools/call",
+                {"name": "solverr_scrape", "arguments": {"url": "https://example.com"}},
+            )
+        self.assertEqual(resp.status_code, 200)
+        result = resp.json()["result"]
+        self.assertTrue(result.get("isError"))
+        text = result["content"][0]["text"]
+        self.assertNotIn(secret, text)
+        self.assertIn("Scrape failed", text)
 
     def test_untrusted_host_is_rejected_without_an_api_key(self):
         # No API_KEY is configured in this test process, so

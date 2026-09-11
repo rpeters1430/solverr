@@ -420,6 +420,39 @@ already covered. Solverr already has DataDome and Akamai detection
    and `solverr_scrape` silently sent unsupported HTTP methods (PUT,
    DELETE) as GET with no `post_data` parameter to actually support POST —
    fixed to validate `method` is GET/POST and accept `post_data`.
+   **Third correction (2026-09-11, PR review round 3):** the round-2
+   migration fix itself had two bugs, both caught by the same reviewer.
+   First, each migrated entry got a fresh full `COOKIE_CACHE_TTL` in Redis
+   regardless of how old it already was locally, so an entry that was
+   nearly (or already) expired got resurrected with a brand new lifetime —
+   fixed to migrate the *remaining* TTL (computed from the entry's original
+   local timestamp) and drop already-expired entries outright rather than
+   migrate them. Second, a Redis failure mid-migration was swallowed per
+   entry but the local store was still cleared unconditionally afterward,
+   so any entry whose write failed was lost from both sides — fixed to
+   only remove an entry from the local store once its write actually
+   succeeds, invalidate the client on the first failure (via
+   `_invalidate_redis()`), and leave the rest for the next reconnect
+   attempt to retry. `SessionManager` had the analogous gap from a
+   different angle: `create_session()` always populates `self._sessions`
+   in-memory even when Redis is down, but nothing flushed those sessions
+   to Redis once it reconnected — added
+   `_migrate_local_sessions_to_redis()` (skipping already-expired
+   sessions; no partial-failure store-clearing bug here since
+   `self._sessions` was never conditionally cleared to begin with).
+   Covered by new tests in both `tests/test_cache.py` (expired-entry
+   exclusion, partial-failure retry) and `tests/test_sessions.py`
+   (migration on reconnect, expired-session exclusion).
+
+   Also fixed in round 3: `solverr_scrape`/`solverr_screenshot`'s error
+   handlers were embedding the raw solver exception in the `ToolError`
+   message sent back to the MCP caller — the same class of leak
+   `app/main.py`'s catch-all handler was fixed to avoid early in this plan
+   (Phase 0 #8), since a solver exception can carry internal paths or
+   proxy credentials. Fixed to log the full exception server-side
+   (`exc_info=True`) and return only a generic "see server logs" message
+   to the caller. Covered by a test asserting a planted secret string
+   never appears in the tool result.
 
 4. **Response/debug capture (console logs, network requests, redirect
    chain) — matches this plan's own Phase 3/6, not a new item.** TRAWL
