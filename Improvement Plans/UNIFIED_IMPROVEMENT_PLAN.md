@@ -392,6 +392,34 @@ already covered. Solverr already has DataDome and Akamai detection
    next call goes through `_redis()`'s normal retry path. Covered by a
    reconnection test (initial-failure) and a new post-connect-outage test
    in each of `tests/test_cache.py` and `tests/test_sessions.py`.
+   **Second correction (2026-09-11, PR review round 2):** `CookieCache`'s
+   reads go to Redis exclusively once `_redis()` returns a live client
+   (`get_cookies`/`get_all_entries`), so cookies written to the local
+   fallback store during an outage simply stopped being served the moment
+   Redis reconnected — not lost from disk, but invisible to callers. Fixed
+   with `_migrate_local_store_to_redis()`, called right after a successful
+   `_redis()` connect, which flushes `_store` into Redis and clears it.
+   `SessionManager` didn't have this problem (`get_session()` always checks
+   its in-memory `_sessions` dict before Redis, regardless of connection
+   state). Covered by a migration test in `tests/test_cache.py`.
+
+   Also fixed in this round: `app/solver/engine.py`'s in-flight
+   deduplication fingerprint (`HybridSolverEngine.process_request`) was
+   missing `screenshot` and `maxTimeout` — a pre-existing gap (present
+   since the fingerprint was introduced) that the MCP tools made easy to
+   trigger, since they expose both as independent per-call parameters. Two
+   concurrent requests for the same URL differing only in one of those
+   fields could incorrectly share one answer (a plain scrape getting back
+   screenshot data meant for a concurrent `solverr_screenshot` call, or
+   vice versa; a short per-call timeout silently inheriting a concurrent
+   longer one). Both fields added to the fingerprint dict; covered by two
+   new tests in `tests/test_engine.py`. Also: `_mcp_transport_security()`'s
+   `MCP_ALLOWED_HOSTS`/`MCP_ALLOWED_ORIGINS` were replacing the localhost
+   defaults instead of extending them (an operator adding a real deployment
+   hostname would have lost local access) — fixed to concatenate instead;
+   and `solverr_scrape` silently sent unsupported HTTP methods (PUT,
+   DELETE) as GET with no `post_data` parameter to actually support POST —
+   fixed to validate `method` is GET/POST and accept `post_data`.
 
 4. **Response/debug capture (console logs, network requests, redirect
    chain) — matches this plan's own Phase 3/6, not a new item.** TRAWL

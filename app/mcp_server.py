@@ -45,6 +45,7 @@ mcp_server: MCPServer = MCPServer(
 async def solverr_scrape(
     url: str,
     method: str = "GET",
+    post_data: Optional[str] = None,
     tier: str = "auto",
     wait_selector: Optional[str] = None,
     extract_rules: Optional[Dict[str, str]] = None,
@@ -53,6 +54,8 @@ async def solverr_scrape(
     """Fetch a URL through Solverr's tiered solver, automatically clearing any
     Cloudflare/CAPTCHA/WAF challenge in the way, and return its content.
 
+    method: "GET" (default) or "POST" - anything else is rejected rather
+    than silently sent as GET. post_data: request body for a POST.
     tier: "auto" (default, escalates only as needed), "tier1_tls" (Fast TLS
     only, no browser - fails rather than escalating if a challenge is hit),
     or "tier3_browser" (force a stealth browser solve). There is no tier
@@ -63,10 +66,14 @@ async def solverr_scrape(
     returned HTML - rule is a CSS selector (text), "selector@attr" (an
     attribute), "selector[]" (a list of matches), or "regex:pattern".
     """
+    if method.upper() not in ("GET", "POST"):
+        raise ToolError(f"Unsupported method '{method}' - only GET and POST are supported.")
+
     try:
         req = ScrapeRequest(
             url=url,
             method=method,
+            postData=post_data,
             tier=tier,
             wait_selector=wait_selector,
             maxTimeout=max_timeout_ms,
@@ -164,10 +171,13 @@ def _mcp_transport_security() -> TransportSecuritySettings:
     # solverr_get_cookies included) reachable from any browser tab via DNS
     # rebinding. Keep the SDK's protection on, restricted to localhost
     # unless the operator opts into a wider deployment explicitly.
+    # Additive, not a replacement: an operator adding a real deployment
+    # hostname still expects localhost to keep working for local testing -
+    # MCP_ALLOWED_HOSTS/_ORIGINS widen the allowlist, they don't narrow it.
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
-        allowed_hosts=settings.MCP_ALLOWED_HOSTS or _LOCAL_ONLY_ALLOWED_HOSTS,
-        allowed_origins=settings.MCP_ALLOWED_ORIGINS or _LOCAL_ONLY_ALLOWED_ORIGINS,
+        allowed_hosts=_LOCAL_ONLY_ALLOWED_HOSTS + settings.MCP_ALLOWED_HOSTS,
+        allowed_origins=_LOCAL_ONLY_ALLOWED_ORIGINS + settings.MCP_ALLOWED_ORIGINS,
     )
 
 

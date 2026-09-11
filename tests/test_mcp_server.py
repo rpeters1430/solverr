@@ -84,6 +84,17 @@ class TestMCPServer(unittest.TestCase):
             )
             self.assertEqual(authenticated.status_code, 200)
 
+    def test_scrape_rejects_unsupported_methods_instead_of_silently_using_get(self):
+        resp = _rpc(
+            self.client,
+            "tools/call",
+            {"name": "solverr_scrape", "arguments": {"url": "https://example.com", "method": "PUT"}},
+        )
+        self.assertEqual(resp.status_code, 200)
+        result = resp.json()["result"]
+        self.assertTrue(result.get("isError"))
+        self.assertIn("Unsupported method", result["content"][0]["text"])
+
     def test_untrusted_host_is_rejected_without_an_api_key(self):
         # No API_KEY is configured in this test process, so
         # _mcp_transport_security() keeps DNS-rebinding/Host-header
@@ -114,12 +125,16 @@ class TestMCPTransportSecurityDecision(unittest.TestCase):
         self.assertIn("localhost:*", ts.allowed_hosts)
         self.assertIn("127.0.0.1:*", ts.allowed_hosts)
 
-    def test_respects_an_explicit_allowed_hosts_override(self):
+    def test_explicit_allowed_hosts_extend_rather_than_replace_localhost_defaults(self):
+        # An operator adding a real deployment hostname still expects
+        # localhost to keep working for local testing/debugging.
         with patch.object(settings, "API_KEY", None), \
              patch.object(settings, "MCP_ALLOWED_HOSTS", ["my-nas.local:8191"]), \
              patch.object(settings, "MCP_ALLOWED_ORIGINS", []):
             ts = _mcp_transport_security()
-        self.assertEqual(ts.allowed_hosts, ["my-nas.local:8191"])
+        self.assertIn("my-nas.local:8191", ts.allowed_hosts)
+        self.assertIn("localhost:*", ts.allowed_hosts)
+        self.assertIn("127.0.0.1:*", ts.allowed_hosts)
 
 
 if __name__ == "__main__":

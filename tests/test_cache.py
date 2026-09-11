@@ -112,6 +112,59 @@ class TestCookieCache(unittest.TestCase):
             self.assertEqual(attempts["n"], 2)
             self.assertIs(cache.redis_client, client)
 
+    def test_locally_cached_cookies_are_migrated_to_redis_on_reconnect(self):
+        # Cookies written to the local fallback store while Redis was down
+        # must not silently stop being served the moment Redis reconnects -
+        # get_cookies()/get_all_entries() read from Redis exclusively once
+        # it's live, so without migration they'd be invisible even though
+        # they're still sitting in _store.
+        import fnmatch
+
+        class FakeRedisClient:
+            def __init__(self):
+                self.healthy = False
+                self.store = {}
+
+            def ping(self):
+                if not self.healthy:
+                    raise ConnectionError("redis down")
+
+            def set(self, key, val, ex=None):
+                if not self.healthy:
+                    raise ConnectionError("redis down")
+                self.store[key] = val
+
+            def get(self, key):
+                if not self.healthy:
+                    raise ConnectionError("redis down")
+                return self.store.get(key)
+
+            def scan_iter(self, match=None, count=None):
+                if not self.healthy:
+                    raise ConnectionError("redis down")
+                return iter(k for k in self.store if fnmatch.fnmatch(k, match))
+
+        client = FakeRedisClient()
+        with patch("redis.Redis.from_url", return_value=client):
+            cache = CookieCache(cache_file=self.cache_file, redis_url="redis://fake-host:6379/0")
+            self.assertIsNone(cache.redis_client)
+
+            cache.set_cookies(
+                "https://outage.example.com",
+                [CookieModel(name="cf_clearance", value="outage_val", domain=".outage.example.com")],
+            )
+            self.assertEqual(cache.get_cookies("https://outage.example.com")[0].value, "outage_val")
+
+            client.healthy = True
+            cache._redis_last_attempt = 0
+            cache._redis()
+            self.assertIs(cache.redis_client, client)
+            self.assertEqual(cache._store, {}, "local store should be cleared after a successful migration")
+
+            migrated = cache.get_cookies("https://outage.example.com")
+            self.assertEqual(len(migrated), 1)
+            self.assertEqual(migrated[0].value, "outage_val")
+
     def test_redis_invalidated_and_retried_after_post_connect_outage(self):
         # A successful initial connection that later drops (Redis restarted,
         # network blip) must not be retried forever on every call with no

@@ -63,10 +63,31 @@ class CookieCache:
             client.ping()
             self.redis_client = client
             logger.info(f"[CookieCache] Connected to distributed Redis cache backend at {self.redis_url}")
+            self._migrate_local_store_to_redis(client)
             return client
         except Exception as e:
             logger.warning(f"[CookieCache] Redis connection attempt failed ({e}). Using local disk JSON cache until the next retry.")
             return None
+
+    def _migrate_local_store_to_redis(self, client):
+        """Flush cookies accumulated in the local fallback store (written
+        while Redis was unreachable) into Redis now that it's back. Reads go
+        to Redis exclusively once `_redis()` returns a live client (see
+        get_cookies/get_all_entries below), so without this, anything cached
+        locally during the outage would simply stop being served the moment
+        Redis reconnects - not lost from disk, but invisible to callers."""
+        if not self._store:
+            return
+        migrated = 0
+        for domain_key, cookies_dict in self._store.items():
+            for cookie_key, entry in cookies_dict.items():
+                try:
+                    client.set(f"solverr:cookie:{domain_key}:{cookie_key}", json.dumps(entry), ex=settings.COOKIE_CACHE_TTL)
+                    migrated += 1
+                except Exception as e:
+                    logger.warning(f"[CookieCache] Failed to migrate cookie '{cookie_key}' for domain '{domain_key}' to Redis: {e}")
+        self._store = {}
+        logger.info(f"[CookieCache] Migrated {migrated} locally-cached cookie(s) to Redis after (re)connecting")
 
     def _invalidate_redis(self):
         """Drop the current client after an operation failure (as opposed to

@@ -207,6 +207,8 @@ class HybridSolverEngine:
             "fastTlsOnly": req.fastTlsOnly,
             "wait_selector": req.wait_selector,
             "wait_delay_ms": req.wait_delay_ms,
+            "screenshot": bool(req.screenshot),
+            "maxTimeout": req.maxTimeout,
         }
         inflight_key = hashlib.sha256(
             json.dumps(fingerprint, sort_keys=True, default=str).encode()

@@ -83,6 +83,45 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(r.status == 200 for r in results))
             browser_mock.assert_called_once()
 
+    async def test_concurrent_requests_differing_only_by_screenshot_are_not_coalesced(self):
+        import asyncio
+
+        async def slow_browser_solve(*args, **kwargs):
+            await asyncio.sleep(0.05)
+            return _sol(200)
+
+        with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock(side_effect=slow_browser_solve)) as browser_mock:
+            req_plain = V1Request(cmd="request.get", url="https://example.com/dedup-screenshot", forceBrowser=True, screenshot=False)
+            req_screenshot = V1Request(cmd="request.get", url="https://example.com/dedup-screenshot", forceBrowser=True, screenshot=True)
+            await asyncio.gather(
+                self.engine.process_request(req_plain),
+                self.engine.process_request(req_screenshot),
+            )
+            # A plain scrape and a screenshot request for the same URL must
+            # never share one in-flight answer - a caller that didn't ask
+            # for a screenshot could otherwise get one back, or vice versa.
+            self.assertEqual(browser_mock.call_count, 2)
+
+    async def test_concurrent_requests_differing_only_by_max_timeout_are_not_coalesced(self):
+        import asyncio
+
+        async def slow_browser_solve(*args, **kwargs):
+            await asyncio.sleep(0.05)
+            return _sol(200)
+
+        with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock(side_effect=slow_browser_solve)) as browser_mock:
+            req_short = V1Request(cmd="request.get", url="https://example.com/dedup-timeout", forceBrowser=True, maxTimeout=5000)
+            req_long = V1Request(cmd="request.get", url="https://example.com/dedup-timeout", forceBrowser=True, maxTimeout=60000)
+            await asyncio.gather(
+                self.engine.process_request(req_short),
+                self.engine.process_request(req_long),
+            )
+            # A caller's requested timeout budget must not be silently
+            # inherited from a concurrent request for the same URL.
+            self.assertEqual(browser_mock.call_count, 2)
+
     async def test_request_budget_propagates_remaining_timeout_to_browser(self):
         with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \
              patch("app.solver.engine.browser_pool.solve", new=AsyncMock(return_value=_sol(200))) as browser_mock:
