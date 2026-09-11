@@ -77,6 +77,195 @@ class TestCookieCache(unittest.TestCase):
         self.assertEqual(len(fetched), 1)
         self.assertEqual(fetched[0].value, "new_val")
 
+    def test_redis_reconnects_after_initial_failure(self):
+        # A Redis outage at process startup (e.g. `redis` not up yet under
+        # `docker compose --profile distributed up`) must not permanently
+        # strand the cache on local disk for the process's whole lifetime -
+        # it should retry and pick Redis back up once it's reachable.
+        class FakeRedisClient:
+            def __init__(self, healthy):
+                self.healthy = healthy
+
+            def ping(self):
+                if not self.healthy:
+                    raise ConnectionError("redis down")
+
+        attempts = {"n": 0}
+
+        def fake_from_url(*args, **kwargs):
+            attempts["n"] += 1
+            return FakeRedisClient(healthy=attempts["n"] > 1)
+
+        with patch("redis.Redis.from_url", side_effect=fake_from_url):
+            cache = CookieCache(cache_file=self.cache_file, redis_url="redis://fake-host:6379/0")
+            self.assertIsNone(cache.redis_client)
+            self.assertEqual(attempts["n"], 1)
+
+            # Still within the reconnect cooldown - no new attempt yet.
+            self.assertIsNone(cache._redis())
+            self.assertEqual(attempts["n"], 1)
+
+            # Cooldown elapsed - retries and succeeds this time.
+            cache._redis_last_attempt = 0
+            client = cache._redis()
+            self.assertIsNotNone(client)
+            self.assertEqual(attempts["n"], 2)
+            self.assertIs(cache.redis_client, client)
+
+    def test_locally_cached_cookies_are_migrated_to_redis_on_reconnect(self):
+        # Cookies written to the local fallback store while Redis was down
+        # must not silently stop being served the moment Redis reconnects -
+        # get_cookies()/get_all_entries() read from Redis exclusively once
+        # it's live, so without migration they'd be invisible even though
+        # they're still sitting in _store.
+        import fnmatch
+
+        class FakeRedisClient:
+            def __init__(self):
+                self.healthy = False
+                self.store = {}
+
+            def ping(self):
+                if not self.healthy:
+                    raise ConnectionError("redis down")
+
+            def set(self, key, val, ex=None):
+                if not self.healthy:
+                    raise ConnectionError("redis down")
+                self.store[key] = val
+
+            def get(self, key):
+                if not self.healthy:
+                    raise ConnectionError("redis down")
+                return self.store.get(key)
+
+            def scan_iter(self, match=None, count=None):
+                if not self.healthy:
+                    raise ConnectionError("redis down")
+                return iter(k for k in self.store if fnmatch.fnmatch(k, match))
+
+        client = FakeRedisClient()
+        with patch("redis.Redis.from_url", return_value=client):
+            cache = CookieCache(cache_file=self.cache_file, redis_url="redis://fake-host:6379/0")
+            self.assertIsNone(cache.redis_client)
+
+            cache.set_cookies(
+                "https://outage.example.com",
+                [CookieModel(name="cf_clearance", value="outage_val", domain=".outage.example.com")],
+            )
+            self.assertEqual(cache.get_cookies("https://outage.example.com")[0].value, "outage_val")
+
+            client.healthy = True
+            cache._redis_last_attempt = 0
+            cache._redis()
+            self.assertIs(cache.redis_client, client)
+            self.assertEqual(cache._store, {}, "local store should be cleared after a successful migration")
+
+            migrated = cache.get_cookies("https://outage.example.com")
+            self.assertEqual(len(migrated), 1)
+            self.assertEqual(migrated[0].value, "outage_val")
+
+    def test_migration_skips_entries_already_expired_locally(self):
+        # An entry whose local cache-age TTL has already elapsed must not be
+        # resurrected with a brand new Redis TTL on migration.
+        class FakeRedisClient:
+            def ping(self):
+                pass
+
+            def set(self, key, val, ex=None):
+                raise AssertionError("an already-expired entry must not be written to Redis")
+
+        client = FakeRedisClient()
+        with patch("redis.Redis.from_url", return_value=None):
+            cache = CookieCache(cache_file=self.cache_file, redis_url=None)
+        cache.set_cookies(
+            "https://stale.example.com",
+            [CookieModel(name="cf_clearance", value="stale_val", domain=".stale.example.com")],
+        )
+        # Back-date the entry past COOKIE_CACHE_TTL.
+        entry = cache._store["stale.example.com"]["cf_clearance|/"]
+        entry["timestamp"] = time.time() - settings.COOKIE_CACHE_TTL - 60
+
+        cache.redis_url = "redis://fake-host:6379/0"
+        with patch("redis.Redis.from_url", return_value=client):
+            cache._redis_last_attempt = 0
+            cache._redis()
+        self.assertIs(cache.redis_client, client)
+        self.assertEqual(cache._store, {}, "the expired entry should be dropped, not migrated")
+
+    def test_migration_leaves_failed_entries_for_the_next_attempt(self):
+        # If Redis drops mid-migration, entries that already migrated must
+        # not be re-sent (and shouldn't need to be), but the rest must stay
+        # in the local store for the next reconnect to retry - not be
+        # silently discarded along with the ones that succeeded.
+        class FlakyMidMigrationClient:
+            def __init__(self):
+                self.calls = 0
+                self.store = {}
+
+            def ping(self):
+                pass
+
+            def set(self, key, val, ex=None):
+                self.calls += 1
+                if self.calls > 1:
+                    raise ConnectionError("redis down mid-migration")
+                self.store[key] = val
+
+        client = FlakyMidMigrationClient()
+        with patch("redis.Redis.from_url", return_value=None):
+            cache = CookieCache(cache_file=self.cache_file, redis_url=None)
+        cache.set_cookies("https://a.example.com", [CookieModel(name="c", value="v1", domain=".a.example.com")])
+        cache.set_cookies("https://b.example.com", [CookieModel(name="c", value="v2", domain=".b.example.com")])
+        self.assertEqual(len(cache._store), 2)
+
+        cache.redis_url = "redis://fake-host:6379/0"
+        with patch("redis.Redis.from_url", return_value=client):
+            cache._redis_last_attempt = 0
+            cache._redis()
+
+        # The connection was invalidated after the failed second write.
+        self.assertIsNone(cache.redis_client)
+        # Exactly one domain migrated (removed from local store); the other
+        # is still there, ready to be retried on the next reconnect.
+        self.assertEqual(len(cache._store), 1)
+        self.assertEqual(client.calls, 2)
+
+    def test_redis_invalidated_and_retried_after_post_connect_outage(self):
+        # A successful initial connection that later drops (Redis restarted,
+        # network blip) must not be retried forever on every call with no
+        # backoff - it should be dropped so _redis()'s cooldown applies, the
+        # same as a failed initial connection.
+        class FlakyRedisClient:
+            def __init__(self):
+                self.healthy = True
+
+            def ping(self):
+                pass
+
+            def scan_iter(self, match=None, count=None):
+                if not self.healthy:
+                    raise ConnectionError("redis down")
+                return iter([])
+
+        client = FlakyRedisClient()
+        with patch("redis.Redis.from_url", return_value=client):
+            cache = CookieCache(cache_file=self.cache_file, redis_url="redis://fake-host:6379/0")
+            self.assertIs(cache.redis_client, client)
+
+            # Redis goes down after the successful connect.
+            client.healthy = False
+            cache.get_cookies("https://example.com")
+            self.assertIsNone(cache.redis_client, "a failed operation must invalidate the stale client")
+
+            # Within the cooldown - no immediate reconnect attempt.
+            self.assertIsNone(cache._redis())
+
+            # Cooldown elapsed and Redis healthy again - reconnects cleanly.
+            client.healthy = True
+            cache._redis_last_attempt = 0
+            self.assertIs(cache._redis(), client)
+
     def test_export_netscape_format(self):
         cookies = [
             CookieModel(name="cf_clearance", value="token123", domain=".example.com", path="/", secure=True, expires=1800000000)

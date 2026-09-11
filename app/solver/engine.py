@@ -62,7 +62,8 @@ class PerformanceMetrics:
             "geetest": 0,
             "imperva": 0,
             "datadome": 0,
-            "akamai": 0
+            "akamai": 0,
+            "aws_waf": 0
         }
 
     def record_fast(self, duration_ms: float):
@@ -206,6 +207,8 @@ class HybridSolverEngine:
             "fastTlsOnly": req.fastTlsOnly,
             "wait_selector": req.wait_selector,
             "wait_delay_ms": req.wait_delay_ms,
+            "screenshot": bool(req.screenshot),
+            "maxTimeout": req.maxTimeout,
         }
         inflight_key = hashlib.sha256(
             json.dumps(fingerprint, sort_keys=True, default=str).encode()

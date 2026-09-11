@@ -11,7 +11,15 @@ CHALLENGE_MARKERS: Dict[str, List[str]] = {
     "geetest": ["geetest", "gt_captcha"],
     "imperva": ["incapsula", "_incapsula_resource", "visid_incap", "sec-cpt"],
     "datadome": ["datadome", "geo.captcha-delivery.com"],
-    "akamai": ["akamai", "ak_bmsc"]
+    "akamai": ["akamai", "ak_bmsc"],
+    # AWS WAF's challenge page embeds its config as `window.gokuProps`
+    # ("goku" is AWS WAF's internal codename) in an inline <script> tag, so
+    # it's present in page.content() the same way the other markers above
+    # are. `aws-waf-token` (the cookie AWS WAF sets once solved) is
+    # deliberately not listed here: detect_challenge only ever sees the page
+    # title and page.content() (see the call site in browser.py), neither of
+    # which includes cookies, so a cookie-name marker could never match.
+    "aws_waf": ["gokuprops", "awswaf"]
 }
 
 AGE_GATE_MARKERS = ["disclaimer-dialog", "close_enter_site_button", "btn-agree"]

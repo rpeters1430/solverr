@@ -14,7 +14,7 @@
   - **Tier 3 (Stealth Browser)**: Warm Camoufox (Stealth Firefox) pool with per-page isolated Bézier human mouse curves and **Deep Shadow DOM traversal**, escalating to a fresh Camoufox instance (new fingerprint) if the pooled attempt fails.
   - **Tier 3.5 (Paid Captcha Escalation)**: Optional 2Captcha-protocol escalation for interactive image puzzles (`CAPTCHA_SOLVER_API_KEY`).
   - **Tier 4 (Fallback Proxy)**: Automatic residential / fallback proxy escalation for rate-limited indexers.
-- **🛡️ Multi-WAF & CAPTCHA Solver Suite**: Automated solving for **Cloudflare Turnstile**, **Cloudflare 5s Interstitial**, **Google reCAPTCHA v2 / Enterprise**, **hCaptcha**, **GeeTest**, **Imperva / Incapsula**, **DataDome**, and **Akamai**.
+- **🛡️ Multi-WAF & CAPTCHA Solver Suite**: Automated solving for **Cloudflare Turnstile**, **Cloudflare 5s Interstitial**, **Google reCAPTCHA v2 / Enterprise**, **hCaptcha**, **GeeTest**, **Imperva / Incapsula**, **DataDome**, **Akamai**, and **AWS WAF**.
 - **🌐 Deep Shadow DOM & Web Component Traversal**: In-page recursive DOM walker locates Turnstile and CAPTCHA checkboxes nested inside `#shadow-root` nodes across custom web components.
 - **📈 Adaptive TLS Profile Learning**: Fast TLS automatically learns which browser TLS fingerprints (`firefox147`, `firefox144`, `firefox133`, `chrome146`, etc.) succeed per domain, penalizing failing fingerprints and picking optimal JA3 profiles.
 - **🖱️ Isolated Humanized Bézier Curve Movement**: Emulates organic human mouse trajectories with micro-jitters, variable velocities, and natural pauses — fully isolated per page using weakref cursor tracking for multi-worker concurrency.
@@ -22,6 +22,7 @@
 - **📡 Real-time Live Event Streaming (SSE)**: Server-Sent Events stream (`/api/events`) broadcasts real-time solve feeds, tier transitions, and telemetry directly to the interactive dashboard.
 - **🔌 100% FlareSolverr v1 & v2 Compatibility**: Standard `POST /v1` and `POST /v2` endpoints compatible out-of-the-box with **Prowlarr**, **Jackett**, **Sonarr**, **Radarr**, and **FlexGet**.
 - **🚀 Native High-Performance `POST /scrape` API**: Full programmatic control with tier overrides, DOM selector waiting (`wait_selector`), data extraction (`extract_rules`), and debug screenshots.
+- **🤖 MCP Server for AI Agents (`/mcp`)**: First-class [Model Context Protocol](https://modelcontextprotocol.io) tools (`solverr_scrape`, `solverr_screenshot`, `solverr_get_cookies`, `solverr_get_stats`) so an agent can drive Solverr directly, gated by the same `X-Api-Key` as the rest of the API. On by default; disable with `ENABLE_MCP=false`.
 - **📊 Native Prometheus Metrics (`GET /metrics`)**: Standard Prometheus exposition format for 1-click scraping in Grafana, Prometheus, or VictoriaMetrics.
 - **🧠 Dual-Mode Caching**: Zero-dependency local JSON file persistence by default, with automatic **Redis** cluster backend support via `REDIS_URL`.
 - **📊 Real-time Web Control Center**: Live interactive challenge test bench with HTML viewer, screenshot preview, live SSE event feed, cookie explorer, and hardware monitors.
@@ -35,11 +36,12 @@
 | **Engine** | Full Selenium Chrome | Camoufox | **Hybrid (Fast TLS + Camoufox)** |
 | **Response Latency** | 10s – 18s | ~500ms (cached) / 4–12s (solve) | **30ms – 100ms** (Fast) / **~1.8s** (Browser) |
 | **RAM Usage** | ~600MB – 1.2GB | ~150MB – 300MB | **~75MB – 140MB** |
-| **Challenge Solvers** | Basic Cloudflare | Turnstile, reCAPTCHA, hCaptcha, GeeTest | **Turnstile, reCAPTCHA v2, hCaptcha, GeeTest, Imperva, Akamai** |
+| **Challenge Solvers** | Basic Cloudflare | Turnstile, reCAPTCHA, hCaptcha, GeeTest | **Turnstile, reCAPTCHA v2, hCaptcha, GeeTest, Imperva, DataDome, Akamai, AWS WAF** |
 | **Caching Backend** | Memory only | Redis required (2 containers) | **Dual-Engine (Zero-dep Local + Optional Redis)** |
 | **Prometheus Telemetry** | ❌ None | ⚠️ External exporter | **✅ Built-in Native `/metrics` endpoint** |
 | **Cursor Emulation** | Direct click | Linear cursor | **Realistic Cubic Bézier Curves + Jitter** |
 | **Web Dashboard** | Plain text | Basic health | **Modern Real-Time Interactive Test Bench** |
+| **AI Agent Support (MCP)** | ❌ None | ✅ `read`/`scrape`/`screenshot`/`inspect` tools | **✅ `/mcp` Streamable HTTP server** (`solverr_scrape`/`solverr_screenshot`/`solverr_get_cookies`/`solverr_get_stats`) |
 
 ---
 
@@ -227,6 +229,17 @@ Server-Sent Events (SSE) stream for live solve monitoring:
 curl -N http://localhost:8191/api/events
 ```
 
+### 6. MCP Server (`POST /mcp`)
+Streamable HTTP [MCP](https://modelcontextprotocol.io) endpoint for AI agents - point an MCP-compatible client at `http://localhost:8191/mcp` (an `X-Api-Key` header is required if `API_KEY` is set, exactly like every other endpoint). Exposes:
+- `solverr_scrape` - fetch a URL through the tiered solver, with optional `extract_rules`
+- `solverr_screenshot` - solve and return a JPEG screenshot of the resulting page
+- `solverr_get_cookies` - read cached clearance cookies for a domain without a new request
+- `solverr_get_stats` - engine/browser-pool health
+
+On by default; set `ENABLE_MCP=false` to disable.
+
+**Security note:** if `API_KEY` is set, that shared secret gates `/mcp` (like every other endpoint) and no further configuration is needed. If `API_KEY` is **not** set, `/mcp` still enforces a Host/Origin allowlist restricted to `localhost`/`127.0.0.1` by default - this stops a malicious webpage from reaching an unauthenticated MCP server via DNS rebinding. To use MCP from a real (non-localhost) client without an `API_KEY`, set `MCP_ALLOWED_HOSTS` (comma-separated `host:port` or `host:*`, e.g. `my-nas.local:8191`) and `MCP_ALLOWED_ORIGINS` (full origins, e.g. `http://my-nas.local:8191`) - though setting `API_KEY` instead is the safer option.
+
 ---
 
 ## 📊 Environment Configuration
@@ -257,9 +270,13 @@ curl -N http://localhost:8191/api/events
 | `ALLOWED_HOSTS` | (empty) | Comma-separated hostnames exempted from the private-network block above |
 | `DENIED_HOSTS` | (empty) | Comma-separated hostnames always rejected, regardless of `ALLOW_PRIVATE_NETWORKS` |
 | `MAX_REQUEST_BODY_MB` | `10` | Reject incoming requests whose `Content-Length` exceeds this (`0` disables) |
+| `MAX_RESPONSE_BODY_MB` | `50` | Truncate an oversized solved response body before returning it |
 | `MAX_SCREENSHOT_MB` | `8` | Drop a captured screenshot instead of returning it if it exceeds this size |
 | `CAPTCHA_SOLVER_API_KEY` | `None` | Optional 2Captcha-compatible API key for the Tier 3.5 paid-solver escalation on interactive image challenges |
 | `CAPTCHA_SOLVER_BASE_URL` | `https://2captcha.com` | API base URL - point at another provider's 2captcha-compatible endpoint (e.g. CapSolver) here |
+| `ENABLE_MCP` | `true` | Mount the MCP (Model Context Protocol) server at `/mcp` for AI agents - see [MCP Server](#6-mcp-server-post-mcp) |
+| `MCP_ALLOWED_HOSTS` | (empty) | Comma-separated Host header values (`host:port` or `host:*`) `/mcp` accepts beyond `localhost`/`127.0.0.1`. Only consulted when `API_KEY` is unset |
+| `MCP_ALLOWED_ORIGINS` | (empty) | Comma-separated Origin header values `/mcp` accepts beyond `localhost`/`127.0.0.1`. Only consulted when `API_KEY` is unset |
 | `HEADLESS` | `true` | Run browser in headless mode |
 | `LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 

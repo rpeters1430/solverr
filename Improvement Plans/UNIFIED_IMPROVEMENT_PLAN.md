@@ -5,6 +5,19 @@ Merges `SOLVERR_REVIEW.md` (code-level review with line citations) and
 verified against `main` on 2026-08-23 before implementation — every cited
 bug reproduced in the current code at the time.
 
+**Re-verified against `main` on 2026-09-10** (now at `VERSION = "1.7.0"`,
+`app/config.py:185`): status summary and phase notes below updated to match
+what has landed since the 2026-08-23/2026-09-03 passes — the CodSpeed
+benchmark suite, the unused-Jinja dependency removal, and confirmation of
+which "not done" items are still genuinely open. See the "Competitive scan
+— TRAWL" section at the bottom for what TRAWL's 2026-09-04 `v1.5.0` release
+adds relative to Solverr.
+
+**Same-day follow-up (2026-09-10):** AWS WAF detection, Redis reconnection
+resilience, and MCP server support (the TRAWL-scan items 1-3 below) were
+implemented right after the scan above — see each item's "done" note for
+what shipped and how it was verified.
+
 ## Status summary
 
 - **Phase 0** (correctness/security bugs): done.
@@ -17,8 +30,11 @@ bug reproduced in the current code at the time.
   hardening (`cap_drop: ALL`) investigated and deliberately **not**
   defaulted on — see the finding below.
 - **Phase 8** (CI/CD): ruff + a real Docker build/health smoke test added
-  to CI; bandit added as non-blocking; load testing and full pytest
-  coverage tracking not done.
+  to CI; bandit added as non-blocking; a CodSpeed micro-benchmark suite
+  (`benchmarks/`, `.github/workflows/codspeed.yml`) covering the CPU-bound
+  hot paths landed 2026-09-08 for continuous regression detection — this
+  is complementary to, not a substitute for, the still-not-done
+  concurrency-level load testing and full pytest coverage tracking below.
 - **Phase 1** (architecture/maintainability): partially done — `tier`
   field, exception-detail redaction, and (2026-09-03) the `browser.py`
   package split are done. A typed exception hierarchy was **not**
@@ -220,6 +236,15 @@ Done:
   to the real multi-tag push. Validated locally against this exact
   workflow logic (built image, ran the same curl-polling loop, confirmed
   pass/fail behavior) before committing it to CI.
+- **CodSpeed benchmark suite** (2026-09-08): `pytest-codspeed` benchmarks
+  in `benchmarks/` (kept out of `tests/` so `python -m unittest discover -s
+  tests` is unaffected) covering challenge detection, the cookie cache,
+  sessions, request/response models, `/scrape` extraction, Tier 1 profile
+  selection, SSRF checks, metrics rendering, and cursor geometry — run in
+  CI simulation mode on every push/PR via
+  `.github/workflows/codspeed.yml`. Catches CPU-hot-path regressions
+  automatically; still doesn't answer the concurrency/throughput questions
+  the "Not done" load-testing item below covers.
 
 Not done:
 - More browser-pool tests beyond the cancellation-safety one added in
@@ -232,10 +257,16 @@ Not done:
 ## Phase 9 — Versioning & Dependencies (partially done)
 
 Done:
-- `VERSION` is now plain semver (`"1.5.0"`), `EDITION` split out
-  (`"ultra"`), `DISPLAY_VERSION` (`"1.5.0-ultra"`) used for
-  human-facing display (startup log, dashboard) — fixes the `vv1.5.0-ultra`
-  bug at the source instead of patching the one call site.
+- `VERSION` is now plain semver (currently `"1.7.0"` as of this pass,
+  bumped from `"1.5.0"` when Phase 1's request-wide timeout budgeting
+  shipped), `EDITION` split out (`"ultra"`), `DISPLAY_VERSION`
+  (`"1.7.0-ultra"`) used for human-facing display (startup log,
+  dashboard) — fixes the `vv1.5.0-ultra` bug at the source instead of
+  patching the one call site.
+- Unused `Jinja2` dependency removed from `requirements.txt`
+  (2026-09-08) — the app doesn't use server-side Jinja templating
+  (`app/templates/index.html` is served as a static file), so this was
+  dead weight in the runtime image.
 
 Not done (deliberately deferred):
 - Full `pyproject.toml`/`uv.lock` migration with
@@ -268,3 +299,184 @@ Not done (deliberately deferred):
    list) — now a more natural next step since `browser/` is already split
    into focused modules, each of which is a smaller surface to retrofit
    typed errors into than the old single file.
+6. ~~Redis reconnection resilience for `CookieCache`/`SessionManager`~~ —
+   done 2026-09-10, see "Competitive scan — TRAWL" below, item 3.
+7. ~~AWS WAF challenge detection~~ — done 2026-09-10, see item 1 below.
+
+## Competitive scan — TRAWL `v1.5.0` (released 2026-09-04)
+
+TRAWL (`germondai/trawl`, the other project CLAUDE.md and the README name
+as a comparison point) shipped `v1.5.0` on 2026-09-04, six days before this
+pass. Its changelog and README (`dev` branch) were reviewed against
+Solverr's current `app/` to see what's genuinely missing here versus
+already covered. Solverr already has DataDome and Akamai detection
+(`app/solver/browser/challenges.py`'s `WAF_SIGNATURES`, counted in
+`engine.py`), so those aren't gaps — the items below are.
+
+1. **AWS WAF challenge detection — done 2026-09-10.** Added an `"aws_waf"`
+   entry to `CHALLENGE_MARKERS` in `app/solver/browser/challenges.py`,
+   keyed on the `window.gokuProps` JS variable AWS WAF's challenge page
+   embeds inline ("goku" is its internal codename) plus an `awswaf`
+   substring, mirroring the existing DataDome/Akamai entries. Counted in
+   `PerformanceMetrics.challenges_solved["aws_waf"]` (`engine.py`).
+   **Correction (2026-09-11, PR review):** an initial `"aws-waf-token"`
+   cookie-name marker was removed — `detect_challenge()` only ever sees
+   `page.content()`/title (see the call site in `browser.py`), never
+   cookies, so a cookie-name string could never actually match anything in
+   production; the review comment that caught this is the reason
+   `challenges.py`'s "no page dependency" contract is called out explicitly
+   in this file's Module Layout section. Covered by
+   `tests/test_challenge_detection.py`, including a regression test that
+   the cookie name alone does *not* match.
+
+2. **MCP (Model Context Protocol) server — done 2026-09-10, hardened
+   2026-09-11.** Added `app/mcp_server.py` using the `mcp` package's
+   `MCPServer` (the `mcp` 2.x successor to 1.x's `FastMCP` — verified
+   directly against the installed `mcp==2.2.0` API rather than assumed,
+   since this is a fast-moving SDK), mounted at `/mcp` in `app/main.py` and
+   gated by `ENABLE_MCP` (default on). Four tools: `solverr_scrape`,
+   `solverr_screenshot`, `solverr_get_cookies`, `solverr_get_stats` — all
+   calling directly into the same
+   `solver_engine`/`cookie_cache`/`browser_pool` singletons the HTTP routes
+   use. Two integration details that would otherwise silently break this in
+   production, both verified end-to-end with a real `TestClient` against
+   the actual pinned dependency versions before shipping: (a) mounting a
+   Starlette sub-app does **not** invoke its own lifespan, so
+   `mcp_server.session_manager.run()` must be entered explicitly from
+   `app/main.py`'s lifespan via `contextlib.AsyncExitStack` — without this,
+   every request 500s with "Task group is not initialized"; (b)
+   `streamable_http_app()` auto-enables DNS-rebinding Host-header
+   validation when `host="127.0.0.1"` (its default), which would reject
+   nearly every real request to Solverr's network-exposed deployment
+   (Docker network alias, NAS IP, reverse-proxy hostname) with a 421.
+   **Correction (2026-09-11, PR review):** the initial fix disabled that
+   protection unconditionally, which a reviewer correctly flagged as
+   weakening the common no-`API_KEY` default deployment — DNS rebinding
+   from a malicious webpage would then reach `solverr_get_cookies` et al.
+   with no protection at all. Replaced with `_mcp_transport_security()`:
+   disabled only when `API_KEY` is set (a shared secret is the real gate
+   then); otherwise left on and restricted to localhost by default, with
+   `MCP_ALLOWED_HOSTS`/`MCP_ALLOWED_ORIGINS` (`app/config.py`) to widen it
+   for a real non-localhost, no-key deployment. Also fixed: the
+   `solverr_screenshot` tool was labeling its JPEG bytes (`page.screenshot
+   (type="jpeg")`, `browser.py`) as PNG, which some MCP clients would
+   reject on a mimetype/signature mismatch; and `solverr_scrape`'s
+   docstring advertised a `"tier4_proxy"` option that doesn't actually
+   force Tier 4 (`ScrapeRequest.to_v1_request()` maps it to the same
+   `forceBrowser=True` as `"tier3_browser"` — Tier 4 is an automatic
+   engine-side escalation, not a caller-selectable mode). Covered by
+   `tests/test_mcp_server.py` (tool registration, a cache-backed tool call,
+   the API-key gate applying to `/mcp` like every other route, the
+   localhost-only Host rejection, and `_mcp_transport_security()`'s
+   branching in isolation).
+
+3. **Redis reconnection resilience — done 2026-09-10, hardened
+   2026-09-11.** `CookieCache` (`app/solver/cache.py`) and `SessionManager`
+   (`app/solver/sessions.py`) each replaced their one-shot `_init_redis()`
+   with a `_redis()` helper that retries the connection on a 30s cooldown
+   (`REDIS_RECONNECT_INTERVAL_SECONDS`) instead of setting `redis_client`
+   to `None` permanently on the first failure — a transient Redis restart
+   during container startup (`docker compose --profile distributed up`,
+   where `solverr` can start before `redis` is ready) now self-heals
+   instead of stranding that replica on local-only cache/sessions until a
+   manual restart. **Correction (2026-09-11, PR review):** the initial
+   `_redis()` only retried a connection that failed to *establish* in the
+   first place — once a client had connected successfully, an outage
+   afterward (Redis restarted mid-run) left `redis_client` set to the now-
+   dead client forever, so every later cache/session operation kept
+   retrying that stale connection (paying its `socket_connect_timeout` each
+   time) instead of backing off, and never triggered a fresh reconnect
+   attempt even once Redis came back. Fixed with an `_invalidate_redis()`
+   helper, called from every Redis operation's exception handler in both
+   files, that clears `redis_client` and resets the cooldown timer so the
+   next call goes through `_redis()`'s normal retry path. Covered by a
+   reconnection test (initial-failure) and a new post-connect-outage test
+   in each of `tests/test_cache.py` and `tests/test_sessions.py`.
+   **Second correction (2026-09-11, PR review round 2):** `CookieCache`'s
+   reads go to Redis exclusively once `_redis()` returns a live client
+   (`get_cookies`/`get_all_entries`), so cookies written to the local
+   fallback store during an outage simply stopped being served the moment
+   Redis reconnected — not lost from disk, but invisible to callers. Fixed
+   with `_migrate_local_store_to_redis()`, called right after a successful
+   `_redis()` connect, which flushes `_store` into Redis and clears it.
+   `SessionManager` didn't have this problem (`get_session()` always checks
+   its in-memory `_sessions` dict before Redis, regardless of connection
+   state). Covered by a migration test in `tests/test_cache.py`.
+
+   Also fixed in this round: `app/solver/engine.py`'s in-flight
+   deduplication fingerprint (`HybridSolverEngine.process_request`) was
+   missing `screenshot` and `maxTimeout` — a pre-existing gap (present
+   since the fingerprint was introduced) that the MCP tools made easy to
+   trigger, since they expose both as independent per-call parameters. Two
+   concurrent requests for the same URL differing only in one of those
+   fields could incorrectly share one answer (a plain scrape getting back
+   screenshot data meant for a concurrent `solverr_screenshot` call, or
+   vice versa; a short per-call timeout silently inheriting a concurrent
+   longer one). Both fields added to the fingerprint dict; covered by two
+   new tests in `tests/test_engine.py`. Also: `_mcp_transport_security()`'s
+   `MCP_ALLOWED_HOSTS`/`MCP_ALLOWED_ORIGINS` were replacing the localhost
+   defaults instead of extending them (an operator adding a real deployment
+   hostname would have lost local access) — fixed to concatenate instead;
+   and `solverr_scrape` silently sent unsupported HTTP methods (PUT,
+   DELETE) as GET with no `post_data` parameter to actually support POST —
+   fixed to validate `method` is GET/POST and accept `post_data`.
+   **Third correction (2026-09-11, PR review round 3):** the round-2
+   migration fix itself had two bugs, both caught by the same reviewer.
+   First, each migrated entry got a fresh full `COOKIE_CACHE_TTL` in Redis
+   regardless of how old it already was locally, so an entry that was
+   nearly (or already) expired got resurrected with a brand new lifetime —
+   fixed to migrate the *remaining* TTL (computed from the entry's original
+   local timestamp) and drop already-expired entries outright rather than
+   migrate them. Second, a Redis failure mid-migration was swallowed per
+   entry but the local store was still cleared unconditionally afterward,
+   so any entry whose write failed was lost from both sides — fixed to
+   only remove an entry from the local store once its write actually
+   succeeds, invalidate the client on the first failure (via
+   `_invalidate_redis()`), and leave the rest for the next reconnect
+   attempt to retry. `SessionManager` had the analogous gap from a
+   different angle: `create_session()` always populates `self._sessions`
+   in-memory even when Redis is down, but nothing flushed those sessions
+   to Redis once it reconnected — added
+   `_migrate_local_sessions_to_redis()` (skipping already-expired
+   sessions; no partial-failure store-clearing bug here since
+   `self._sessions` was never conditionally cleared to begin with).
+   Covered by new tests in both `tests/test_cache.py` (expired-entry
+   exclusion, partial-failure retry) and `tests/test_sessions.py`
+   (migration on reconnect, expired-session exclusion).
+
+   Also fixed in round 3: `solverr_scrape`/`solverr_screenshot`'s error
+   handlers were embedding the raw solver exception in the `ToolError`
+   message sent back to the MCP caller — the same class of leak
+   `app/main.py`'s catch-all handler was fixed to avoid early in this plan
+   (Phase 0 #8), since a solver exception can carry internal paths or
+   proxy credentials. Fixed to log the full exception server-side
+   (`exc_info=True`) and return only a generic "see server logs" message
+   to the caller. Covered by a test asserting a planted secret string
+   never appears in the tool result.
+
+4. **Response/debug capture (console logs, network requests, redirect
+   chain) — matches this plan's own Phase 3/6, not a new item.** TRAWL
+   1.5.0 added optional response-body/console/network/redirect-chain
+   capture for its `inspect` MCP tool and API. Solverr's `/scrape` has no
+   equivalent today (confirmed: no `console`/`redirectChain`/network-log
+   fields in `app/models/flaresolverr.py` or the browser navigation code).
+   This overlaps with debugging/diagnostics rather than being urgent on
+   its own — worth folding into a future `/scrape` enhancement (e.g. an
+   optional `capture: ["console", "network", "redirects"]` request field)
+   rather than treating as a standalone priority.
+
+5. **Not applicable to Solverr's architecture:** TRAWL's MITM forward-proxy
+   mode (self-signed root CA, RFC 5280 cert-compat fixes in 1.5.0) has no
+   equivalent in Solverr's design — Solverr's `/proxy` is a transparent
+   HTTP proxy without a MITM CA, and introducing one would be a much larger
+   architectural change than anything else in this scan. Not recommended
+   unless a specific user need for MITM HTTPS interception surfaces.
+   Likewise TRAWL's bundled FFmpeg (for video-heavy scrape targets) and
+   Bun/Tini process-management changes are runtime-specific to its Node/Bun
+   stack and don't map onto Solverr's Python/`tini`-already-PID-1 setup.
+
+**Status:** items 1-3 implemented 2026-09-10 (see above). Item 4 (response/
+debug capture) is still open and worth scoping as part of a future
+`/scrape` enhancement — an `inspect`-style MCP tool would be a natural
+consumer of it once it exists, alongside the HTTP API. Item 5 (MITM proxy,
+FFmpeg, Bun/Tini) remains not recommended, per the reasoning above.

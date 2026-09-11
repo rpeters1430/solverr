@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 from app.config import settings
 from app.models.flaresolverr import CookieModel
-from app.solver.sessions import SessionManager
+from app.solver.sessions import REDIS_KEY_PREFIX, SessionManager
 
 class TestSessionManager(unittest.TestCase):
     def setUp(self):
@@ -59,6 +59,124 @@ class TestSessionManager(unittest.TestCase):
             self.assertEqual(len(active), 2)
             self.assertNotIn(sid1, active)
             self.assertIn(sid3, active)
+
+    def test_redis_reconnects_after_initial_failure(self):
+        # Mirrors CookieCache's equivalent test (tests/test_cache.py): a
+        # Redis outage at startup must be retried, not permanent for the
+        # process's whole lifetime.
+        class FakeRedisClient:
+            def __init__(self, healthy):
+                self.healthy = healthy
+
+            def ping(self):
+                if not self.healthy:
+                    raise ConnectionError("redis down")
+
+        attempts = {"n": 0}
+
+        def fake_from_url(*args, **kwargs):
+            attempts["n"] += 1
+            return FakeRedisClient(healthy=attempts["n"] > 1)
+
+        with patch("redis.Redis.from_url", side_effect=fake_from_url):
+            mgr = SessionManager(redis_url="redis://fake-host:6379/0")
+            self.assertIsNone(mgr.redis_client)
+            self.assertEqual(attempts["n"], 1)
+
+            self.assertIsNone(mgr._redis())
+            self.assertEqual(attempts["n"], 1)
+
+            mgr._redis_last_attempt = 0
+            client = mgr._redis()
+            self.assertIsNotNone(client)
+            self.assertEqual(attempts["n"], 2)
+            self.assertIs(mgr.redis_client, client)
+
+    def test_local_sessions_are_migrated_to_redis_on_reconnect(self):
+        # A session created while Redis was down still lives in
+        # self._sessions (create_session() always populates it in-memory),
+        # but without migration it would stay invisible to other replicas
+        # and be lost on restart until something re-triggers _persist().
+        class FakeRedisClient:
+            def __init__(self):
+                self.healthy = False
+                self.store = {}
+
+            def ping(self):
+                if not self.healthy:
+                    raise ConnectionError("redis down")
+
+            def set(self, key, val, ex=None):
+                if not self.healthy:
+                    raise ConnectionError("redis down")
+                self.store[key] = val
+
+        client = FakeRedisClient()
+        with patch("redis.Redis.from_url", return_value=client):
+            mgr = SessionManager(redis_url="redis://fake-host:6379/0")
+            self.assertIsNone(mgr.redis_client)
+
+            sid = mgr.create_session()
+            self.assertIn(sid, mgr._sessions)
+            self.assertNotIn(f"{REDIS_KEY_PREFIX}{sid}", client.store)
+
+            client.healthy = True
+            mgr._redis_last_attempt = 0
+            mgr._redis()
+            self.assertIs(mgr.redis_client, client)
+            self.assertIn(f"{REDIS_KEY_PREFIX}{sid}", client.store)
+
+    def test_migration_skips_already_expired_sessions(self):
+        class FakeRedisClient:
+            def ping(self):
+                pass
+
+            def set(self, key, val, ex=None):
+                raise AssertionError("an already-expired session must not be written to Redis")
+
+        client = FakeRedisClient()
+        mgr = SessionManager(redis_url=None)
+        sid = mgr.create_session(ttl=1)
+        mgr._sessions[sid].last_accessed = time.time() - 10
+        self.assertTrue(mgr._sessions[sid].is_expired())
+
+        mgr.redis_url = "redis://fake-host:6379/0"
+        with patch("redis.Redis.from_url", return_value=client):
+            mgr._redis_last_attempt = 0
+            mgr._redis()
+        self.assertIs(mgr.redis_client, client)
+
+    def test_redis_invalidated_and_retried_after_post_connect_outage(self):
+        # Mirrors CookieCache's equivalent test: a successful connection that
+        # later drops must be dropped by the client too, so the next call
+        # goes through _redis()'s cooldown instead of retrying a dead
+        # connection on every session operation.
+        class FlakyRedisClient:
+            def __init__(self):
+                self.healthy = True
+
+            def ping(self):
+                pass
+
+            def get(self, key):
+                if not self.healthy:
+                    raise ConnectionError("redis down")
+                return None
+
+        client = FlakyRedisClient()
+        with patch("redis.Redis.from_url", return_value=client):
+            mgr = SessionManager(redis_url="redis://fake-host:6379/0")
+            self.assertIs(mgr.redis_client, client)
+
+            client.healthy = False
+            self.assertIsNone(mgr._load_from_redis("some-session-id"))
+            self.assertIsNone(mgr.redis_client, "a failed operation must invalidate the stale client")
+
+            self.assertIsNone(mgr._redis())
+
+            client.healthy = True
+            mgr._redis_last_attempt = 0
+            self.assertIs(mgr._redis(), client)
 
 if __name__ == "__main__":
     unittest.main()

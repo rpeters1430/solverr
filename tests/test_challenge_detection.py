@@ -17,6 +17,21 @@ class TestChallengeDetection(unittest.TestCase):
     def test_detects_datadome(self):
         self.assertEqual(detect_challenge("", "geo.captcha-delivery.com", check_content=True), "datadome")
 
+    def test_detects_aws_waf(self):
+        content = "<script>window.gokuProps = {key: 'abc'};</script>"
+        self.assertIsNone(detect_challenge("Request Blocked", content, check_content=False))
+        self.assertEqual(detect_challenge("Request Blocked", content, check_content=True), "aws_waf")
+
+    def test_detects_aws_waf_challenge_script_marker(self):
+        self.assertEqual(detect_challenge("", "<script src='/awswaf/challenge.js'></script>", check_content=True), "aws_waf")
+
+    def test_aws_waf_cookie_name_alone_is_not_detected(self):
+        # detect_challenge only ever sees title/page.content() (see the call
+        # site in browser.py) - cookies are never passed in, so a page whose
+        # only AWS WAF signal is the aws-waf-token cookie (not present in the
+        # page's own HTML/JS) must not match.
+        self.assertIsNone(detect_challenge("", "document.cookie contains aws-waf-token=...", check_content=True))
+
     def test_clean_page_has_no_challenge(self):
         self.assertIsNone(detect_challenge("My Cool Blog", "<h1>Welcome</h1>", check_content=True))
 

@@ -1,5 +1,5 @@
 import os
-from typing import Optional
+from typing import List, Optional
 import psutil
 
 
@@ -178,6 +178,24 @@ class Settings:
     # to avoid repeating TLS/HTTP2 handshakes on recurring indexer queries.
     FAST_TLS_POOL_ENABLED: bool = os.getenv("FAST_TLS_POOL_ENABLED", "true").lower() in ("true", "1", "yes")
     FAST_TLS_POOL_SIZE: int = int(os.getenv("FAST_TLS_POOL_SIZE", "50"))
+
+    # MCP (Model Context Protocol) server: exposes solving/scraping as tools
+    # an AI agent can call directly, mounted at /mcp alongside the existing
+    # FlareSolverr/native HTTP API. Subject to the same X-Api-Key gate as the
+    # rest of the API when API_KEY is set (see app/main.py's middleware).
+    ENABLE_MCP: bool = os.getenv("ENABLE_MCP", "true").lower() in ("true", "1", "yes")
+    # Extra Host/Origin values the MCP endpoint accepts beyond localhost,
+    # when API_KEY is NOT set. See app/mcp_server.py's create_mcp_asgi_app:
+    # with no API_KEY, the MCP SDK's DNS-rebinding/Host-header check is the
+    # only thing standing between an arbitrary webpage and tools like
+    # solverr_get_cookies, so it stays on and localhost-only by default
+    # rather than disabled outright. Comma-separated; MCP_ALLOWED_HOSTS
+    # entries are "host:port" or "host:*" (e.g. "my-nas.local:8191"),
+    # MCP_ALLOWED_ORIGINS are full origins (e.g. "http://my-nas.local:8191").
+    # Both are ignored once API_KEY is set, since a shared secret is a much
+    # stronger gate than a Host header.
+    MCP_ALLOWED_HOSTS: List[str] = [h.strip() for h in os.getenv("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
+    MCP_ALLOWED_ORIGINS: List[str] = [o.strip() for o in os.getenv("MCP_ALLOWED_ORIGINS", "").split(",") if o.strip()]
 
     # API Version - plain semver, no "v" prefix or edition suffix baked in, so
     # it can be embedded directly (e.g. "vX.Y.Z" or "X.Y.Z-ultra" strings

@@ -16,31 +16,118 @@ logger = logging.getLogger("solverr.cache")
 # into a single write instead of one blocking json.dump() per call.
 DEBOUNCE_SECONDS = 2.0
 
+# Minimum interval between Redis reconnection attempts once the client is
+# down. Without this, a permanently-unreachable Redis would retry (and pay
+# the socket_connect_timeout) on every single cache lookup.
+REDIS_RECONNECT_INTERVAL_SECONDS = 30.0
+
 class CookieCache:
     def __init__(self, cache_file: str = settings.CACHE_FILE, redis_url: Optional[str] = settings.REDIS_URL):
         self.cache_file = cache_file
         self.redis_url = redis_url
         self.redis_client = None
+        self._redis_last_attempt = 0.0
         self._store: Dict[str, Dict[str, dict]] = {}
         self._write_lock = threading.Lock()
         self._save_pending = False
         self._save_task: Optional[asyncio.Task] = None
 
         if self.redis_url:
-            self._init_redis()
-        else:
+            self._redis()
+        if not self.redis_client:
+            # Either Redis isn't configured, or the initial connection attempt
+            # above failed - fall back to local disk so the process still
+            # functions. If Redis later comes back, _redis() migrates
+            # whatever accumulated here into it (see
+            # _migrate_local_store_to_redis) rather than leaving it stranded.
             self._load_from_disk()
 
-    def _init_redis(self):
+    def _redis(self):
+        """Return a live Redis client, retrying the connection on a cooldown
+        if the last attempt failed. Previously a failed connection at
+        __init__ time (e.g. Redis not up yet when this container started,
+        common under `docker compose --profile distributed up`) permanently
+        disabled Redis for the process's entire lifetime - this makes that
+        recoverable without a restart."""
+        if self.redis_client is not None:
+            return self.redis_client
+        if not self.redis_url:
+            return None
+        now = time.time()
+        if now - self._redis_last_attempt < REDIS_RECONNECT_INTERVAL_SECONDS:
+            return None
+        self._redis_last_attempt = now
         try:
             import redis
-            self.redis_client = redis.Redis.from_url(self.redis_url, decode_responses=True, socket_connect_timeout=2)
-            self.redis_client.ping()
+            client = redis.Redis.from_url(self.redis_url, decode_responses=True, socket_connect_timeout=2)
+            client.ping()
+            self.redis_client = client
             logger.info(f"[CookieCache] Connected to distributed Redis cache backend at {self.redis_url}")
+            self._migrate_local_store_to_redis(client)
+            # _migrate_local_store_to_redis calls _invalidate_redis() (which
+            # clears self.redis_client) if Redis died again mid-migration -
+            # return the current value rather than the now-possibly-stale
+            # `client` reference so a caller never gets back a client this
+            # method has already given up on.
+            return self.redis_client
         except Exception as e:
-            logger.warning(f"[CookieCache] Redis connection failed ({e}). Falling back to local disk JSON cache.")
-            self.redis_client = None
-            self._load_from_disk()
+            logger.warning(f"[CookieCache] Redis connection attempt failed ({e}). Using local disk JSON cache until the next retry.")
+            return None
+
+    def _migrate_local_store_to_redis(self, client):
+        """Flush cookies accumulated in the local fallback store (written
+        while Redis was unreachable) into Redis now that it's back. Reads go
+        to Redis exclusively once `_redis()` returns a live client (see
+        get_cookies/get_all_entries below), so without this, anything cached
+        locally during the outage would simply stop being served the moment
+        Redis reconnects - not lost from disk, but invisible to callers.
+
+        Two correctness details: (1) each entry keeps the *remaining* portion
+        of its original TTL window (based on its local `timestamp`), not a
+        fresh full COOKIE_CACHE_TTL - otherwise an entry that's nearly (or
+        already) expired locally would get resurrected with a brand new
+        lifetime in Redis. Already-expired entries are dropped instead of
+        migrated. (2) if Redis drops mid-migration, already-migrated entries
+        are removed from the local store but the rest are left in place (and
+        the client invalidated) for the next reconnect attempt to retry,
+        rather than either losing them or clearing the store regardless of
+        whether every write actually succeeded."""
+        if not self._store:
+            return
+        now = time.time()
+        migrated = 0
+        connection_failed = False
+        for domain_key in list(self._store.keys()):
+            cookies_dict = self._store[domain_key]
+            for cookie_key in list(cookies_dict.keys()):
+                entry = cookies_dict[cookie_key]
+                remaining_ttl = settings.COOKIE_CACHE_TTL - (now - entry.get("timestamp", 0))
+                if remaining_ttl <= 0:
+                    del cookies_dict[cookie_key]
+                    continue
+                if connection_failed:
+                    continue
+                try:
+                    client.set(f"solverr:cookie:{domain_key}:{cookie_key}", json.dumps(entry), ex=int(remaining_ttl))
+                    del cookies_dict[cookie_key]
+                    migrated += 1
+                except Exception as e:
+                    logger.warning(f"[CookieCache] Failed to migrate cookie '{cookie_key}' for domain '{domain_key}' to Redis: {e}")
+                    connection_failed = True
+        self._store = {d: c for d, c in self._store.items() if c}
+        if connection_failed:
+            self._invalidate_redis()
+        if migrated:
+            logger.info(f"[CookieCache] Migrated {migrated} locally-cached cookie(s) to Redis after (re)connecting")
+
+    def _invalidate_redis(self):
+        """Drop the current client after an operation failure (as opposed to
+        a failed connection attempt in _redis()) so the next call goes
+        through _redis()'s cooldown-gated reconnect instead of retrying a
+        now-dead connection - and paying its socket_connect_timeout - on
+        every single subsequent cache operation."""
+        self.redis_client = None
+        self._redis_last_attempt = time.time()
 
     def _cookie_key(self, cookie: CookieModel) -> str:
         # Identity is domain + path + name, not just name - two cookies with
@@ -68,7 +155,7 @@ class CookieCache:
         result: List[CookieModel] = []
         now = time.time()
 
-        if self.redis_client:
+        if self._redis():
             try:
                 keys = self._scan_keys(f"solverr:cookie:{target_domain}:*")
                 # Also check wildcard parent domains
@@ -88,6 +175,7 @@ class CookieCache:
                 return result
             except Exception as e:
                 logger.debug(f"[CookieCache] Redis read error: {e}")
+                self._invalidate_redis()
 
         for domain_key, cookies_dict in self._store.items():
             clean_domain = domain_key.lstrip(".")
@@ -116,7 +204,7 @@ class CookieCache:
         domain = self._normalize_domain(url_or_domain)
         now = time.time()
 
-        if self.redis_client:
+        if self._redis():
             try:
                 for c in cookies:
                     c_dict = c.model_dump()
@@ -128,6 +216,7 @@ class CookieCache:
                 return
             except Exception as e:
                 logger.debug(f"[CookieCache] Redis write error: {e}")
+                self._invalidate_redis()
 
         for c in cookies:
             c_dict = c.model_dump()
@@ -166,7 +255,7 @@ class CookieCache:
             del cookies_for_domain[key]
 
     def clear(self):
-        if self.redis_client:
+        if self._redis():
             try:
                 keys = self._scan_keys("solverr:cookie:*")
                 if keys:
@@ -174,6 +263,7 @@ class CookieCache:
                 logger.info("[CookieCache] Cleared all cached cookies from Redis")
             except Exception as e:
                 logger.warning(f"[CookieCache] Redis clear error: {e}")
+                self._invalidate_redis()
 
         self._store = {}
         logger.info("[CookieCache] Cleared all local cached cookies")
@@ -183,7 +273,7 @@ class CookieCache:
         out = {}
         now = time.time()
 
-        if self.redis_client:
+        if self._redis():
             try:
                 keys = self._scan_keys("solverr:cookie:*")
                 for key in keys:
@@ -202,6 +292,7 @@ class CookieCache:
                 return out
             except Exception as e:
                 logger.debug(f"[CookieCache] Redis get_all error: {e}")
+                self._invalidate_redis()
 
         for domain, cookies in self._store.items():
             valid_list = []
