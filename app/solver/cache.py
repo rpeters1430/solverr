@@ -68,6 +68,15 @@ class CookieCache:
             logger.warning(f"[CookieCache] Redis connection attempt failed ({e}). Using local disk JSON cache until the next retry.")
             return None
 
+    def _invalidate_redis(self):
+        """Drop the current client after an operation failure (as opposed to
+        a failed connection attempt in _redis()) so the next call goes
+        through _redis()'s cooldown-gated reconnect instead of retrying a
+        now-dead connection - and paying its socket_connect_timeout - on
+        every single subsequent cache operation."""
+        self.redis_client = None
+        self._redis_last_attempt = time.time()
+
     def _cookie_key(self, cookie: CookieModel) -> str:
         # Identity is domain + path + name, not just name - two cookies with
         # the same name on different paths of the same domain are distinct
@@ -114,6 +123,7 @@ class CookieCache:
                 return result
             except Exception as e:
                 logger.debug(f"[CookieCache] Redis read error: {e}")
+                self._invalidate_redis()
 
         for domain_key, cookies_dict in self._store.items():
             clean_domain = domain_key.lstrip(".")
@@ -154,6 +164,7 @@ class CookieCache:
                 return
             except Exception as e:
                 logger.debug(f"[CookieCache] Redis write error: {e}")
+                self._invalidate_redis()
 
         for c in cookies:
             c_dict = c.model_dump()
@@ -200,6 +211,7 @@ class CookieCache:
                 logger.info("[CookieCache] Cleared all cached cookies from Redis")
             except Exception as e:
                 logger.warning(f"[CookieCache] Redis clear error: {e}")
+                self._invalidate_redis()
 
         self._store = {}
         logger.info("[CookieCache] Cleared all local cached cookies")
@@ -228,6 +240,7 @@ class CookieCache:
                 return out
             except Exception as e:
                 logger.debug(f"[CookieCache] Redis get_all error: {e}")
+                self._invalidate_redis()
 
         for domain, cookies in self._store.items():
             valid_list = []

@@ -316,48 +316,82 @@ already covered. Solverr already has DataDome and Akamai detection
 1. **AWS WAF challenge detection — done 2026-09-10.** Added an `"aws_waf"`
    entry to `CHALLENGE_MARKERS` in `app/solver/browser/challenges.py`,
    keyed on the `window.gokuProps` JS variable AWS WAF's challenge page
-   sets ("goku" is its internal codename) plus the `aws-waf-token` cookie
-   name/`awswaf` substring, mirroring the existing DataDome/Akamai entries.
-   Counted in `PerformanceMetrics.challenges_solved["aws_waf"]`
-   (`engine.py`). Covered by `tests/test_challenge_detection.py`.
+   embeds inline ("goku" is its internal codename) plus an `awswaf`
+   substring, mirroring the existing DataDome/Akamai entries. Counted in
+   `PerformanceMetrics.challenges_solved["aws_waf"]` (`engine.py`).
+   **Correction (2026-09-11, PR review):** an initial `"aws-waf-token"`
+   cookie-name marker was removed — `detect_challenge()` only ever sees
+   `page.content()`/title (see the call site in `browser.py`), never
+   cookies, so a cookie-name string could never actually match anything in
+   production; the review comment that caught this is the reason
+   `challenges.py`'s "no page dependency" contract is called out explicitly
+   in this file's Module Layout section. Covered by
+   `tests/test_challenge_detection.py`, including a regression test that
+   the cookie name alone does *not* match.
 
-2. **MCP (Model Context Protocol) server — done 2026-09-10.** Added
-   `app/mcp_server.py` using the `mcp` package's `MCPServer` (the `mcp` 2.x
-   successor to 1.x's `FastMCP` — verified directly against the installed
-   `mcp==2.2.0` API rather than assumed, since this is a fast-moving SDK),
-   mounted at `/mcp` in `app/main.py` and gated by `ENABLE_MCP` (default
-   on). Four tools: `solverr_scrape`, `solverr_screenshot`,
-   `solverr_get_cookies`, `solverr_get_stats` — all calling directly into
-   the same `solver_engine`/`cookie_cache`/`browser_pool` singletons the
-   HTTP routes use. Two integration details that would otherwise silently
-   break this in production, both verified end-to-end with a real
-   `TestClient` against the actual pinned dependency versions before
-   shipping: (a) mounting a Starlette sub-app does **not** invoke its own
-   lifespan, so `mcp_server.session_manager.run()` must be entered
-   explicitly from `app/main.py`'s lifespan via `contextlib.AsyncExitStack`
-   — without this, every request 500s with "Task group is not
-   initialized"; (b) `streamable_http_app()` auto-enables DNS-rebinding
-   Host-header validation when `host="127.0.0.1"` (its default), which
-   would reject nearly every real request to Solverr's network-exposed
-   deployment (Docker network alias, NAS IP, reverse-proxy hostname) with
-   a 421 — disabled explicitly via `TransportSecuritySettings` since that
-   protection targets a different threat model (a localhost desktop MCP
-   server against browser-based DNS rebinding) than Solverr's
-   already-`X-Api-Key`-gated network service. Covered by
+2. **MCP (Model Context Protocol) server — done 2026-09-10, hardened
+   2026-09-11.** Added `app/mcp_server.py` using the `mcp` package's
+   `MCPServer` (the `mcp` 2.x successor to 1.x's `FastMCP` — verified
+   directly against the installed `mcp==2.2.0` API rather than assumed,
+   since this is a fast-moving SDK), mounted at `/mcp` in `app/main.py` and
+   gated by `ENABLE_MCP` (default on). Four tools: `solverr_scrape`,
+   `solverr_screenshot`, `solverr_get_cookies`, `solverr_get_stats` — all
+   calling directly into the same
+   `solver_engine`/`cookie_cache`/`browser_pool` singletons the HTTP routes
+   use. Two integration details that would otherwise silently break this in
+   production, both verified end-to-end with a real `TestClient` against
+   the actual pinned dependency versions before shipping: (a) mounting a
+   Starlette sub-app does **not** invoke its own lifespan, so
+   `mcp_server.session_manager.run()` must be entered explicitly from
+   `app/main.py`'s lifespan via `contextlib.AsyncExitStack` — without this,
+   every request 500s with "Task group is not initialized"; (b)
+   `streamable_http_app()` auto-enables DNS-rebinding Host-header
+   validation when `host="127.0.0.1"` (its default), which would reject
+   nearly every real request to Solverr's network-exposed deployment
+   (Docker network alias, NAS IP, reverse-proxy hostname) with a 421.
+   **Correction (2026-09-11, PR review):** the initial fix disabled that
+   protection unconditionally, which a reviewer correctly flagged as
+   weakening the common no-`API_KEY` default deployment — DNS rebinding
+   from a malicious webpage would then reach `solverr_get_cookies` et al.
+   with no protection at all. Replaced with `_mcp_transport_security()`:
+   disabled only when `API_KEY` is set (a shared secret is the real gate
+   then); otherwise left on and restricted to localhost by default, with
+   `MCP_ALLOWED_HOSTS`/`MCP_ALLOWED_ORIGINS` (`app/config.py`) to widen it
+   for a real non-localhost, no-key deployment. Also fixed: the
+   `solverr_screenshot` tool was labeling its JPEG bytes (`page.screenshot
+   (type="jpeg")`, `browser.py`) as PNG, which some MCP clients would
+   reject on a mimetype/signature mismatch; and `solverr_scrape`'s
+   docstring advertised a `"tier4_proxy"` option that doesn't actually
+   force Tier 4 (`ScrapeRequest.to_v1_request()` maps it to the same
+   `forceBrowser=True` as `"tier3_browser"` — Tier 4 is an automatic
+   engine-side escalation, not a caller-selectable mode). Covered by
    `tests/test_mcp_server.py` (tool registration, a cache-backed tool call,
-   and the API-key gate applying to `/mcp` like every other route).
+   the API-key gate applying to `/mcp` like every other route, the
+   localhost-only Host rejection, and `_mcp_transport_security()`'s
+   branching in isolation).
 
-3. **Redis reconnection resilience — done 2026-09-10.** `CookieCache`
-   (`app/solver/cache.py`) and `SessionManager` (`app/solver/sessions.py`)
-   each replaced their one-shot `_init_redis()` with a `_redis()` helper
-   that retries the connection on a 30s cooldown
+3. **Redis reconnection resilience — done 2026-09-10, hardened
+   2026-09-11.** `CookieCache` (`app/solver/cache.py`) and `SessionManager`
+   (`app/solver/sessions.py`) each replaced their one-shot `_init_redis()`
+   with a `_redis()` helper that retries the connection on a 30s cooldown
    (`REDIS_RECONNECT_INTERVAL_SECONDS`) instead of setting `redis_client`
    to `None` permanently on the first failure — a transient Redis restart
    during container startup (`docker compose --profile distributed up`,
    where `solverr` can start before `redis` is ready) now self-heals
    instead of stranding that replica on local-only cache/sessions until a
-   manual restart. Covered by a reconnection test in each of
-   `tests/test_cache.py` and `tests/test_sessions.py`.
+   manual restart. **Correction (2026-09-11, PR review):** the initial
+   `_redis()` only retried a connection that failed to *establish* in the
+   first place — once a client had connected successfully, an outage
+   afterward (Redis restarted mid-run) left `redis_client` set to the now-
+   dead client forever, so every later cache/session operation kept
+   retrying that stale connection (paying its `socket_connect_timeout` each
+   time) instead of backing off, and never triggered a fresh reconnect
+   attempt even once Redis came back. Fixed with an `_invalidate_redis()`
+   helper, called from every Redis operation's exception handler in both
+   files, that clears `redis_client` and resets the cooldown timer so the
+   next call goes through `_redis()`'s normal retry path. Covered by a
+   reconnection test (initial-failure) and a new post-connect-outage test
+   in each of `tests/test_cache.py` and `tests/test_sessions.py`.
 
 4. **Response/debug capture (console logs, network requests, redirect
    chain) — matches this plan's own Phase 3/6, not a new item.** TRAWL

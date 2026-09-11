@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.config import settings
 from app.main import app
+from app.mcp_server import _mcp_transport_security
 from app.solver.cache import cookie_cache
 
 MCP_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
@@ -23,7 +24,12 @@ class TestMCPServer(unittest.TestCase):
     # this whole test class rather than per test method.
     @classmethod
     def setUpClass(cls):
-        cls.client = TestClient(app)
+        # base_url matters here: with no API_KEY configured (the default in
+        # this test environment), app/mcp_server.py's DNS-rebinding
+        # protection stays on and localhost-only by default (see
+        # _mcp_transport_security()) - the default TestClient Host header
+        # ("testserver") would otherwise get a 421.
+        cls.client = TestClient(app, base_url="http://localhost:8191")
         cls.client.__enter__()
 
     @classmethod
@@ -77,6 +83,43 @@ class TestMCPServer(unittest.TestCase):
                 self.client, "tools/list", headers={**MCP_HEADERS, "x-api-key": "test-mcp-key"}
             )
             self.assertEqual(authenticated.status_code, 200)
+
+    def test_untrusted_host_is_rejected_without_an_api_key(self):
+        # No API_KEY is configured in this test process, so
+        # _mcp_transport_security() keeps DNS-rebinding/Host-header
+        # protection on and localhost-only (see app/mcp_server.py) - a
+        # non-local Host must be rejected even though the request is
+        # otherwise well-formed and reaches the class's own localhost:8191
+        # client fine (see test_tools_are_registered).
+        resp = _rpc(self.client, "tools/list", headers={**MCP_HEADERS, "host": "evil.example.com"})
+        self.assertEqual(resp.status_code, 421)
+
+
+class TestMCPTransportSecurityDecision(unittest.TestCase):
+    """Unit-tests _mcp_transport_security()'s branching directly, since the
+    mounted ASGI app (tested above) bakes in whatever settings.API_KEY was
+    at process/import time and can't be rebuilt per-test."""
+
+    def test_disabled_when_api_key_is_set(self):
+        with patch.object(settings, "API_KEY", "some-key"):
+            ts = _mcp_transport_security()
+        self.assertFalse(ts.enable_dns_rebinding_protection)
+
+    def test_local_only_by_default_without_an_api_key(self):
+        with patch.object(settings, "API_KEY", None), \
+             patch.object(settings, "MCP_ALLOWED_HOSTS", []), \
+             patch.object(settings, "MCP_ALLOWED_ORIGINS", []):
+            ts = _mcp_transport_security()
+        self.assertTrue(ts.enable_dns_rebinding_protection)
+        self.assertIn("localhost:*", ts.allowed_hosts)
+        self.assertIn("127.0.0.1:*", ts.allowed_hosts)
+
+    def test_respects_an_explicit_allowed_hosts_override(self):
+        with patch.object(settings, "API_KEY", None), \
+             patch.object(settings, "MCP_ALLOWED_HOSTS", ["my-nas.local:8191"]), \
+             patch.object(settings, "MCP_ALLOWED_ORIGINS", []):
+            ts = _mcp_transport_security()
+        self.assertEqual(ts.allowed_hosts, ["my-nas.local:8191"])
 
 
 if __name__ == "__main__":

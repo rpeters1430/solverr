@@ -92,5 +92,37 @@ class TestSessionManager(unittest.TestCase):
             self.assertEqual(attempts["n"], 2)
             self.assertIs(mgr.redis_client, client)
 
+    def test_redis_invalidated_and_retried_after_post_connect_outage(self):
+        # Mirrors CookieCache's equivalent test: a successful connection that
+        # later drops must be dropped by the client too, so the next call
+        # goes through _redis()'s cooldown instead of retrying a dead
+        # connection on every session operation.
+        class FlakyRedisClient:
+            def __init__(self):
+                self.healthy = True
+
+            def ping(self):
+                pass
+
+            def get(self, key):
+                if not self.healthy:
+                    raise ConnectionError("redis down")
+                return None
+
+        client = FlakyRedisClient()
+        with patch("redis.Redis.from_url", return_value=client):
+            mgr = SessionManager(redis_url="redis://fake-host:6379/0")
+            self.assertIs(mgr.redis_client, client)
+
+            client.healthy = False
+            self.assertIsNone(mgr._load_from_redis("some-session-id"))
+            self.assertIsNone(mgr.redis_client, "a failed operation must invalidate the stale client")
+
+            self.assertIsNone(mgr._redis())
+
+            client.healthy = True
+            mgr._redis_last_attempt = 0
+            self.assertIs(mgr._redis(), client)
+
 if __name__ == "__main__":
     unittest.main()

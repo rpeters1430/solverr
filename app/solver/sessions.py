@@ -101,6 +101,14 @@ class SessionManager:
             logger.warning(f"[SessionManager] Redis connection attempt failed ({e}). Sessions are in-memory only for this process until the next retry.")
             return None
 
+    def _invalidate_redis(self):
+        """Drop the current client after an operation failure (as opposed to
+        a failed connection attempt in _redis()) so the next call goes
+        through _redis()'s cooldown-gated reconnect instead of retrying a
+        now-dead connection on every subsequent session operation."""
+        self.redis_client = None
+        self._redis_last_attempt = time.time()
+
     def _persist(self, sess: Session):
         redis_client = self._redis()
         if not redis_client:
@@ -110,6 +118,7 @@ class SessionManager:
             redis_client.set(key, json.dumps(sess.to_dict()), ex=sess.ttl)
         except Exception as e:
             logger.debug(f"[SessionManager] Redis persist error for '{sess.session_id}': {e}")
+            self._invalidate_redis()
 
     def _load_from_redis(self, session_id: str) -> Optional[Session]:
         redis_client = self._redis()
@@ -127,6 +136,7 @@ class SessionManager:
             return sess
         except Exception as e:
             logger.debug(f"[SessionManager] Redis load error for '{session_id}': {e}")
+            self._invalidate_redis()
             return None
 
     def create_session(self, session_id: Optional[str] = None, proxy: Optional[str] = None, ttl: int = 7200) -> str:
@@ -183,6 +193,7 @@ class SessionManager:
                 redis_client.delete(f"{REDIS_KEY_PREFIX}{session_id}")
             except Exception as e:
                 logger.debug(f"[SessionManager] Redis delete error for '{session_id}': {e}")
+                self._invalidate_redis()
 
     def destroy_session(self, session_id: str) -> bool:
         existed = session_id in self._sessions or self._load_from_redis(session_id) is not None
@@ -206,6 +217,7 @@ class SessionManager:
                     session_ids.add(key[len(REDIS_KEY_PREFIX):])
             except Exception as e:
                 logger.debug(f"[SessionManager] Redis list error: {e}")
+                self._invalidate_redis()
         return list(session_ids)
 
     def prune_expired_sessions(self) -> int:

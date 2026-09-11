@@ -112,6 +112,41 @@ class TestCookieCache(unittest.TestCase):
             self.assertEqual(attempts["n"], 2)
             self.assertIs(cache.redis_client, client)
 
+    def test_redis_invalidated_and_retried_after_post_connect_outage(self):
+        # A successful initial connection that later drops (Redis restarted,
+        # network blip) must not be retried forever on every call with no
+        # backoff - it should be dropped so _redis()'s cooldown applies, the
+        # same as a failed initial connection.
+        class FlakyRedisClient:
+            def __init__(self):
+                self.healthy = True
+
+            def ping(self):
+                pass
+
+            def scan_iter(self, match=None, count=None):
+                if not self.healthy:
+                    raise ConnectionError("redis down")
+                return iter([])
+
+        client = FlakyRedisClient()
+        with patch("redis.Redis.from_url", return_value=client):
+            cache = CookieCache(cache_file=self.cache_file, redis_url="redis://fake-host:6379/0")
+            self.assertIs(cache.redis_client, client)
+
+            # Redis goes down after the successful connect.
+            client.healthy = False
+            cache.get_cookies("https://example.com")
+            self.assertIsNone(cache.redis_client, "a failed operation must invalidate the stale client")
+
+            # Within the cooldown - no immediate reconnect attempt.
+            self.assertIsNone(cache._redis())
+
+            # Cooldown elapsed and Redis healthy again - reconnects cleanly.
+            client.healthy = True
+            cache._redis_last_attempt = 0
+            self.assertIs(cache._redis(), client)
+
     def test_export_netscape_format(self):
         cookies = [
             CookieModel(name="cf_clearance", value="token123", domain=".example.com", path="/", secure=True, expires=1800000000)

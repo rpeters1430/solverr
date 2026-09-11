@@ -55,7 +55,10 @@ async def solverr_scrape(
 
     tier: "auto" (default, escalates only as needed), "tier1_tls" (Fast TLS
     only, no browser - fails rather than escalating if a challenge is hit),
-    "tier3_browser" (force a stealth browser solve), or "tier4_proxy".
+    or "tier3_browser" (force a stealth browser solve). There is no tier
+    value that forces Tier 4 directly - that's an automatic engine-side
+    escalation (FALLBACK_PROXY_URL) after a direct browser solve fails, not
+    a mode a caller can select up front.
     extract_rules: optional {name: rule} map for pulling fields out of the
     returned HTML - rule is a CSS selector (text), "selector@attr" (an
     attribute), "selector[]" (a list of matches), or "regex:pattern".
@@ -89,7 +92,7 @@ async def solverr_scrape(
 
 @mcp_server.tool()
 async def solverr_screenshot(url: str, max_timeout_ms: int = 60000) -> Image:
-    """Solve any challenge on a URL and return a PNG screenshot of the
+    """Solve any challenge on a URL and return a JPEG screenshot of the
     resulting page. Always uses the stealth browser tier, since a screenshot
     requires a real rendered page rather than a raw HTTP response."""
     try:
@@ -105,7 +108,10 @@ async def solverr_screenshot(url: str, max_timeout_ms: int = 60000) -> Image:
 
     if not solution.screenshot:
         raise ToolError(f"No screenshot was captured for {url} (http_status={solution.status})")
-    return Image(data=base64.b64decode(solution.screenshot), format="png")
+    # BrowserPool captures screenshots as JPEG (page.screenshot(type="jpeg"),
+    # app/solver/browser/browser.py) - format must match the actual bytes,
+    # not just the file extension callers might expect.
+    return Image(data=base64.b64decode(solution.screenshot), format="jpeg")
 
 
 @mcp_server.tool()
@@ -126,6 +132,45 @@ def solverr_get_stats() -> Dict[str, Any]:
     return stats
 
 
+# DNS-rebinding protection only ever matches literal Host/Origin values (or
+# a "host:*" port wildcard) - it has no "any host" wildcard, so it can't
+# simply be pointed at "whatever Solverr's real deployment hostname turns
+# out to be" (a NAS IP, a Docker network alias, a custom domain behind a
+# reverse proxy - all unknown at container-build time). These are the
+# defaults when API_KEY is unset and the operator hasn't set
+# MCP_ALLOWED_HOSTS/MCP_ALLOWED_ORIGINS: local-only, so MCP still works out
+# of the box for the common localhost/dev case without leaving an
+# unauthenticated deployment reachable from the whole network via DNS
+# rebinding.
+_LOCAL_ONLY_ALLOWED_HOSTS = [
+    "127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*", "[::1]", "[::1]:*",
+]
+_LOCAL_ONLY_ALLOWED_ORIGINS = [
+    "http://127.0.0.1", "http://127.0.0.1:*", "http://localhost", "http://localhost:*",
+    "http://[::1]", "http://[::1]:*",
+    "https://127.0.0.1", "https://127.0.0.1:*", "https://localhost", "https://localhost:*",
+    "https://[::1]", "https://[::1]:*",
+]
+
+
+def _mcp_transport_security() -> TransportSecuritySettings:
+    if settings.API_KEY:
+        # A shared secret already gates every call (app/main.py's
+        # middleware) - a Host-header check on top of that would only ever
+        # reject legitimate requests to Solverr's actual deployment hostname
+        # without stopping anyone who doesn't already have the key.
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    # No API_KEY: MCP would otherwise be a fully open surface (tools like
+    # solverr_get_cookies included) reachable from any browser tab via DNS
+    # rebinding. Keep the SDK's protection on, restricted to localhost
+    # unless the operator opts into a wider deployment explicitly.
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=settings.MCP_ALLOWED_HOSTS or _LOCAL_ONLY_ALLOWED_HOSTS,
+        allowed_origins=settings.MCP_ALLOWED_ORIGINS or _LOCAL_ONLY_ALLOWED_ORIGINS,
+    )
+
+
 def create_mcp_asgi_app() -> Starlette:
     """Build the MCP Streamable HTTP ASGI app. Must be called exactly once,
     before `mcp_server.session_manager` is accessed - app/main.py's lifespan
@@ -135,15 +180,12 @@ def create_mcp_asgi_app() -> Starlette:
     gets its own transport), which matters once Solverr runs multiple
     replicas behind a load balancer (see the "Horizontal Scaling" README
     section) with no guarantee two requests from the same MCP client land on
-    the same replica. DNS-rebinding protection is disabled: it defends a
-    desktop MCP server bound to localhost against a malicious webpage in a
-    browser rebinding DNS to reach it, which doesn't apply to Solverr's
-    network-exposed, X-Api-Key-gated deployment model (app/main.py's
-    middleware already covers this path exactly like every other endpoint).
+    the same replica. See `_mcp_transport_security()` for the DNS-rebinding
+    protection decision.
     """
     return mcp_server.streamable_http_app(
         streamable_http_path="/",
         stateless_http=True,
         json_response=True,
-        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+        transport_security=_mcp_transport_security(),
     )

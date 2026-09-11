@@ -232,11 +232,13 @@ curl -N http://localhost:8191/api/events
 ### 6. MCP Server (`POST /mcp`)
 Streamable HTTP [MCP](https://modelcontextprotocol.io) endpoint for AI agents - point an MCP-compatible client at `http://localhost:8191/mcp` (an `X-Api-Key` header is required if `API_KEY` is set, exactly like every other endpoint). Exposes:
 - `solverr_scrape` - fetch a URL through the tiered solver, with optional `extract_rules`
-- `solverr_screenshot` - solve and return a PNG screenshot of the resulting page
+- `solverr_screenshot` - solve and return a JPEG screenshot of the resulting page
 - `solverr_get_cookies` - read cached clearance cookies for a domain without a new request
 - `solverr_get_stats` - engine/browser-pool health
 
 On by default; set `ENABLE_MCP=false` to disable.
+
+**Security note:** if `API_KEY` is set, that shared secret gates `/mcp` (like every other endpoint) and no further configuration is needed. If `API_KEY` is **not** set, `/mcp` still enforces a Host/Origin allowlist restricted to `localhost`/`127.0.0.1` by default - this stops a malicious webpage from reaching an unauthenticated MCP server via DNS rebinding. To use MCP from a real (non-localhost) client without an `API_KEY`, set `MCP_ALLOWED_HOSTS` (comma-separated `host:port` or `host:*`, e.g. `my-nas.local:8191`) and `MCP_ALLOWED_ORIGINS` (full origins, e.g. `http://my-nas.local:8191`) - though setting `API_KEY` instead is the safer option.
 
 ---
 
@@ -273,6 +275,8 @@ On by default; set `ENABLE_MCP=false` to disable.
 | `CAPTCHA_SOLVER_API_KEY` | `None` | Optional 2Captcha-compatible API key for the Tier 3.5 paid-solver escalation on interactive image challenges |
 | `CAPTCHA_SOLVER_BASE_URL` | `https://2captcha.com` | API base URL - point at another provider's 2captcha-compatible endpoint (e.g. CapSolver) here |
 | `ENABLE_MCP` | `true` | Mount the MCP (Model Context Protocol) server at `/mcp` for AI agents - see [MCP Server](#6-mcp-server-post-mcp) |
+| `MCP_ALLOWED_HOSTS` | (empty) | Comma-separated Host header values (`host:port` or `host:*`) `/mcp` accepts beyond `localhost`/`127.0.0.1`. Only consulted when `API_KEY` is unset |
+| `MCP_ALLOWED_ORIGINS` | (empty) | Comma-separated Origin header values `/mcp` accepts beyond `localhost`/`127.0.0.1`. Only consulted when `API_KEY` is unset |
 | `HEADLESS` | `true` | Run browser in headless mode |
 | `LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 
