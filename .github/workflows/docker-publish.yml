@@ -147,7 +147,12 @@ jobs:
             curl -fs http://localhost:8191/health >/dev/null && break
             sleep 2
           done
-          curl -fsS --max-time 60 http://localhost:8191/api/diagnostics/browser
+          status="$(curl -sS --max-time 60 -o /tmp/solverr-browser.json -w '%{http_code}' http://localhost:8191/api/diagnostics/browser)"
+          cat /tmp/solverr-browser.json
+          if [ "$status" != "200" ]; then
+            docker logs solverr-nonroot
+            exit 1
+          fi
 
       - name: Tear down non-root smoke test container
         if: always()
