@@ -4,6 +4,8 @@ on:
   push:
     branches: [ "main" ]
     tags: [ "v*.*.*", "v*.*", "v*" ]
+  pull_request:
+    branches: [ "main" ]
   workflow_dispatch:
 
 env:
@@ -74,6 +76,7 @@ jobs:
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
 
       - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ${{ env.REGISTRY }}
@@ -107,7 +110,8 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-staging-${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -134,6 +138,21 @@ jobs:
         if: always()
         run: docker rm -f solverr-smoke || true
 
+      - name: Smoke test Camoufox as UGREEN UID/GID
+        run: |
+          docker run -d --name solverr-nonroot --shm-size=1g -p 8191:8191 \
+            -e PUID=1000 -e PGID=10 \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-staging-${{ github.sha }}"
+          for i in $(seq 1 30); do
+            curl -fs http://localhost:8191/health >/dev/null && break
+            sleep 2
+          done
+          curl -fsS --max-time 60 http://localhost:8191/api/diagnostics/browser
+
+      - name: Tear down non-root smoke test container
+        if: always()
+        run: docker rm -f solverr-nonroot || true
+
       - name: Scan image for vulnerabilities (trivy)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -147,6 +166,7 @@ jobs:
       # via imagetools - a registry-side retag, not a rebuild - so what
       # gets those tags is guaranteed byte-identical to what was scanned.
       - name: Promote validated image to release tags
+        if: github.event_name != 'pull_request'
         run: |
           set -eu
           digest="${{ steps.build.outputs.digest }}"
