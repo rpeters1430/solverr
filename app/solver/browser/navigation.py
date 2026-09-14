@@ -4,14 +4,14 @@ import logging
 from typing import Any, Optional, Tuple
 from urllib.parse import parse_qsl
 
-from playwright.async_api import Page
+from playwright.async_api import BrowserContext, Page
 
 from app.security import SSRFBlockedError, check_target_url_async
 
 logger = logging.getLogger("solverr.browser")
 
 
-async def install_media_blocking(page: Page) -> None:
+async def install_media_blocking(context: BrowserContext) -> None:
     """Block only video/audio media to save bandwidth, while preserving
     fonts & challenge canvases (which some WAF challenges render to)."""
     async def block_heavy_media(route, request):
@@ -27,7 +27,7 @@ async def install_media_blocking(page: Page) -> None:
         await route.continue_()
 
     try:
-        await page.route("**/*", block_heavy_media)
+        await context.route("**/*", block_heavy_media)
     except Exception:
         pass
 
