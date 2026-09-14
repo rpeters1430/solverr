@@ -3,14 +3,17 @@ import logging
 import re
 import zlib
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from curl_cffi.requests import AsyncSession
 from app.models.flaresolverr import CookieModel, SolutionModel
 from app.solver.browser import detect_challenge, is_challenge_title
 from app.config import settings
 from app.logging_config import sanitize_proxy_url
+from app.security import check_target_url_async
 
 logger = logging.getLogger("solverr.fast_tls")
+
+MAX_REDIRECTS = 10
 
 # TLS impersonation profiles, each paired with a User-Agent that actually
 # matches the claimed browser/version. A JA3/JA4 fingerprint that says
@@ -184,25 +187,41 @@ class FastTLSEngine:
 
         try:
             session = await self._get_session(pool_key, impersonate_target)
-            if method.upper() == "POST":
-                resp = await session.post(
-                    url,
-                    data=post_data,
-                    headers=req_headers,
-                    cookies=cookie_dict,
-                    proxies=proxies,
-                    timeout=timeout,
-                    allow_redirects=True
+            current_url = url
+            current_method = method.upper()
+            current_post_data = post_data
+            resp = None
+
+            for redirect_count in range(MAX_REDIRECTS + 1):
+                await check_target_url_async(
+                    current_url,
+                    label="Target" if redirect_count == 0 else "Redirect target",
                 )
-            else:
-                resp = await session.get(
-                    url,
-                    headers=req_headers,
-                    cookies=cookie_dict,
-                    proxies=proxies,
-                    timeout=timeout,
-                    allow_redirects=True
-                )
+                request_kwargs = {
+                    "headers": req_headers,
+                    "cookies": cookie_dict if redirect_count == 0 else None,
+                    "proxies": proxies,
+                    "timeout": timeout,
+                    "allow_redirects": False,
+                }
+                if current_method == "POST":
+                    resp = await session.post(current_url, data=current_post_data, **request_kwargs)
+                else:
+                    resp = await session.get(current_url, **request_kwargs)
+
+                location = resp.headers.get("location")
+                if resp.status_code not in (301, 302, 303, 307, 308) or not location:
+                    break
+                if redirect_count >= MAX_REDIRECTS:
+                    raise RuntimeError(f"Redirect limit ({MAX_REDIRECTS}) exceeded")
+
+                next_url = urljoin(str(resp.url), location)
+                await check_target_url_async(next_url, label="Redirect target")
+                if resp.status_code == 303 or (resp.status_code in (301, 302) and current_method == "POST"):
+                    current_method = "GET"
+                    current_post_data = None
+                current_url = next_url
+
             if not self._pool_enabled:
                 await session.close()
 

@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 from app.config import settings
-from app.security import check_target_url, SSRFBlockedError
+from app.security import check_target_url, check_target_url_async, SSRFBlockedError
 
 
 class TestSSRFProtection(unittest.TestCase):
@@ -50,6 +50,18 @@ class TestSSRFProtection(unittest.TestCase):
 
     def test_scheme_less_public_host_allowed(self):
         check_target_url("example.com:8080")  # must not raise
+
+
+class TestAsyncSSRFProtection(unittest.IsolatedAsyncioTestCase):
+    async def test_async_loopback_blocked(self):
+        with self.assertRaises(SSRFBlockedError):
+            await check_target_url_async("http://127.0.0.1/private", label="Redirect target")
+
+    async def test_async_public_resolution_allowed(self):
+        with patch("asyncio.BaseEventLoop.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("93.184.216.34", 0))
+        ]):
+            await check_target_url_async("https://example.com/")
 
 
 class TestProxySSRFProtection(unittest.IsolatedAsyncioTestCase):

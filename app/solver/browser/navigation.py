@@ -6,6 +6,8 @@ from urllib.parse import parse_qsl
 
 from playwright.async_api import Page
 
+from app.security import SSRFBlockedError, check_target_url_async
+
 logger = logging.getLogger("solverr.browser")
 
 
@@ -15,8 +17,14 @@ async def install_media_blocking(page: Page) -> None:
     async def block_heavy_media(route, request):
         if request.resource_type in ["media"]:
             await route.abort()
-        else:
-            await route.continue_()
+            return
+        try:
+            await check_target_url_async(request.url, label="Browser request")
+        except SSRFBlockedError as exc:
+            logger.warning(f"[BrowserPool] Blocked private-network request: {exc}")
+            await route.abort("blockedbyclient")
+            return
+        await route.continue_()
 
     try:
         await page.route("**/*", block_heavy_media)
