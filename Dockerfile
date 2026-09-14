@@ -63,7 +63,7 @@ WORKDIR /app
 COPY --from=deps /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Install OS libraries for Firefox/Camoufox, curl for healthchecks, and tini
+# Install OS libraries for Firefox/Camoufox and tini
 # for PID 1 zombie reaping. This is a curated list (not `playwright
 # install-deps firefox`, which pulls in a much larger transitive closure -
 # Xvfb, X11 utilities, extra font packages - built to support any Playwright
@@ -98,8 +98,8 @@ COPY --from=deps /app/.cache/camoufox /app/.cache/camoufox
 # Copy application source
 COPY app ./app
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN mkdir -p data /app/home /app/.cache/camoufox/tmp \
-    && chmod 1777 /app/.cache/camoufox/tmp \
+RUN mkdir -p data /app/home /app/.cache/camoufox/tmp /app/.cache/camoufox/fontconfig \
+    && chmod 1777 /app/.cache/camoufox/tmp /app/.cache/camoufox/fontconfig \
     && chmod +x /usr/local/bin/docker-entrypoint.sh \
     && chmod -R a+rX /app/.cache/camoufox \
     && rm -rf /usr/local/lib/python*/site-packages/setuptools* \
