@@ -9,7 +9,6 @@ reuse the same `solver_engine`/`cookie_cache`/`browser_pool` singletons the
 HTTP routes use, so a solve/cache hit through MCP shows up in the same
 `/metrics` and dashboard the rest of Solverr does.
 """
-import asyncio
 import base64
 import logging
 from typing import Any, Dict, Optional
@@ -133,7 +132,8 @@ async def solverr_get_cookies(domain: str) -> Dict[str, str]:
     """Return clearance cookies (e.g. cf_clearance) Solverr already has
     cached for a domain, without making a new request. Empty if nothing is
     cached yet for that domain."""
-    return await asyncio.to_thread(cookie_cache.get_cookie_dict, domain)
+    cookies = await cookie_cache.get_cookies_async(domain)
+    return {cookie.name: cookie.value for cookie in cookies}
 
 
 @mcp_server.tool()
