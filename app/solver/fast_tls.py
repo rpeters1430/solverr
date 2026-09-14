@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import time
 import zlib
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
@@ -185,6 +186,8 @@ class FastTLSEngine:
         proxy_desc = f" | Proxy: {sanitize_proxy_url(proxy)}" if proxy else ""
         logger.info(f"[FastTLS] Executing async {method.upper()} -> {url} (impersonate='{impersonate_target}', timeout={timeout}s{proxy_desc})")
 
+        session = None
+        deadline = time.monotonic() + timeout
         try:
             session = await self._get_session(pool_key, impersonate_target)
             current_url = url
@@ -197,11 +200,14 @@ class FastTLSEngine:
                     current_url,
                     label="Target" if redirect_count == 0 else "Redirect target",
                 )
+                remaining_timeout = deadline - time.monotonic()
+                if remaining_timeout <= 0:
+                    raise asyncio.TimeoutError("Fast TLS redirect chain exhausted its timeout")
                 request_kwargs = {
                     "headers": req_headers,
                     "cookies": cookie_dict if redirect_count == 0 else None,
                     "proxies": proxies,
-                    "timeout": timeout,
+                    "timeout": remaining_timeout,
                     "allow_redirects": False,
                 }
                 if current_method == "POST":
@@ -221,9 +227,6 @@ class FastTLSEngine:
                     current_method = "GET"
                     current_post_data = None
                 current_url = next_url
-
-            if not self._pool_enabled:
-                await session.close()
 
             # Check if page returned a WAF challenge response
             is_cf_challenge = False
@@ -297,5 +300,11 @@ class FastTLSEngine:
             self.record_outcome(url, impersonate_target, False)
             logger.warning(f"[FastTLS] Fast TLS request failed or timed out for {url}: {type(e).__name__} - {e}")
             return True, None
+        finally:
+            if session is not None and not self._pool_enabled:
+                try:
+                    await session.close()
+                except Exception:
+                    pass
 
 fast_tls_engine = FastTLSEngine()
