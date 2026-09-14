@@ -163,6 +163,11 @@ class TestCookieCache(unittest.TestCase):
                     raise ConnectionError("redis down")
                 return self.store.get(key)
 
+            def mget(self, keys):
+                if not self.healthy:
+                    raise ConnectionError("redis down")
+                return [self.store.get(key) for key in keys]
+
             def scan_iter(self, match=None, count=None):
                 if not self.healthy:
                     raise ConnectionError("redis down")
@@ -287,6 +292,11 @@ class TestCookieCache(unittest.TestCase):
             client.healthy = True
             cache._redis_last_attempt = 0
             self.assertIs(cache._redis(), client)
+
+    def test_count_domains_uses_local_store(self):
+        self.cache.set_cookies("https://a.example.com", [CookieModel(name="a", value="1", domain="a.example.com")])
+        self.cache.set_cookies("https://b.example.com", [CookieModel(name="b", value="2", domain="b.example.com")])
+        self.assertEqual(self.cache.count_domains(), 2)
 
     def test_export_netscape_format(self):
         cookies = [

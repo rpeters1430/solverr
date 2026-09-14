@@ -92,7 +92,7 @@ class Settings:
         WORKER_AUTO_TUNED: bool = True
     else:
         try:
-            MAX_BROWSER_WORKERS: int = min(_max_nas_workers, max(1, int(_raw_workers)))
+            MAX_BROWSER_WORKERS: int = min(16, max(1, int(_raw_workers)))
             WORKER_AUTO_TUNED: bool = False
         except ValueError:
             MAX_BROWSER_WORKERS: int = _auto_worker_count
@@ -151,11 +151,9 @@ class Settings:
     # setups that don't send auth headers) - set true for exposed deployments.
     METRICS_REQUIRE_AUTH: bool = os.getenv("METRICS_REQUIRE_AUTH", "false").lower() in ("true", "1", "yes")
 
-    # SSRF protection: Solverr accepts arbitrary caller-supplied target URLs
-    # (that's the whole point), which can otherwise be used to reach
-    # internal/loopback services or cloud metadata endpoints from wherever
-    # Solverr is deployed. Blocked by default; only the initial request
-    # target is checked (redirects are not currently re-validated).
+    # SSRF protection: initial targets, redirects, and browser subresources
+    # are validated before access so a public page cannot trampoline into
+    # internal/loopback services or cloud metadata endpoints.
     ALLOW_PRIVATE_NETWORKS: bool = os.getenv("ALLOW_PRIVATE_NETWORKS", "false").lower() in ("true", "1", "yes")
     ALLOWED_HOSTS: set = {h.strip().lower() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()}
     DENIED_HOSTS: set = {h.strip().lower() for h in os.getenv("DENIED_HOSTS", "").split(",") if h.strip()}
