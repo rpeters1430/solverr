@@ -202,6 +202,7 @@ class TestFastTLSSessionPool(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(challenged)
         self.assertIsNone(solution)
         self.assertEqual(mock_session.get.await_count, 1)
+        mock_session.close.assert_awaited_once()
 
 if __name__ == "__main__":
     unittest.main()
