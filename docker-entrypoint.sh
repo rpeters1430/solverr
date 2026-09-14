@@ -27,9 +27,9 @@ if [ -n "${PUID:-}" ] || [ -n "${PGID:-}" ]; then
   # Recursively chowning it on every NAS restart forces overlayfs to copy the
   # browser into the writable layer. Only runtime-writable paths need the
   # requested NAS ownership.
-  mkdir -p /app/data /app/home /app/.cache/camoufox/tmp
-  chown -R "${PUID}:${PGID}" /app/data /app/home
-  chown "${PUID}:${PGID}" /app/.cache/camoufox/tmp
+  mkdir -p /app/data /app/home /app/.cache/camoufox/tmp /app/.cache/camoufox/fontconfig
+  chown -R "${PUID}:${PGID}" /app/data /app/home \
+    /app/.cache/camoufox/tmp /app/.cache/camoufox/fontconfig
 
   # gosu derives $HOME from the target UID's /etc/passwd entry, ignoring any
   # HOME already exported here - an arbitrary NAS PUID with no passwd entry
