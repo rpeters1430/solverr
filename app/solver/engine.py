@@ -10,7 +10,7 @@ from app.solver.fast_tls import fast_tls_engine
 from app.solver.browser import browser_pool
 from app.config import settings
 from app.events import event_broadcaster
-from app.security import check_target_url
+from app.security import check_target_url_async
 
 logger = logging.getLogger("solverr.engine")
 
@@ -181,7 +181,7 @@ class HybridSolverEngine:
         url = req.url
         method = req.cmd.split(".")[-1].upper() if "." in req.cmd else "GET"
 
-        check_target_url(url)
+        await check_target_url_async(url)
         # The proxy endpoint is just as capable of reaching internal/private
         # network targets as `url` itself (it becomes the actual egress point
         # for curl_cffi/Camoufox), so it must pass the same SSRF policy -
@@ -189,7 +189,7 @@ class HybridSolverEngine:
         # service by setting `proxy` instead of `url`.
         proxy_for_check = req.get_proxy_url()
         if proxy_for_check:
-            check_target_url(proxy_for_check, label="Proxy")
+            await check_target_url_async(proxy_for_check, label="Proxy")
 
         # Deduplication key for identical concurrent solves. Must cover every
         # field that can change the outcome - two requests that only differ
