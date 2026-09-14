@@ -32,7 +32,7 @@ def _is_blocked_ip(ip_str: str) -> bool:
 
 
 def _validated_host(url: str, label: str) -> str | None:
-    if settings.ALLOW_PRIVATE_NETWORKS or not url:
+    if not url:
         return None
     parse_target = url if "://" in url else f"//{url}"
     try:
@@ -42,10 +42,10 @@ def _validated_host(url: str, label: str) -> str | None:
     if not host:
         return None
     host_lower = host.lower()
-    if host_lower in settings.ALLOWED_HOSTS:
-        return None
     if host_lower in settings.DENIED_HOSTS:
         raise SSRFBlockedError(f"{label} host '{host}' is explicitly denied by DENIED_HOSTS")
+    if settings.ALLOW_PRIVATE_NETWORKS or host_lower in settings.ALLOWED_HOSTS:
+        return None
     if host_lower == "localhost" or host_lower in _METADATA_HOSTNAMES:
         raise SSRFBlockedError(f"{label} host '{host}' is not allowed (blocked hostname)")
     return host
@@ -69,8 +69,10 @@ def check_target_url(url: str, label: str = "Target") -> None:
         return
     try:
         infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
-        return
+    except socket.gaierror as exc:
+        raise SSRFBlockedError(
+            f"{label} host '{host}' could not be resolved safely"
+        ) from exc
     _reject_blocked_addresses(host, infos, label)
 
 
