@@ -146,11 +146,11 @@ class TestBrowserRequestSSRFGuard(unittest.IsolatedAsyncioTestCase):
         from app.solver.browser.navigation import install_media_blocking
 
         captured = {}
-        page = AsyncMock()
+        context = AsyncMock()
         async def register(_pattern, handler):
             captured["handler"] = handler
-        page.route = AsyncMock(side_effect=register)
-        await install_media_blocking(page)
+        context.route = AsyncMock(side_effect=register)
+        await install_media_blocking(context)
 
         route = AsyncMock()
         request = type("Request", (), {
