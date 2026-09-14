@@ -221,7 +221,7 @@ class CookieCache:
         cookies = self.get_cookies(url_or_domain)
         return {c.name: c.value for c in cookies}
 
-    def set_cookies(self, url_or_domain: str, cookies: List[CookieModel]):
+    def set_cookies(self, url_or_domain: str, cookies: List[CookieModel], schedule_save: bool = True):
         domain = self._normalize_domain(url_or_domain)
         now = time.time()
 
@@ -255,7 +255,8 @@ class CookieCache:
             self._evict_cookies_if_at_capacity(c_domain)
         self._domain_count_cache_at = 0.0
         logger.debug(f"[CookieCache] Saved {len(cookies)} cookie(s) to local cache for domain '{domain}'")
-        self._schedule_save()
+        if schedule_save:
+            self._schedule_save()
 
     def _evict_domain_if_at_capacity(self):
         """LRU-ish eviction: drop the domain whose freshest cookie is oldest,
@@ -348,11 +349,28 @@ class CookieCache:
                 value = len(domains)
             except Exception:
                 self._invalidate_redis()
-                value = len(self._store)
+                value = self._count_live_local_domains()
         else:
-            value = len(self._store)
+            value = self._count_live_local_domains()
         self._domain_count_cache_value = value
         self._domain_count_cache_at = now
+        return value
+
+    def _count_live_local_domains(self) -> int:
+        now = time.time()
+        value = 0
+        for cookies in self._store.values():
+            for data in cookies.values():
+                if now - data.get("timestamp", 0) > settings.COOKIE_CACHE_TTL:
+                    continue
+                try:
+                    cookie = CookieModel(**data["cookie"])
+                except Exception:
+                    continue
+                if cookie.expires and cookie.expires > 0 and now > cookie.expires:
+                    continue
+                value += 1
+                break
         return value
 
     async def get_cookies_async(self, url_or_domain: str) -> List[CookieModel]:
@@ -361,7 +379,13 @@ class CookieCache:
 
     async def set_cookies_async(self, url_or_domain: str, cookies: List[CookieModel]) -> None:
         async with self._async_lock:
-            await asyncio.to_thread(self.set_cookies, url_or_domain, cookies)
+            # Mutate local/Redis state in a worker, but schedule the debounced
+            # disk flush back on the owning event loop. Calling _schedule_save
+            # in the worker has no running loop and falls back to an immediate
+            # full JSON rewrite for every solve.
+            await asyncio.to_thread(self.set_cookies, url_or_domain, cookies, False)
+            if not self.redis_client:
+                self._schedule_save()
 
     async def get_all_entries_async(self) -> Dict[str, List[dict]]:
         async with self._async_lock:
