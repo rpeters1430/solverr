@@ -1,3 +1,4 @@
+import asyncio
 import os
 import psutil
 import logging
@@ -27,12 +28,17 @@ async def get_stats():
     cache_lookups = metrics.cookie_cache_lookup_hits + metrics.cookie_cache_lookup_misses
     cache_hit_ratio_pct = round(metrics.cookie_cache_lookup_hits / cache_lookups * 100, 1) if cache_lookups else 0.0
 
+    active_sessions, cached_domains_count = await asyncio.gather(
+        session_manager.list_sessions_async(),
+        cookie_cache.count_domains_async(),
+    )
+
     data = metrics.to_dict()
     data.update({
         "ram_usage_mb": ram_mb,
         "cpu_usage_pct": cpu_percent,
-        "active_sessions": len(session_manager.list_sessions()),
-        "cached_domains_count": len(cookie_cache.get_all_entries()),
+        "active_sessions": len(active_sessions),
+        "cached_domains_count": cached_domains_count,
         "cache_backend": "Redis (Distributed)" if cookie_cache.redis_client else "Local JSON Disk Cache",
         "session_backend": "Redis (Distributed)" if session_manager.redis_client else "In-Memory (Per-Process)",
         "max_workers": settings.MAX_BROWSER_WORKERS,
@@ -49,33 +55,33 @@ async def get_stats():
 
 @router.get("/cookies")
 async def get_cookies():
-    return {"domains": cookie_cache.get_all_entries()}
+    return {"domains": await cookie_cache.get_all_entries_async()}
 
 @router.get("/cookies/export")
 async def export_cookies(format: str = "netscape", domain: Optional[str] = None):
     """Export cached cookies in Netscape format or JSON."""
     if format.lower() in ["netscape", "txt"]:
-        content = cookie_cache.export_netscape(domain_filter=domain)
+        content = await cookie_cache.export_netscape_async(domain_filter=domain)
         filename = f"cookies_{domain or 'all'}.txt"
         return PlainTextResponse(
             content,
             media_type="text/plain",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'}
         )
-    return {"domains": cookie_cache.get_all_entries()}
+    return {"domains": await cookie_cache.get_all_entries_async()}
 
 @router.post("/cookies/clear")
 async def clear_cookies():
-    cookie_cache.clear()
+    await cookie_cache.clear_async()
     return {"status": "ok", "message": "Cookie cache cleared"}
 
 @router.get("/sessions")
 async def list_sessions():
-    return {"sessions": session_manager.list_sessions()}
+    return {"sessions": await session_manager.list_sessions_async()}
 
 @router.delete("/sessions/{session_id}")
 async def delete_session(session_id: str):
-    success = session_manager.destroy_session(session_id)
+    success = await session_manager.destroy_session_async(session_id)
     if not success:
         raise HTTPException(status_code=404, detail="Session not found")
     return {"status": "ok", "message": f"Session '{session_id}' deleted"}

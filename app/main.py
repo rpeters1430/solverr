@@ -19,6 +19,7 @@ from app.solver.fast_tls import fast_tls_engine
 from app.metrics import generate_prometheus_metrics
 from app.logging_config import setup_logging, set_request_id
 from app.solver.sessions import session_manager
+from app.solver.cache import cookie_cache
 
 # Configure Logging
 setup_logging(settings.LOG_LEVEL)
@@ -28,7 +29,7 @@ async def periodic_session_cleanup():
     while True:
         try:
             await asyncio.sleep(600)
-            pruned = session_manager.prune_expired_sessions()
+            pruned = await session_manager.prune_expired_sessions_async()
             if pruned > 0:
                 logger.info(f"[Lifespan] Periodic session cleanup pruned {pruned} expired session(s)")
         except asyncio.CancelledError:
@@ -214,8 +215,16 @@ async def readiness_check():
 
 @app.get("/metrics")
 async def prometheus_metrics():
-    """Exposes Prometheus-formatted metrics for Grafana / VictoriaMetrics."""
-    metrics_text = generate_prometheus_metrics()
+    """Exposes Prometheus-formatted metrics without blocking the event loop."""
+    cached_domains, sessions = await asyncio.gather(
+        cookie_cache.count_domains_async(),
+        session_manager.list_sessions_async(),
+    )
+    metrics_text = await asyncio.to_thread(
+        generate_prometheus_metrics,
+        cached_domains,
+        len(sessions),
+    )
     return Response(content=metrics_text, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 if __name__ == "__main__":

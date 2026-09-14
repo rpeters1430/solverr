@@ -246,7 +246,7 @@ class HybridSolverEngine:
 
         # Combine input cookies with cached domain cookies
         combined_cookies: List[CookieModel] = []
-        cached_cookies = cookie_cache.get_cookies(url)
+        cached_cookies = await cookie_cache.get_cookies_async(url)
         metrics.record_cookie_cache_lookup(hit=bool(cached_cookies))
 
         input_cookie_names = set()
@@ -291,7 +291,7 @@ class HybridSolverEngine:
                 solution.tier = tier_name
 
                 if solution.cookies:
-                    cookie_cache.set_cookies(url, solution.cookies)
+                    await cookie_cache.set_cookies_async(url, solution.cookies)
                 event_broadcaster.emit("solve", {
                     "url": url,
                     "tier": tier_name,
@@ -308,7 +308,7 @@ class HybridSolverEngine:
                     logger.info("[HybridEngine] fastTlsOnly=True requested. Returning Fast TLS solution without browser escalation.")
                     solution.tier = "tier1_fast_tls"
                     if solution.cookies:
-                        cookie_cache.set_cookies(url, solution.cookies)
+                        await cookie_cache.set_cookies_async(url, solution.cookies)
                     event_broadcaster.emit("solve", {
                         "url": url,
                         "tier": "tier1_fast_tls",
@@ -357,7 +357,7 @@ class HybridSolverEngine:
             solution.tier = "tier3_stealth_browser"
 
             if solution.cookies:
-                cookie_cache.set_cookies(url, solution.cookies)
+                await cookie_cache.set_cookies_async(url, solution.cookies)
 
             event_broadcaster.emit("solve", {
                 "url": url,
@@ -397,7 +397,7 @@ class HybridSolverEngine:
                     logger.info(f"[HybridEngine] Tier 4 Fallback Proxy SUCCESS in {elapsed_ms:.1f}ms | Status: {solution.status}")
                     solution.tier = "tier4_fallback_proxy"
                     if solution.cookies:
-                        cookie_cache.set_cookies(url, solution.cookies)
+                        await cookie_cache.set_cookies_async(url, solution.cookies)
                     event_broadcaster.emit("solve", {
                         "url": url,
                         "tier": "tier4_fallback_proxy",

@@ -31,6 +31,11 @@ class CookieCache:
         self._write_lock = threading.Lock()
         self._save_pending = False
         self._save_task: Optional[asyncio.Task] = None
+        # Application-facing async wrappers serialize local-store access and
+        # run blocking disk/redis-py operations outside Uvicorn's event loop.
+        self._async_lock = asyncio.Lock()
+        self._domain_count_cache_value = 0
+        self._domain_count_cache_at = 0.0
 
         if self.redis_url:
             self._redis()
@@ -179,8 +184,9 @@ class CookieCache:
                     parent_domain = ".".join(parts[-2:])
                     keys += self._scan_keys(f"solverr:cookie:{parent_domain}:*")
 
-                for key in set(keys):
-                    data_raw = self.redis_client.get(key)
+                unique_keys = list(set(keys))
+                raw_values = self.redis_client.mget(unique_keys) if unique_keys else []
+                for data_raw in raw_values:
                     if data_raw:
                         data = json.loads(data_raw)
                         c_model = CookieModel(**data["cookie"])
@@ -221,12 +227,15 @@ class CookieCache:
 
         if self._redis():
             try:
+                pipe = self.redis_client.pipeline(transaction=False)
                 for c in cookies:
                     c_dict = c.model_dump()
                     c_domain = c.domain.lstrip(".") if c.domain else domain
                     key = f"solverr:cookie:{c_domain}:{self._cookie_key(c)}"
                     val = json.dumps({"cookie": c_dict, "timestamp": now})
-                    self.redis_client.set(key, val, ex=settings.COOKIE_CACHE_TTL)
+                    pipe.set(key, val, ex=settings.COOKIE_CACHE_TTL)
+                pipe.execute()
+                self._domain_count_cache_at = 0.0
                 logger.debug(f"[CookieCache] Saved {len(cookies)} cookie(s) to Redis for domain '{domain}'")
                 return
             except Exception as e:
@@ -244,6 +253,7 @@ class CookieCache:
                 "timestamp": now
             }
             self._evict_cookies_if_at_capacity(c_domain)
+        self._domain_count_cache_at = 0.0
         logger.debug(f"[CookieCache] Saved {len(cookies)} cookie(s) to local cache for domain '{domain}'")
         self._schedule_save()
 
@@ -281,6 +291,8 @@ class CookieCache:
                 self._invalidate_redis()
 
         self._store = {}
+        self._domain_count_cache_value = 0
+        self._domain_count_cache_at = time.monotonic()
         logger.info("[CookieCache] Cleared all local cached cookies")
         self._save_to_disk()
 
@@ -291,11 +303,11 @@ class CookieCache:
         if self._redis():
             try:
                 keys = self._scan_keys("solverr:cookie:*")
-                for key in keys:
+                raw_values = self.redis_client.mget(keys) if keys else []
+                for key, data_raw in zip(keys, raw_values):
                     parts = key.split(":")
                     if len(parts) >= 4:
                         domain = parts[2]
-                        data_raw = self.redis_client.get(key)
                         if data_raw:
                             data = json.loads(data_raw)
                             age = int(now - data.get("timestamp", 0))
@@ -320,6 +332,52 @@ class CookieCache:
             if valid_list:
                 out[domain] = valid_list
         return out
+
+    def count_domains(self) -> int:
+        """Return a cheap cached domain count without fetching cookie values."""
+        now = time.monotonic()
+        if now - self._domain_count_cache_at < 5.0:
+            return self._domain_count_cache_value
+        if self._redis():
+            try:
+                domains = {
+                    key.split(":", 3)[2]
+                    for key in self._scan_keys("solverr:cookie:*")
+                    if len(key.split(":", 3)) >= 4
+                }
+                value = len(domains)
+            except Exception:
+                self._invalidate_redis()
+                value = len(self._store)
+        else:
+            value = len(self._store)
+        self._domain_count_cache_value = value
+        self._domain_count_cache_at = now
+        return value
+
+    async def get_cookies_async(self, url_or_domain: str) -> List[CookieModel]:
+        async with self._async_lock:
+            return await asyncio.to_thread(self.get_cookies, url_or_domain)
+
+    async def set_cookies_async(self, url_or_domain: str, cookies: List[CookieModel]) -> None:
+        async with self._async_lock:
+            await asyncio.to_thread(self.set_cookies, url_or_domain, cookies)
+
+    async def get_all_entries_async(self) -> Dict[str, List[dict]]:
+        async with self._async_lock:
+            return await asyncio.to_thread(self.get_all_entries)
+
+    async def count_domains_async(self) -> int:
+        async with self._async_lock:
+            return await asyncio.to_thread(self.count_domains)
+
+    async def clear_async(self) -> None:
+        async with self._async_lock:
+            await asyncio.to_thread(self.clear)
+
+    async def export_netscape_async(self, domain_filter: Optional[str] = None) -> str:
+        async with self._async_lock:
+            return await asyncio.to_thread(self.export_netscape, domain_filter)
 
     def export_netscape(self, domain_filter: Optional[str] = None) -> str:
         """Export cached cookies in Netscape format for curl, yt-dlp, wget, etc."""
