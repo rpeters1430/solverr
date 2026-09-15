@@ -50,5 +50,6 @@ solverr.html
 Thumbs.db
 .idea/
 .vscode/
+.worktrees/
 *.swp
 *.swo
