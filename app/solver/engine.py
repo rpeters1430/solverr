@@ -19,6 +19,11 @@ logger = logging.getLogger("solverr.engine")
 # histogram (partitioned by the "tier" label instead of separate metrics).
 HISTOGRAM_BUCKETS_SECONDS = (0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60)
 
+FAILURE_REASONS = (
+    "timeout", "budget_exhausted", "http_error", "browser_error",
+    "fast_tls_error", "fallback_error", "unknown",
+)
+
 class Histogram:
     """Minimal Prometheus-style cumulative histogram: fixed buckets + sum + count."""
     def __init__(self, buckets=HISTOGRAM_BUCKETS_SECONDS):
@@ -53,6 +58,11 @@ class PerformanceMetrics:
             "tier3_stealth_browser": Histogram(),
             "tier4_fallback_proxy": Histogram(),
         }
+        self.failure_reasons: Dict[str, int] = {reason: 0 for reason in FAILURE_REASONS}
+        self.outcome_duration_histograms: Dict[str, Histogram] = {
+            "success": Histogram(),
+            "failure": Histogram(),
+        }
         self.challenges_solved: Dict[str, int] = {
             "cloudflare_turnstile": 0,
             "cloudflare_5s": 0,
@@ -71,18 +81,21 @@ class PerformanceMetrics:
         self.fast_tls_hits += 1
         self.total_fast_ms += duration_ms
         self.duration_histograms["tier1_fast_tls"].observe(duration_ms / 1000.0)
+        self._record_success_outcome(duration_ms)
 
     def record_cache(self, duration_ms: float):
         self.total_requests += 1
         self.cache_hits += 1
         self.total_fast_ms += duration_ms
         self.duration_histograms["tier2_cache"].observe(duration_ms / 1000.0)
+        self._record_success_outcome(duration_ms)
 
     def record_browser(self, duration_ms: float, challenge_type: Optional[str] = None):
         self.total_requests += 1
         self.browser_solves += 1
         self.total_browser_ms += duration_ms
         self.duration_histograms["tier3_stealth_browser"].observe(duration_ms / 1000.0)
+        self._record_success_outcome(duration_ms)
         if challenge_type and challenge_type in self.challenges_solved:
             self.challenges_solved[challenge_type] += 1
 
@@ -91,10 +104,17 @@ class PerformanceMetrics:
         self.fallback_proxy_hits += 1
         self.total_browser_ms += duration_ms
         self.duration_histograms["tier4_fallback_proxy"].observe(duration_ms / 1000.0)
+        self._record_success_outcome(duration_ms)
 
-    def record_failure(self):
+    def _record_success_outcome(self, duration_ms: float) -> None:
+        self.outcome_duration_histograms["success"].observe(duration_ms / 1000.0)
+
+    def record_failure(self, duration_ms: float = 0.0, reason: str = "unknown") -> None:
         self.total_requests += 1
         self.failed_requests += 1
+        normalized = reason if isinstance(reason, str) and reason in self.failure_reasons else "unknown"
+        self.failure_reasons[normalized] += 1
+        self.outcome_duration_histograms["failure"].observe(duration_ms / 1000.0)
 
     def record_timeout(self):
         self.timeouts_total += 1
@@ -114,6 +134,19 @@ class PerformanceMetrics:
         browser_total = self.browser_solves + self.fallback_proxy_hits
         avg_browser = (self.total_browser_ms / browser_total) if browser_total > 0 else 0.0
         fast_rate = (fast_total / self.total_requests * 100) if self.total_requests > 0 else 0.0
+        success_histogram = self.outcome_duration_histograms["success"]
+        failure_histogram = self.outcome_duration_histograms["failure"]
+        successful_requests = success_histogram.count
+        success_rate = (successful_requests / self.total_requests * 100) if self.total_requests > 0 else 0.0
+        failure_rate = (failure_histogram.count / self.total_requests * 100) if self.total_requests > 0 else 0.0
+        avg_end_to_end_success_ms = (
+            success_histogram.sum * 1000.0 / success_histogram.count
+            if success_histogram.count > 0 else 0.0
+        )
+        avg_end_to_end_failure_ms = (
+            failure_histogram.sum * 1000.0 / failure_histogram.count
+            if failure_histogram.count > 0 else 0.0
+        )
         
         return {
             "total_requests": self.total_requests,
@@ -124,6 +157,12 @@ class PerformanceMetrics:
             "fast_tls_hits": self.fast_tls_hits,
             "browser_solves": self.browser_solves,
             "failed_requests": self.failed_requests,
+            "successful_requests": successful_requests,
+            "success_rate_pct": round(success_rate, 1),
+            "failure_rate_pct": round(failure_rate, 1),
+            "failure_reasons": self.failure_reasons,
+            "avg_end_to_end_success_ms": round(avg_end_to_end_success_ms, 2),
+            "avg_end_to_end_failure_ms": round(avg_end_to_end_failure_ms, 2),
             "avg_fast_ms": round(avg_fast, 2),
             "avg_browser_ms": round(avg_browser, 2),
             "fast_hit_rate_pct": round(fast_rate, 1),

@@ -1,6 +1,6 @@
 import os
 import psutil
-from app.solver.engine import metrics
+from app.solver.engine import FAILURE_REASONS, metrics
 from app.solver.cache import cookie_cache
 from app.solver.sessions import session_manager
 from app.solver.browser import browser_pool
@@ -32,6 +32,18 @@ def generate_prometheus_metrics() -> str:
         f'solverr_requests_total{{tier="tier3_browser",status="success"}} {stats["tier3_stealth_browser_solves"]}',
         f'solverr_requests_total{{tier="tier4_proxy_fallback",status="success"}} {stats["tier4_fallback_proxy_hits"]}',
         f'solverr_requests_total{{tier="all",status="failed"}} {stats["failed_requests"]}',
+        "",
+        "# HELP solverr_request_failures_total Number of failed requests by bounded failure reason",
+        "# TYPE solverr_request_failures_total counter",
+    ]
+
+    for reason in FAILURE_REASONS:
+        lines.append(
+            f'solverr_request_failures_total{{reason="{reason}"}} '
+            f'{stats["failure_reasons"].get(reason, 0)}'
+        )
+
+    lines += [
         "",
         "# HELP solverr_request_duration_avg_ms Average request latency in milliseconds by solver tier",
         "# TYPE solverr_request_duration_avg_ms gauge",
@@ -124,6 +136,27 @@ def generate_prometheus_metrics() -> str:
         lines.append(f'solverr_request_duration_seconds_bucket{{tier="{tier_name}",le="+Inf"}} {hist.count}')
         lines.append(f'solverr_request_duration_seconds_sum{{tier="{tier_name}"}} {round(hist.sum, 4)}')
         lines.append(f'solverr_request_duration_seconds_count{{tier="{tier_name}"}} {hist.count}')
+
+    lines += [
+        "",
+        "# HELP solverr_end_to_end_request_duration_seconds End-to-end request latency in seconds by outcome",
+        "# TYPE solverr_end_to_end_request_duration_seconds histogram",
+    ]
+    for outcome, hist in metrics.outcome_duration_histograms.items():
+        for bucket in hist.buckets:
+            lines.append(
+                f'solverr_end_to_end_request_duration_seconds_bucket{{outcome="{outcome}",le="{bucket}"}} '
+                f'{hist.bucket_counts[bucket]}'
+            )
+        lines.append(
+            f'solverr_end_to_end_request_duration_seconds_bucket{{outcome="{outcome}",le="+Inf"}} {hist.count}'
+        )
+        lines.append(
+            f'solverr_end_to_end_request_duration_seconds_sum{{outcome="{outcome}"}} {round(hist.sum, 4)}'
+        )
+        lines.append(
+            f'solverr_end_to_end_request_duration_seconds_count{{outcome="{outcome}"}} {hist.count}'
+        )
 
     lines.append("")
     return "\n".join(lines)
