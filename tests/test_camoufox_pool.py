@@ -106,7 +106,7 @@ class FakeContext:
 class FakeBrowser:
     contexts = []
 
-    async def new_context(self):
+    async def new_context(self, **kwargs):
         return FakeContext()
 
 

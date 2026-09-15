@@ -1,4 +1,5 @@
 import os
+import math
 from typing import List, Optional
 import psutil
 
@@ -56,7 +57,7 @@ class Settings:
     _cgroup_cpus: Optional[float] = _cgroup_cpu_limit()
     _cgroup_mem_bytes: Optional[int] = _cgroup_memory_limit_bytes()
 
-    TOTAL_CPU_CORES: int = max(1, round(_cgroup_cpus)) if _cgroup_cpus else (os.cpu_count() or 4)
+    TOTAL_CPU_CORES: int = max(1, math.floor(_cgroup_cpus)) if _cgroup_cpus else (os.cpu_count() or 4)
     TOTAL_RAM_GB: float = (
         round(_cgroup_mem_bytes / (1024**3), 1) if _cgroup_mem_bytes
         else (round(psutil.virtual_memory().total / (1024**3), 1) if hasattr(psutil, "virtual_memory") else 8.0)
@@ -76,7 +77,7 @@ class Settings:
     RAM_PER_WORKER_GB: float = float(os.getenv("RAM_PER_WORKER_GB", "2.0" if NAS_MODE else "1.0"))
     RAM_RESERVED_GB: float = float(os.getenv("RAM_RESERVED_GB", "2.0"))
 
-    _max_nas_workers: int = 3 if NAS_MODE else 16
+    _max_nas_workers: int = 2 if NAS_MODE else 16
     _cpu_based_workers: int = min(_max_nas_workers, max(1, TOTAL_CPU_CORES))
     _usable_ram_gb: float = TOTAL_RAM_GB - RAM_RESERVED_GB
     _ram_based_workers: int = (
@@ -91,7 +92,7 @@ class Settings:
         WORKER_AUTO_TUNED: bool = True
     else:
         try:
-            MAX_BROWSER_WORKERS: int = int(_raw_workers)
+            MAX_BROWSER_WORKERS: int = min(16, max(1, int(_raw_workers)))
             WORKER_AUTO_TUNED: bool = False
         except ValueError:
             MAX_BROWSER_WORKERS: int = _auto_worker_count
@@ -150,11 +151,9 @@ class Settings:
     # setups that don't send auth headers) - set true for exposed deployments.
     METRICS_REQUIRE_AUTH: bool = os.getenv("METRICS_REQUIRE_AUTH", "false").lower() in ("true", "1", "yes")
 
-    # SSRF protection: Solverr accepts arbitrary caller-supplied target URLs
-    # (that's the whole point), which can otherwise be used to reach
-    # internal/loopback services or cloud metadata endpoints from wherever
-    # Solverr is deployed. Blocked by default; only the initial request
-    # target is checked (redirects are not currently re-validated).
+    # SSRF protection: initial targets, redirects, and browser subresources
+    # are validated before access so a public page cannot trampoline into
+    # internal/loopback services or cloud metadata endpoints.
     ALLOW_PRIVATE_NETWORKS: bool = os.getenv("ALLOW_PRIVATE_NETWORKS", "false").lower() in ("true", "1", "yes")
     ALLOWED_HOSTS: set = {h.strip().lower() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()}
     DENIED_HOSTS: set = {h.strip().lower() for h in os.getenv("DENIED_HOSTS", "").split(",") if h.strip()}

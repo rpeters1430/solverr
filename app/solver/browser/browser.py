@@ -118,7 +118,7 @@ class BrowserPool:
             config={'forceScopeAccess': True},
             i_know_what_im_doing=True
         ) as browser_instance:
-            context = await browser_instance.new_context() if hasattr(browser_instance, "new_context") else browser_instance
+            context = await browser_instance.new_context(service_workers="block") if hasattr(browser_instance, "new_context") else browser_instance
             page = await context.new_page()
             try:
                 result = await page.evaluate("() => 1 + 1")
@@ -238,7 +238,7 @@ class BrowserPool:
         try:
             logger.info(f"[CamoufoxPool] Checked out warm instance (use #{inst.uses}) for {url}...")
             if hasattr(inst.browser, "new_context"):
-                context = await inst.browser.new_context()
+                context = await inst.browser.new_context(service_workers="block")
             elif inst.browser.contexts:
                 context = inst.browser.contexts[0]
             else:
@@ -303,10 +303,10 @@ class BrowserPool:
             config={'forceScopeAccess': True},
             i_know_what_im_doing=True
         ) as browser_instance:
-            if hasattr(browser_instance, "contexts") and browser_instance.contexts:
+            if hasattr(browser_instance, "new_context"):
+                context = await browser_instance.new_context(service_workers="block")
+            elif hasattr(browser_instance, "contexts") and browser_instance.contexts:
                 context = browser_instance.contexts[0]
-            elif hasattr(browser_instance, "new_context"):
-                context = await browser_instance.new_context()
             else:
                 context = browser_instance
             page = await context.new_page()
@@ -351,7 +351,7 @@ class BrowserPool:
             except Exception as e:
                 logger.warning(f"[BrowserPool] Error pre-loading cookies: {e}")
 
-        await install_media_blocking(page)
+        await install_media_blocking(context)
 
         # Track the true final HTTP status across the challenge-clearing
         # navigations/redirects/reloads, instead of assuming 200 once the

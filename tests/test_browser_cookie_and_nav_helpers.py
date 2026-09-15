@@ -139,5 +139,55 @@ class TestNavigateToTarget(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(response)
 
 
+class TestBrowserRequestSSRFGuard(unittest.IsolatedAsyncioTestCase):
+    async def test_private_browser_subresource_is_aborted(self):
+        from unittest.mock import AsyncMock, patch
+        from app.security import SSRFBlockedError
+        from app.solver.browser.navigation import install_media_blocking
+
+        captured = {}
+        context = AsyncMock()
+        async def register(_pattern, handler):
+            captured["handler"] = handler
+        context.route = AsyncMock(side_effect=register)
+        await install_media_blocking(context)
+
+        route = AsyncMock()
+        request = type("Request", (), {
+            "resource_type": "script",
+            "url": "http://127.0.0.1/admin.js",
+        })()
+        with patch(
+            "app.solver.browser.navigation.check_target_url_async",
+            new=AsyncMock(side_effect=SSRFBlockedError("blocked")),
+        ):
+            await captured["handler"](route, request)
+
+        route.abort.assert_awaited_once_with("blockedbyclient")
+        route.continue_.assert_not_awaited()
+
+    async def test_public_browser_subresource_continues(self):
+        from unittest.mock import AsyncMock, patch
+        from app.solver.browser.navigation import install_media_blocking
+
+        captured = {}
+        page = AsyncMock()
+        async def register(_pattern, handler):
+            captured["handler"] = handler
+        page.route = AsyncMock(side_effect=register)
+        await install_media_blocking(page)
+
+        route = AsyncMock()
+        request = type("Request", (), {
+            "resource_type": "script",
+            "url": "https://cdn.example.com/app.js",
+        })()
+        with patch("app.solver.browser.navigation.check_target_url_async", new=AsyncMock()):
+            await captured["handler"](route, request)
+
+        route.continue_.assert_awaited_once()
+        route.abort.assert_not_awaited()
+
+
 if __name__ == "__main__":
     unittest.main()

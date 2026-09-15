@@ -164,5 +164,45 @@ class TestFastTLSSessionPool(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(engine._sessions), 0)
 
 
+    async def test_public_redirect_is_followed_manually(self):
+        from unittest.mock import AsyncMock, patch, MagicMock
+        redirect = MagicMock(status_code=302, text="", headers={"location": "/final"}, cookies={})
+        redirect.url = "https://example.com/start"
+        final = MagicMock(status_code=200, text="<html><title>OK</title><body>done</body></html>", headers={}, cookies={})
+        final.url = "https://example.com/final"
+        mock_session = AsyncMock()
+        mock_session.get = AsyncMock(side_effect=[redirect, final])
+        mock_session.close = AsyncMock()
+        with patch("app.solver.fast_tls.AsyncSession", return_value=mock_session), \
+             patch("app.solver.fast_tls.check_target_url_async", new=AsyncMock()):
+            engine = FastTLSEngine()
+            engine._pool_enabled = False
+            challenged, solution = await engine.request("https://example.com/start")
+        self.assertFalse(challenged)
+        self.assertEqual(solution.url, "https://example.com/final")
+        self.assertEqual(mock_session.get.await_count, 2)
+        self.assertFalse(mock_session.get.await_args_list[0].kwargs["allow_redirects"])
+
+    async def test_private_redirect_is_blocked_before_second_request(self):
+        from unittest.mock import AsyncMock, patch, MagicMock
+        from app.security import SSRFBlockedError
+        redirect = MagicMock(status_code=302, text="", headers={"location": "http://127.0.0.1/admin"}, cookies={})
+        redirect.url = "https://example.com/start"
+        mock_session = AsyncMock()
+        mock_session.get = AsyncMock(return_value=redirect)
+        mock_session.close = AsyncMock()
+        async def validate(url, label="Target"):
+            if "127.0.0.1" in url:
+                raise SSRFBlockedError("blocked")
+        with patch("app.solver.fast_tls.AsyncSession", return_value=mock_session), \
+             patch("app.solver.fast_tls.check_target_url_async", new=AsyncMock(side_effect=validate)):
+            engine = FastTLSEngine()
+            engine._pool_enabled = False
+            challenged, solution = await engine.request("https://example.com/start")
+        self.assertTrue(challenged)
+        self.assertIsNone(solution)
+        self.assertEqual(mock_session.get.await_count, 1)
+        mock_session.close.assert_awaited_once()
+
 if __name__ == "__main__":
     unittest.main()

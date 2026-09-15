@@ -10,7 +10,7 @@ from app.solver.fast_tls import fast_tls_engine
 from app.solver.browser import browser_pool
 from app.config import settings
 from app.events import event_broadcaster
-from app.security import check_target_url
+from app.security import check_target_url_async
 
 logger = logging.getLogger("solverr.engine")
 
@@ -181,7 +181,7 @@ class HybridSolverEngine:
         url = req.url
         method = req.cmd.split(".")[-1].upper() if "." in req.cmd else "GET"
 
-        check_target_url(url)
+        await check_target_url_async(url)
         # The proxy endpoint is just as capable of reaching internal/private
         # network targets as `url` itself (it becomes the actual egress point
         # for curl_cffi/Camoufox), so it must pass the same SSRF policy -
@@ -189,7 +189,7 @@ class HybridSolverEngine:
         # service by setting `proxy` instead of `url`.
         proxy_for_check = req.get_proxy_url()
         if proxy_for_check:
-            check_target_url(proxy_for_check, label="Proxy")
+            await check_target_url_async(proxy_for_check, label="Proxy")
 
         # Deduplication key for identical concurrent solves. Must cover every
         # field that can change the outcome - two requests that only differ
@@ -246,7 +246,7 @@ class HybridSolverEngine:
 
         # Combine input cookies with cached domain cookies
         combined_cookies: List[CookieModel] = []
-        cached_cookies = cookie_cache.get_cookies(url)
+        cached_cookies = await cookie_cache.get_cookies_async(url)
         metrics.record_cookie_cache_lookup(hit=bool(cached_cookies))
 
         input_cookie_names = set()
@@ -291,7 +291,7 @@ class HybridSolverEngine:
                 solution.tier = tier_name
 
                 if solution.cookies:
-                    cookie_cache.set_cookies(url, solution.cookies)
+                    await cookie_cache.set_cookies_async(url, solution.cookies)
                 event_broadcaster.emit("solve", {
                     "url": url,
                     "tier": tier_name,
@@ -308,7 +308,7 @@ class HybridSolverEngine:
                     logger.info("[HybridEngine] fastTlsOnly=True requested. Returning Fast TLS solution without browser escalation.")
                     solution.tier = "tier1_fast_tls"
                     if solution.cookies:
-                        cookie_cache.set_cookies(url, solution.cookies)
+                        await cookie_cache.set_cookies_async(url, solution.cookies)
                     event_broadcaster.emit("solve", {
                         "url": url,
                         "tier": "tier1_fast_tls",
@@ -357,7 +357,7 @@ class HybridSolverEngine:
             solution.tier = "tier3_stealth_browser"
 
             if solution.cookies:
-                cookie_cache.set_cookies(url, solution.cookies)
+                await cookie_cache.set_cookies_async(url, solution.cookies)
 
             event_broadcaster.emit("solve", {
                 "url": url,
@@ -397,7 +397,7 @@ class HybridSolverEngine:
                     logger.info(f"[HybridEngine] Tier 4 Fallback Proxy SUCCESS in {elapsed_ms:.1f}ms | Status: {solution.status}")
                     solution.tier = "tier4_fallback_proxy"
                     if solution.cookies:
-                        cookie_cache.set_cookies(url, solution.cookies)
+                        await cookie_cache.set_cookies_async(url, solution.cookies)
                     event_broadcaster.emit("solve", {
                         "url": url,
                         "tier": "tier4_fallback_proxy",
