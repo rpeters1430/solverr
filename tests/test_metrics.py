@@ -42,6 +42,13 @@ class TestPerformanceMetrics(unittest.TestCase):
         self.assertIn('solverr_end_to_end_request_duration_seconds_count{outcome="success"} 1', body)
         self.assertIn('solverr_end_to_end_request_duration_seconds_count{outcome="failure"} 1', body)
 
+    def test_browser_attempt_and_recycle_metrics_are_exposed(self):
+        body = generate_prometheus_metrics()
+        self.assertIn('solverr_browser_attempts_total{path="pooled",outcome="success"}', body)
+        self.assertIn('solverr_browser_attempts_total{path="ephemeral",outcome="timeout"}', body)
+        self.assertIn('solverr_browser_pool_recycles_by_reason_total{reason="age"}', body)
+        self.assertIn('solverr_browser_pool_recycles_by_reason_total{reason="uses"}', body)
+
 
 if __name__ == "__main__":
     unittest.main()

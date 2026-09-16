@@ -46,6 +46,7 @@ class CamoufoxPool:
         self._created = 0
         self._lock = asyncio.Lock()
         self.recycles_total = 0
+        self.recycle_reasons: dict[str, int] = {"age": 0, "uses": 0}
 
     async def acquire(self) -> _PooledCamoufox:
         try:
@@ -69,8 +70,10 @@ class CamoufoxPool:
         return inst
 
     async def release(self, inst: _PooledCamoufox):
-        if self._should_recycle(inst):
+        reason = self._recycle_reason(inst)
+        if reason is not None:
             self.recycles_total += 1
+            self.recycle_reasons[reason] += 1
             self._all_instances.discard(inst)
             await self._close_instance(inst)
             async with self._lock:
@@ -100,11 +103,12 @@ class CamoufoxPool:
                 await asyncio.sleep(backoff_seconds)
         return None
 
-    def _should_recycle(self, inst: _PooledCamoufox) -> bool:
-        return (
-            inst.uses >= settings.CAMOUFOX_POOL_RECYCLE_USES
-            or (time.monotonic() - inst.created_at) >= settings.CAMOUFOX_POOL_RECYCLE_SECONDS
-        )
+    def _recycle_reason(self, inst: _PooledCamoufox) -> Optional[str]:
+        if inst.uses >= settings.CAMOUFOX_POOL_RECYCLE_USES:
+            return "uses"
+        if (time.monotonic() - inst.created_at) >= settings.CAMOUFOX_POOL_RECYCLE_SECONDS:
+            return "age"
+        return None
 
     async def _launch_instance(self) -> _PooledCamoufox:
         cm = AsyncCamoufox(

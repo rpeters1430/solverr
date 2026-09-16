@@ -123,7 +123,21 @@ def generate_prometheus_metrics() -> str:
         "# HELP solverr_browser_queue_wait_seconds Average time a request waited for a free browser worker slot",
         "# TYPE solverr_browser_queue_wait_seconds gauge",
         f'solverr_browser_queue_wait_seconds {pool_stats["avg_queue_wait_seconds"]}',
+        "",
+        "# HELP solverr_browser_attempts_total Tier 3 browser solve attempts by path and outcome",
+        "# TYPE solverr_browser_attempts_total counter",
     ]
+    for path, outcomes in pool_stats["attempts"].items():
+        for outcome, count in outcomes.items():
+            lines.append(f'solverr_browser_attempts_total{{path="{path}",outcome="{outcome}"}} {count}')
+
+    lines += [
+        "",
+        "# HELP solverr_browser_pool_recycles_by_reason_total Pooled Camoufox instances recycled, partitioned by recycle reason",
+        "# TYPE solverr_browser_pool_recycles_by_reason_total counter",
+    ]
+    for reason, count in pool_stats["recycle_reasons"].items():
+        lines.append(f'solverr_browser_pool_recycles_by_reason_total{{reason="{reason}"}} {count}')
 
     lines += [
         "",

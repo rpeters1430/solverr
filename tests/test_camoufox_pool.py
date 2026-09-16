@@ -86,6 +86,24 @@ class TestCamoufoxPool(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pool.close_count, 2)
         self.assertEqual(pool._created, 0)
 
+    async def test_recycle_reason_counts_use_budget(self):
+        with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 1), \
+             patch.object(settings, "CAMOUFOX_POOL_RECYCLE_SECONDS", 100000):
+            pool = FakeCamoufoxPool(1)
+            inst = await pool.acquire()
+            await pool.release(inst)
+        self.assertEqual(pool.recycles_total, 1)
+        self.assertEqual(pool.recycle_reasons, {"age": 0, "uses": 1})
+
+    async def test_recycle_reason_counts_age_budget(self):
+        with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 100), \
+             patch.object(settings, "CAMOUFOX_POOL_RECYCLE_SECONDS", 10):
+            pool = FakeCamoufoxPool(1)
+            inst = await pool.acquire()
+            inst.created_at = time.monotonic() - 11
+            await pool.release(inst)
+        self.assertEqual(pool.recycle_reasons, {"age": 1, "uses": 0})
+
 
 class FakePage:
     async def evaluate(self, script):
@@ -138,6 +156,40 @@ class TestBrowserPoolCancellation(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(fake_camoufox_pool._idle.qsize(), 1)
         self.assertEqual(fake_camoufox_pool._created, 1)
+
+
+class TestBrowserAttemptMetrics(unittest.IsolatedAsyncioTestCase):
+    async def test_pooled_failure_then_ephemeral_success_records_both(self):
+        from unittest.mock import AsyncMock
+        from app.models.flaresolverr import SolutionModel
+
+        pool = BrowserPool()
+        pool.camoufox_pool = object()
+        pool._solve_with_pooled_camoufox = AsyncMock(side_effect=RuntimeError("pool failed"))
+        pool._solve_with_ephemeral_camoufox = AsyncMock(return_value=SolutionModel(
+            url="https://example.com", status=200, response="ok", cookies=[]
+        ))
+
+        result = await pool.solve("https://example.com", timeout_ms=5000)
+
+        self.assertEqual(result.status, 200)
+        self.assertEqual(pool.attempts["pooled"]["failure"], 1)
+        self.assertEqual(pool.attempts["ephemeral"]["success"], 1)
+
+    async def test_unsuccessful_http_status_is_not_called_a_process_failure(self):
+        from unittest.mock import AsyncMock
+        from app.models.flaresolverr import SolutionModel
+
+        pool = BrowserPool()
+        pool.camoufox_pool = None
+        pool._solve_with_ephemeral_camoufox = AsyncMock(return_value=SolutionModel(
+            url="https://example.com", status=403, response="blocked", cookies=[]
+        ))
+
+        with self.assertRaises(RuntimeError):
+            await pool.solve("https://example.com", timeout_ms=5000)
+
+        self.assertEqual(pool.attempts["ephemeral"]["http_error"], 1)
 
 
 if __name__ == "__main__":

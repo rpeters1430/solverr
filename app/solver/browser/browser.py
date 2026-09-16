@@ -30,6 +30,30 @@ logger = logging.getLogger("solverr.browser")
 # indefinitely.
 SOLVE_WALLCLOCK_GRACE_SECONDS = 15
 
+BROWSER_PATHS = ("pooled", "ephemeral")
+BROWSER_OUTCOMES = ("success", "failure", "timeout", "http_error")
+
+
+class BrowserSolveError(RuntimeError):
+    """Terminal browser-solve failure with a bounded, metric-safe reason.
+
+    `reason` is restricted to a fixed enumeration so it can be used directly
+    as a Prometheus label without ever leaking exception text/URLs."""
+
+    def __init__(self, reason: str, message: str):
+        self.reason = reason if reason in ("http_error", "browser_error") else "browser_error"
+        super().__init__(message)
+
+
+def _classify_attempt_outcome(sol: Optional[SolutionModel], error: Optional[BaseException]) -> str:
+    if error is not None:
+        if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+            return "timeout"
+        return "failure"
+    if sol is not None and sol.status >= 400:
+        return "http_error"
+    return "success"
+
 
 def _describe_solve_error(e: BaseException, tier_timeout: float, tier_label: str) -> BaseException:
     """asyncio.wait_for raises a bare TimeoutError/CancelledError with no
@@ -54,6 +78,14 @@ class BrowserPool:
         self._queue_wait_total_s: float = 0.0
         self._queue_wait_count: int = 0
         self._crashes_total: int = 0
+        self.attempts: Dict[str, Dict[str, int]] = {
+            path: {outcome: 0 for outcome in BROWSER_OUTCOMES}
+            for path in BROWSER_PATHS
+        }
+
+    def record_attempt(self, path: str, outcome: str) -> None:
+        if path in self.attempts and outcome in self.attempts[path]:
+            self.attempts[path][outcome] += 1
 
     async def close(self):
         if self.camoufox_pool:
@@ -64,6 +96,8 @@ class BrowserPool:
         logger.info("Browser Pool stopped.")
 
     def pool_stats(self) -> Dict[str, Any]:
+        import copy
+
         cp = self.camoufox_pool
         created = cp._created if cp else 0
         idle = cp._idle.qsize() if cp else 0
@@ -74,9 +108,11 @@ class BrowserPool:
             "busy": max(0, created - idle),
             "idle": idle,
             "recycles_total": cp.recycles_total if cp else 0,
+            "recycle_reasons": copy.deepcopy(cp.recycle_reasons) if cp else {"age": 0, "uses": 0},
             "crashes_total": self._crashes_total,
             "avg_queue_wait_seconds": round(avg_wait, 3),
             "queue_wait_samples": self._queue_wait_count,
+            "attempts": copy.deepcopy(self.attempts),
         }
 
     async def self_test(self) -> Dict[str, Any]:
@@ -173,8 +209,11 @@ class BrowserPool:
             # when there's no proxy and no explicit user_agent request.
             use_pool = self.camoufox_pool is not None and not pw_proxy and not user_agent
             last_error: Optional[BaseException] = None
+            last_sol: Optional[SolutionModel] = None
 
             if use_pool:
+                sol = None
+                attempt_error: Optional[BaseException] = None
                 try:
                     sol = await asyncio.wait_for(
                         self._solve_with_pooled_camoufox(
@@ -184,13 +223,20 @@ class BrowserPool:
                         ),
                         timeout=tier_timeout
                     )
-                    if sol and sol.status < 400:
-                        return sol
-                    last_error = RuntimeError(f"Pooled Camoufox solve incomplete (status {sol.status if sol else 'N/A'})")
-                    logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve incomplete (Status {sol.status if sol else 'N/A'}). Retrying with a fresh ephemeral Camoufox instance...")
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
-                    last_error = _describe_solve_error(e, tier_timeout, "Pooled Camoufox solve")
+                    attempt_error = e
+                self.record_attempt("pooled", _classify_attempt_outcome(sol, attempt_error))
+                if attempt_error is None and sol and sol.status < 400:
+                    return sol
+                if attempt_error is not None:
+                    last_error = _describe_solve_error(attempt_error, tier_timeout, "Pooled Camoufox solve")
                     logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve notice/fallback: {last_error}. Retrying with a fresh ephemeral Camoufox instance...")
+                else:
+                    last_error = RuntimeError(f"Pooled Camoufox solve incomplete (status {sol.status if sol else 'N/A'})")
+                    last_sol = sol
+                    logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve incomplete (Status {sol.status if sol else 'N/A'}). Retrying with a fresh ephemeral Camoufox instance...")
 
             # Fresh-fingerprint escalation: a brand-new Camoufox process with
             # its own randomly generated fingerprint (and its own proxy
@@ -198,6 +244,8 @@ class BrowserPool:
             # retry after a warm-process-specific failure, or the only
             # attempt for proxy/custom-UA requests that can't share the
             # warm pool to begin with.
+            sol = None
+            attempt_error = None
             try:
                 sol = await asyncio.wait_for(
                     self._solve_with_ephemeral_camoufox(
@@ -208,16 +256,28 @@ class BrowserPool:
                     ),
                     timeout=tier_timeout
                 )
-                if sol and sol.status < 400:
-                    return sol
-                last_error = RuntimeError(f"Ephemeral Camoufox solve incomplete (status {sol.status if sol else 'N/A'})")
-                logger.warning(f"[CamoufoxEngine] Ephemeral Camoufox solve incomplete (Status {sol.status if sol else 'N/A'}).")
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
-                last_error = _describe_solve_error(e, tier_timeout, "Ephemeral Camoufox solve")
+                attempt_error = e
+            outcome = _classify_attempt_outcome(sol, attempt_error)
+            self.record_attempt("ephemeral", outcome)
+            if attempt_error is None and sol and sol.status < 400:
+                return sol
+            if attempt_error is not None:
+                last_error = _describe_solve_error(attempt_error, tier_timeout, "Ephemeral Camoufox solve")
                 logger.warning(f"[CamoufoxEngine] Ephemeral Camoufox solve notice/fallback: {last_error}.")
+            else:
+                last_error = RuntimeError(f"Ephemeral Camoufox solve incomplete (status {sol.status if sol else 'N/A'})")
+                last_sol = sol
+                logger.warning(f"[CamoufoxEngine] Ephemeral Camoufox solve incomplete (Status {sol.status if sol else 'N/A'}).")
 
             self._crashes_total += 1
-            raise last_error or RuntimeError(f"Camoufox solve failed for {url}")
+            if last_sol is not None and last_sol.status >= 400:
+                raise BrowserSolveError("http_error", str(last_error)) from last_error
+            if isinstance(last_error, BrowserSolveError):
+                raise last_error
+            raise BrowserSolveError("browser_error", str(last_error) if last_error else f"Camoufox solve failed for {url}") from last_error
 
     async def _solve_with_pooled_camoufox(
         self,
