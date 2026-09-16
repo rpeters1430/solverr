@@ -86,6 +86,26 @@ class TestAPIEndpoints(unittest.TestCase):
         res_sessions = self.client.get("/api/sessions")
         self.assertEqual(res_sessions.status_code, 200)
 
+    def test_dashboard_stats_include_production_health_fields(self):
+        data = self.client.get("/api/stats").json()
+        for key in (
+            "successful_requests", "success_rate_pct", "failure_rate_pct",
+            "failure_reasons", "avg_end_to_end_success_ms",
+            "avg_end_to_end_failure_ms", "process_tree_ram_usage_mb",
+        ):
+            self.assertIn(key, data)
+        self.assertIn("attempts", data["browser_pool"])
+        self.assertIn("recycle_reasons", data["browser_pool"])
+
+    def test_dashboard_has_insufficient_data_placeholders(self):
+        html = self.client.get("/").text
+        self.assertIn('id="val-success-rate"', html)
+        self.assertIn('id="val-failure-rate"', html)
+        self.assertIn('id="val-tree-ram"', html)
+        self.assertIn('id="val-failure-reasons"', html)
+        self.assertIn('id="val-browser-attempts"', html)
+        self.assertIn("Insufficient data", html)
+
     def test_dashboard_resource_fields_convert_bytes_to_mib(self):
         from unittest.mock import patch
         from app.resource_metrics import ResourceSnapshot

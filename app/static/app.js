@@ -4,6 +4,30 @@ function escapeHtml(value) {
     }[c]));
 }
 
+function formatPercent(value, count) {
+    return count > 0 && Number.isFinite(Number(value)) ? `${Number(value).toFixed(1)}%` : 'Insufficient data';
+}
+
+function formatLatency(value, count) {
+    return count > 0 && Number.isFinite(Number(value)) ? `${Math.round(Number(value))}ms` : 'Insufficient data';
+}
+
+function renderCountMap(target, values) {
+    const rows = Object.entries(values || {}).filter(([, count]) => Number(count) > 0);
+    target.textContent = '';
+    if (!rows.length) {
+        target.textContent = 'Insufficient data';
+        target.classList.add('metric-empty');
+        return;
+    }
+    target.classList.remove('metric-empty');
+    for (const [label, count] of rows) {
+        const row = document.createElement('div');
+        row.textContent = `${label.replaceAll('_', ' ')}: ${count}`;
+        target.appendChild(row);
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     // Tab Navigation
     const navItems = document.querySelectorAll('.nav-item');
@@ -55,6 +79,45 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('val-browser-ms').textContent = data.avg_browser_ms || 0;
             document.getElementById('val-ram').innerHTML = `${data.ram_usage_mb || 0}<span class="unit">MB</span>`;
             document.getElementById('val-cpu').textContent = (data.cpu_usage_pct || 0) + '%';
+            if (document.getElementById('val-tree-ram')) {
+                document.getElementById('val-tree-ram').innerHTML = `${data.process_tree_ram_usage_mb ?? data.ram_usage_mb ?? 0}<span class="unit">MB</span>`;
+            }
+
+            // Request success/failure health - missing data must never look
+            // healthy, so these are never defaulted to 0.
+            const successRateEl = document.getElementById('val-success-rate');
+            const failureRateEl = document.getElementById('val-failure-rate');
+            if (successRateEl) {
+                const text = formatPercent(data.success_rate_pct, data.total_requests);
+                successRateEl.textContent = text;
+                successRateEl.classList.toggle('metric-empty', text === 'Insufficient data');
+            }
+            if (failureRateEl) {
+                const text = formatPercent(data.failure_rate_pct, data.total_requests);
+                failureRateEl.textContent = text;
+                failureRateEl.classList.toggle('metric-empty', text === 'Insufficient data');
+            }
+            if (document.getElementById('val-success-latency')) {
+                document.getElementById('val-success-latency').textContent =
+                    formatLatency(data.avg_end_to_end_success_ms, data.successful_requests);
+            }
+            if (document.getElementById('val-failure-latency')) {
+                document.getElementById('val-failure-latency').textContent =
+                    formatLatency(data.avg_end_to_end_failure_ms, data.failed_requests);
+            }
+            if (document.getElementById('val-failure-reasons')) {
+                renderCountMap(document.getElementById('val-failure-reasons'), data.failure_reasons);
+            }
+            if (document.getElementById('val-browser-attempts')) {
+                const attempts = (data.browser_pool && data.browser_pool.attempts) || {};
+                const flattened = {};
+                for (const [path, outcomes] of Object.entries(attempts)) {
+                    for (const [outcome, count] of Object.entries(outcomes || {})) {
+                        flattened[`${path} ${outcome}`] = count;
+                    }
+                }
+                renderCountMap(document.getElementById('val-browser-attempts'), flattened);
+            }
 
             // 4-Tier Pipeline counters
             if (document.getElementById('val-tier1-hits')) {

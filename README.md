@@ -282,6 +282,36 @@ On by default; set `ENABLE_MCP=false` to disable.
 
 ---
 
+## 📈 Production Observability Metrics
+
+`GET /metrics` and `GET /api/stats` expose end-to-end request outcomes, Tier 3 browser recovery, and full process-tree resource usage on top of the existing per-tier counters, so an operator can tell *why* requests are failing and how much of the NAS's actual CPU/RAM the whole solve (parent process **and** any Camoufox/Firefox children) is using - not just the parent Python process.
+
+New metric names:
+
+- `solverr_end_to_end_request_duration_seconds{outcome="success"|"failure"}` - full request latency histogram, partitioned by outcome instead of tier
+- `solverr_request_failures_total{reason=...}` - failed requests by a fixed, bounded reason (`timeout`, `budget_exhausted`, `http_error`, `browser_error`, `fast_tls_error`, `fallback_error`, `unknown`) - never raw exception text, URLs, or proxy addresses
+- `solverr_browser_attempts_total{path="pooled"|"ephemeral",outcome="success"|"failure"|"timeout"|"http_error"}` - every Tier 3 browser attempt, so a pooled-instance failure that recovered via a fresh ephemeral Camoufox launch is visible instead of only the eventual success
+- `solverr_browser_pool_recycles_by_reason_total{reason="age"|"uses"}` - why a warm Camoufox instance was recycled
+- `solverr_process_resident_memory_bytes` / `solverr_process_cpu_usage_percent` - the Solverr parent process only (same semantics as the legacy `solverr_memory_bytes`/`solverr_cpu_usage_percent`, which remain unchanged for compatibility)
+- `solverr_process_tree_resident_memory_bytes` - parent process **plus** every child process (Camoufox/Firefox instances) - the number that actually matters for sizing a NAS, since the parent alone under-reports real usage once browsers are running
+- `solverr_host_cpu_usage_percent` - whole-host CPU utilization, independent of how much of it Solverr itself is responsible for
+
+All in-process counters (everything above) reset to zero on container restart - they are not persisted. Base tuning decisions (worker counts, pool size, recycle budgets) on at least a week of representative traffic rather than a single restart's data, and remember no metric here ever carries a target/domain/URL label - only fixed enumerations - so cardinality stays constant regardless of traffic mix.
+
+Example PromQL:
+
+```promql
+sum(rate(solverr_requests_total{status="success"}[15m]))
+/
+sum(rate(solverr_requests_total[15m]))
+
+sum(rate(solverr_request_failures_total[15m])) by (reason)
+
+solverr_process_tree_resident_memory_bytes / 1024 / 1024
+```
+
+---
+
 ## 🏎️ Performance Benchmarks
 
 Solverr's CPU-bound hot paths are continuously benchmarked with [CodSpeed](https://app.codspeed.io/rpeters1430/solverr) on every push and pull request, so a change that makes challenge detection, the cookie cache, or request/response handling slower shows up as a regression in the PR instead of as latency on your NAS.

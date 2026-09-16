@@ -103,11 +103,39 @@
 
                     <div class="metric-card glow-amber">
                         <div class="card-header">
-                            <span class="label">RAM Usage</span>
+                            <span class="label">Process-tree RAM</span>
                             <span class="icon">🧠</span>
                         </div>
-                        <div class="card-value" id="val-ram">0<span class="unit">MB</span></div>
-                        <div class="card-foot">CPU: <span id="val-cpu">0%</span></div>
+                        <div class="card-value" id="val-tree-ram">0<span class="unit">MB</span></div>
+                        <div class="card-foot">Parent: <span id="val-ram">0</span>MB · CPU: <span id="val-cpu">0%</span></div>
+                    </div>
+                </div>
+
+                <!-- Request Success / Failure Health -->
+                <div class="panel" style="margin-bottom: 24px;">
+                    <div class="panel-header">
+                        <h3>Request Health</h3>
+                        <p>End-to-end success/failure rates and latency, and why requests fail when they do.</p>
+                    </div>
+                    <div class="health-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;">
+                        <div style="background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.2); border-radius: 8px; padding: 14px;">
+                            <div style="font-size: 0.8rem; color: var(--accent-emerald); font-weight: 600;">SUCCESS RATE</div>
+                            <div class="card-value metric-empty" id="val-success-rate" style="font-size: 1.5rem; margin: 4px 0;">Insufficient data</div>
+                            <div style="font-size: 0.75rem; color: var(--text-muted);">Avg latency: <span id="val-success-latency">Insufficient data</span></div>
+                        </div>
+                        <div style="background: rgba(244, 63, 94, 0.08); border: 1px solid rgba(244, 63, 94, 0.2); border-radius: 8px; padding: 14px;">
+                            <div style="font-size: 0.8rem; color: var(--accent-rose); font-weight: 600;">FAILURE RATE</div>
+                            <div class="card-value metric-empty" id="val-failure-rate" style="font-size: 1.5rem; margin: 4px 0;">Insufficient data</div>
+                            <div style="font-size: 0.75rem; color: var(--text-muted);">Avg latency: <span id="val-failure-latency">Insufficient data</span></div>
+                        </div>
+                        <div style="background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.2); border-radius: 8px; padding: 14px;">
+                            <div style="font-size: 0.8rem; color: var(--accent-amber); font-weight: 600;">FAILURE REASONS</div>
+                            <div class="health-list metric-empty" id="val-failure-reasons">Insufficient data</div>
+                        </div>
+                        <div style="background: rgba(168, 85, 247, 0.08); border: 1px solid rgba(168, 85, 247, 0.2); border-radius: 8px; padding: 14px;">
+                            <div style="font-size: 0.8rem; color: var(--accent-purple); font-weight: 600;">BROWSER ATTEMPTS</div>
+                            <div class="health-list metric-empty" id="val-browser-attempts">Insufficient data</div>
+                        </div>
                     </div>
                 </div>
 
@@ -131,7 +159,7 @@
                         <div style="background: rgba(168, 85, 247, 0.08); border: 1px solid rgba(168, 85, 247, 0.2); border-radius: 8px; padding: 14px;">
                             <div style="font-size: 0.8rem; color: var(--accent-purple); font-weight: 600;">TIER 3 (STEALTH BROWSER)</div>
                             <div style="font-size: 1.5rem; font-weight: 700; margin: 4px 0;" id="val-tier3-hits">0</div>
-                            <div style="font-size: 0.75rem; color: var(--text-muted);">Camoufox / Playwright solver (~1.8-3s)</div>
+                            <div style="font-size: 0.75rem; color: var(--text-muted);">Camoufox / Playwright solver (Measured below)</div>
                         </div>
                         <div style="background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.2); border-radius: 8px; padding: 14px;">
                             <div style="font-size: 0.8rem; color: var(--accent-amber); font-weight: 600;">TIER 4 (FALLBACK PROXY)</div>

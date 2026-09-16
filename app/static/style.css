@@ -243,6 +243,24 @@ body {
     margin-top: 8px;
 }
 
+/* Production health panels */
+.health-grid {
+    align-items: stretch;
+}
+
+.health-list {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    line-height: 1.6;
+    margin-top: 4px;
+    color: var(--text-primary);
+}
+
+.metric-empty {
+    color: var(--text-muted);
+    font-style: italic;
+}
+
 /* Panels */
 .panel {
     background-color: var(--bg-card);
