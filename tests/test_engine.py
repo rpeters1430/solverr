@@ -134,6 +134,48 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
             self.assertLessEqual(called_kwargs["timeout_ms"], 20000)
 
 
+    async def test_max_timeout_bounds_entire_browser_operation(self):
+        import asyncio
+        from app.solver.engine import PerformanceMetrics
+
+        observed = PerformanceMetrics()
+
+        async def hangs(*args, **kwargs):
+            await asyncio.sleep(2.0)
+
+        with patch("app.solver.engine.metrics", observed), \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock(side_effect=hangs)), \
+             patch.object(settings, "FALLBACK_PROXY_URL", "http://fallback.invalid:8080"):
+            req = V1Request(cmd="request.get", url="https://example.com", forceBrowser=True, maxTimeout=1000)
+            started = asyncio.get_running_loop().time()
+            with self.assertRaises(TimeoutError):
+                await self.engine.process_request(req)
+            elapsed = asyncio.get_running_loop().time() - started
+
+        self.assertLess(elapsed, 1.5)
+        self.assertEqual(observed.failed_requests, 1)
+        self.assertEqual(observed.failure_reasons["budget_exhausted"], 1)
+
+    def test_classify_failure_uses_only_bounded_reasons(self):
+        from app.solver.engine import RequestBudget, classify_failure
+        budget = RequestBudget(5000)
+        self.assertEqual(classify_failure(TimeoutError("operation timed out"), budget), "timeout")
+        self.assertEqual(classify_failure(RuntimeError("https://secret.example"), budget), "browser_error")
+
+    async def test_terminal_browser_failure_is_recorded_once(self):
+        from app.solver.engine import PerformanceMetrics
+        observed = PerformanceMetrics()
+        with patch("app.solver.engine.metrics", observed), \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock(side_effect=RuntimeError("boom"))), \
+             patch.object(settings, "FALLBACK_PROXY_URL", None):
+            req = V1Request(cmd="request.get", url="https://example.com", forceBrowser=True)
+            with self.assertRaises(RuntimeError):
+                await self.engine.process_request(req)
+        self.assertEqual(observed.total_requests, 1)
+        self.assertEqual(observed.failed_requests, 1)
+        self.assertEqual(observed.outcome_duration_histograms["failure"].count, 1)
+
+
 class TestRequestBudget(unittest.TestCase):
     def test_budget_properties(self):
         from app.solver.engine import RequestBudget

@@ -8,6 +8,7 @@ from app.models.flaresolverr import V1Request, SolutionModel, CookieModel
 from app.solver.cache import cookie_cache
 from app.solver.fast_tls import fast_tls_engine
 from app.solver.browser import browser_pool
+from app.solver.browser.browser import BrowserSolveError
 from app.config import settings
 from app.events import event_broadcaster
 from app.security import check_target_url
@@ -198,6 +199,26 @@ class RequestBudget:
         return time.monotonic() >= self.deadline
 
 
+def tag_failure(error: BaseException, reason: str) -> BaseException:
+    """Attach a fixed, bounded failure reason to an exception before it
+    propagates, so classify_failure() can report the true cause instead of
+    guessing from exception type alone. Never stores raw exception text."""
+    normalized = reason if reason in FAILURE_REASONS else "unknown"
+    setattr(error, "_solverr_failure_reason", normalized)
+    return error
+
+
+def classify_failure(error: BaseException, budget: RequestBudget) -> str:
+    tagged = getattr(error, "_solverr_failure_reason", None)
+    if tagged in FAILURE_REASONS:
+        return tagged
+    if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+        return "budget_exhausted" if budget.is_expired else "timeout"
+    if isinstance(error, BrowserSolveError):
+        return error.reason
+    return "browser_error"
+
+
 def _cap_response_body(solution: SolutionModel) -> None:
     max_bytes = settings.MAX_RESPONSE_BODY_MB * 1024 * 1024
     if max_bytes <= 0 or not solution.response:
@@ -264,12 +285,24 @@ class HybridSolverEngine:
         self._inflight[inflight_key] = future
 
         try:
-            res = await self._do_process_request(req, budget, url, method)
+            try:
+                res = await asyncio.wait_for(
+                    self._do_process_request(req, budget, url, method),
+                    timeout=budget.remaining_s,
+                )
+            except (asyncio.TimeoutError, TimeoutError) as timeout_error:
+                if not str(timeout_error):
+                    timeout_error = TimeoutError(
+                        f"Request timeout budget exhausted after {budget.total_timeout_s * 1000:.0f}ms"
+                    )
+                raise tag_failure(timeout_error, "budget_exhausted") from None
             _cap_response_body(res)
             if not future.done():
                 future.set_result(res)
             return res
         except Exception as e:
+            reason = classify_failure(e, budget)
+            metrics.record_failure(budget.elapsed_ms, reason)
             if not future.done():
                 future.set_exception(e)
                 # Mark the exception as retrieved even if no concurrent
@@ -357,9 +390,8 @@ class HybridSolverEngine:
                     })
                     return solution
                 else:
-                    metrics.record_failure()
                     event_broadcaster.emit("solve_error", {"url": url, "error": "Fast TLS path failed"})
-                    raise RuntimeError(f"Fast TLS path failed for {url}")
+                    raise tag_failure(RuntimeError(f"Fast TLS path failed for {url}"), "fast_tls_error")
 
             if is_cf_challenge:
                 logger.info(f"[HybridEngine] Fast TLS detected WAF challenge (Status: {solution.status if solution else 'N/A'}). Escalating to Level 3 Stealth Browser...")
@@ -372,7 +404,10 @@ class HybridSolverEngine:
 
         # Level 3: Stealth Camoufox / Playwright Browser Solve
         if budget.is_expired or budget.remaining_s < 1.0:
-            raise TimeoutError(f"Request timeout budget exhausted ({budget.elapsed_ms:.0f}ms elapsed)")
+            raise tag_failure(
+                TimeoutError(f"Request timeout budget exhausted ({budget.elapsed_ms:.0f}ms elapsed)"),
+                "budget_exhausted",
+            )
 
         browser_timeout_ms = max(3000, budget.remaining_ms)
         try:
@@ -447,11 +482,9 @@ class HybridSolverEngine:
                     return solution
                 except Exception as fallback_err:
                     logger.error(f"[HybridEngine] Tier 4 Fallback Proxy solve also FAILED for {url}: {fallback_err}")
-                    metrics.record_failure()
                     event_broadcaster.emit("solve_error", {"url": url, "error": str(fallback_err)})
-                    raise fallback_err
+                    raise tag_failure(fallback_err, "fallback_error")
 
-            metrics.record_failure()
             event_broadcaster.emit("solve_error", {"url": url, "error": str(e)})
             logger.error(f"[HybridEngine] Level 3 Stealth Browser solve FAILED for {url}: {type(e).__name__} - {e}")
             raise e
