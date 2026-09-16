@@ -1,19 +1,20 @@
-import os
-import psutil
 from app.solver.engine import FAILURE_REASONS, metrics
 from app.solver.cache import cookie_cache
 from app.solver.sessions import session_manager
 from app.solver.browser import browser_pool
 from app.config import settings
+from app.resource_metrics import collect_resource_snapshot
 
 def generate_prometheus_metrics() -> str:
     """
     Generates standard Prometheus exposition format text for /metrics endpoint.
     Compatible with Prometheus, VictoriaMetrics, Grafana Agent, and OpenTelemetry collector.
     """
-    proc = psutil.Process(os.getpid())
-    mem_bytes = proc.memory_info().rss
-    cpu_pct = psutil.cpu_percent(interval=None)
+    snapshot = collect_resource_snapshot()
+    # Legacy fields kept byte-for-byte equivalent to the pre-Task-4 direct
+    # psutil calls: parent-process RSS and host-wide CPU percent.
+    mem_bytes = snapshot.parent_rss_bytes
+    cpu_pct = snapshot.host_cpu_percent
 
     stats = metrics.to_dict()
 
@@ -73,6 +74,22 @@ def generate_prometheus_metrics() -> str:
         "# HELP solverr_cpu_usage_percent CPU utilization percentage of Solverr host process",
         "# TYPE solverr_cpu_usage_percent gauge",
         f'solverr_cpu_usage_percent {cpu_pct}',
+        "",
+        "# HELP solverr_process_resident_memory_bytes Resident memory of the Solverr parent process only, in bytes",
+        "# TYPE solverr_process_resident_memory_bytes gauge",
+        f'solverr_process_resident_memory_bytes {snapshot.parent_rss_bytes}',
+        "",
+        "# HELP solverr_process_tree_resident_memory_bytes Resident memory of the Solverr parent process plus all child processes (e.g. Camoufox/Firefox), in bytes",
+        "# TYPE solverr_process_tree_resident_memory_bytes gauge",
+        f'solverr_process_tree_resident_memory_bytes {snapshot.tree_rss_bytes}',
+        "",
+        "# HELP solverr_process_cpu_usage_percent CPU utilization percentage of the Solverr parent process only",
+        "# TYPE solverr_process_cpu_usage_percent gauge",
+        f'solverr_process_cpu_usage_percent {snapshot.process_cpu_percent}',
+        "",
+        "# HELP solverr_host_cpu_usage_percent CPU utilization percentage of the whole host",
+        "# TYPE solverr_host_cpu_usage_percent gauge",
+        f'solverr_host_cpu_usage_percent {snapshot.host_cpu_percent}',
         "",
         "# HELP solverr_challenges_solved_total Count of specific bot challenges successfully solved",
         "# TYPE solverr_challenges_solved_total counter"

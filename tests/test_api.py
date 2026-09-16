@@ -37,6 +37,10 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertIn("solverr_browser_queue_wait_seconds", body)
         self.assertIn("solverr_cookie_cache_lookups_total", body)
         self.assertIn("solverr_timeouts_total", body)
+        self.assertIn("solverr_process_resident_memory_bytes", body)
+        self.assertIn("solverr_process_tree_resident_memory_bytes", body)
+        self.assertIn("solverr_process_cpu_usage_percent", body)
+        self.assertIn("solverr_host_cpu_usage_percent", body)
 
     def test_flaresolverr_sessions_flow(self):
         # 1. Create session
@@ -71,12 +75,34 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertIn("ram_usage_mb", json_stats)
         self.assertIn("tier1_fast_tls_hits", json_stats)
         self.assertIn("cache_backend", json_stats)
+        self.assertIn("process_ram_usage_mb", json_stats)
+        self.assertIn("process_tree_ram_usage_mb", json_stats)
+        self.assertIn("process_cpu_usage_pct", json_stats)
+        self.assertIn("host_cpu_usage_pct", json_stats)
 
         res_cookies = self.client.get("/api/cookies")
         self.assertEqual(res_cookies.status_code, 200)
 
         res_sessions = self.client.get("/api/sessions")
         self.assertEqual(res_sessions.status_code, 200)
+
+    def test_dashboard_resource_fields_convert_bytes_to_mib(self):
+        from unittest.mock import patch
+        from app.resource_metrics import ResourceSnapshot
+
+        fixed = ResourceSnapshot(
+            parent_rss_bytes=100 * 1024 * 1024,
+            tree_rss_bytes=250 * 1024 * 1024,
+            process_cpu_percent=5.0,
+            host_cpu_percent=20.0,
+        )
+        with patch("app.api.dashboard.collect_resource_snapshot", return_value=fixed):
+            res_stats = self.client.get("/api/stats")
+        json_stats = res_stats.json()
+        self.assertEqual(json_stats["process_ram_usage_mb"], 100.0)
+        self.assertEqual(json_stats["process_tree_ram_usage_mb"], 250.0)
+        self.assertEqual(json_stats["process_cpu_usage_pct"], 5.0)
+        self.assertEqual(json_stats["host_cpu_usage_pct"], 20.0)
 
     def test_dashboard_delete_session(self):
         res_create = self.client.post("/v1", json={"cmd": "sessions.create"})

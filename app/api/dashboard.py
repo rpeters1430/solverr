@@ -1,5 +1,3 @@
-import os
-import psutil
 import logging
 from typing import Optional
 from fastapi import APIRouter, HTTPException
@@ -10,16 +8,18 @@ from app.solver.cache import cookie_cache
 from app.solver.sessions import session_manager
 from app.solver.fast_tls import fast_tls_engine
 from app.config import settings
+from app.resource_metrics import collect_resource_snapshot
 
 logger = logging.getLogger("solverr.api.dashboard")
 router = APIRouter()
 
 @router.get("/stats")
 async def get_stats():
-    proc = psutil.Process(os.getpid())
-    mem_info = proc.memory_info()
-    ram_mb = round(mem_info.rss / 1024 / 1024, 1)
-    cpu_percent = psutil.cpu_percent(interval=None)
+    snapshot = collect_resource_snapshot()
+    # Legacy fields kept byte-for-byte equivalent to the pre-Task-4 direct
+    # psutil calls: parent-process RSS (MiB) and host-wide CPU percent.
+    ram_mb = round(snapshot.parent_rss_bytes / 1024 / 1024, 1)
+    cpu_percent = snapshot.host_cpu_percent
 
     from app.solver.browser import CAMOUFOX_AVAILABLE, browser_pool
     stealth_engine_name = "Camoufox Stealth Firefox" if CAMOUFOX_AVAILABLE else "Unavailable"
@@ -31,6 +31,10 @@ async def get_stats():
     data.update({
         "ram_usage_mb": ram_mb,
         "cpu_usage_pct": cpu_percent,
+        "process_ram_usage_mb": round(snapshot.parent_rss_bytes / 1024 / 1024, 1),
+        "process_tree_ram_usage_mb": round(snapshot.tree_rss_bytes / 1024 / 1024, 1),
+        "process_cpu_usage_pct": snapshot.process_cpu_percent,
+        "host_cpu_usage_pct": snapshot.host_cpu_percent,
         "active_sessions": len(session_manager.list_sessions()),
         "cached_domains_count": len(cookie_cache.get_all_entries()),
         "cache_backend": "Redis (Distributed)" if cookie_cache.redis_client else "Local JSON Disk Cache",
