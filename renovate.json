@@ -23,6 +23,16 @@
   "prConcurrentLimit": 0,
   "packageRules": [
     {
+      "description": "Keep Playwright compatible with Camoufox 0.5.6",
+      "matchManagers": [
+        "pip_requirements"
+      ],
+      "matchPackageNames": [
+        "playwright"
+      ],
+      "allowedVersions": "<1.63"
+    },
+    {
       "description": "Create updates immediately and consolidate updates requiring manual review",
       "matchPackageNames": [
         "*"
