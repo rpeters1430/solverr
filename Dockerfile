@@ -63,7 +63,7 @@ WORKDIR /app
 COPY --from=deps /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Install OS libraries for Firefox/Camoufox, curl for healthchecks, and tini
+# Install OS libraries for Firefox/Camoufox and tini
 # for PID 1 zombie reaping. This is a curated list (not `playwright
 # install-deps firefox`, which pulls in a much larger transitive closure -
 # Xvfb, X11 utilities, extra font packages - built to support any Playwright
@@ -71,8 +71,9 @@ ENV PATH="/opt/venv/bin:$PATH"
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
-      tini curl ca-certificates gosu \
+      tini ca-certificates gosu \
       libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 \
       libcairo2 libcairo-gobject2 \
       libdbus-1-3 libdbus-glib-1-2 \
@@ -97,7 +98,8 @@ COPY --from=deps /app/.cache/camoufox /app/.cache/camoufox
 # Copy application source
 COPY app ./app
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN mkdir -p data /app/.cache \
+RUN mkdir -p data /app/home /app/.cache/camoufox/tmp /app/.cache/camoufox/fontconfig \
+    && chmod 1777 /app/.cache/camoufox/tmp /app/.cache/camoufox/fontconfig \
     && chmod +x /usr/local/bin/docker-entrypoint.sh \
     && chmod -R a+rX /app/.cache/camoufox \
     && rm -rf /usr/local/lib/python*/site-packages/setuptools* \
@@ -107,8 +109,8 @@ RUN mkdir -p data /app/.cache \
 
 EXPOSE 8191
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD curl -f http://localhost:8191/health || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8191/health', timeout=3)"
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["python", "-m", "app.main"]

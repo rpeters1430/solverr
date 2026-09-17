@@ -86,7 +86,7 @@ async def flaresolverr_api(req: V1Request):
         
         # Attach session proxy/cookies if session ID is provided
         if req.session:
-            sess = session_manager.get_session(req.session)
+            sess = await session_manager.get_session_async(req.session)
             if sess:
                 if sess.cookies:
                     req.cookies = (req.cookies or []) + sess.cookies
@@ -98,7 +98,7 @@ async def flaresolverr_api(req: V1Request):
             
             # Update session cookies if applicable
             if req.session and solution.cookies:
-                session_manager.update_session_cookies(req.session, solution.cookies)
+                await session_manager.update_session_cookies_async(req.session, solution.cookies)
 
             # Filter solution if returnOnlyCookies requested
             if req.returnOnlyCookies:
@@ -131,7 +131,7 @@ async def flaresolverr_api(req: V1Request):
 
     elif cmd == "sessions.create":
         proxy_url = req.get_proxy_url()
-        sid = session_manager.create_session(session_id=req.session, proxy=proxy_url, ttl=req.session_ttl or 7200)
+        sid = await session_manager.create_session_async(session_id=req.session, proxy=proxy_url, ttl=req.session_ttl or 7200)
         return V1Response(
             status="ok",
             message=f"Session created with ID: {sid}",
@@ -150,7 +150,7 @@ async def flaresolverr_api(req: V1Request):
                 endTimestamp=int(time.time() * 1000)
             )
         
-        success = session_manager.destroy_session(req.session)
+        success = await session_manager.destroy_session_async(req.session)
         msg = f"Session '{req.session}' destroyed" if success else f"Session '{req.session}' not found"
         return V1Response(
             status="ok" if success else "error",
@@ -161,7 +161,7 @@ async def flaresolverr_api(req: V1Request):
         )
 
     elif cmd == "sessions.list":
-        active_sessions = session_manager.list_sessions()
+        active_sessions = await session_manager.list_sessions_async()
         return V1Response(
             status="ok",
             message="Active sessions retrieved",

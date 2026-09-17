@@ -128,11 +128,12 @@ async def solverr_screenshot(url: str, max_timeout_ms: int = 60000) -> Image:
 
 
 @mcp_server.tool()
-def solverr_get_cookies(domain: str) -> Dict[str, str]:
+async def solverr_get_cookies(domain: str) -> Dict[str, str]:
     """Return clearance cookies (e.g. cf_clearance) Solverr already has
     cached for a domain, without making a new request. Empty if nothing is
     cached yet for that domain."""
-    return cookie_cache.get_cookie_dict(domain)
+    cookies = await cookie_cache.get_cookies_async(domain)
+    return {cookie.name: cookie.value for cookie in cookies}
 
 
 @mcp_server.tool()

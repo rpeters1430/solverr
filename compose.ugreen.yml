@@ -1,0 +1,52 @@
+services:
+  solverr:
+    image: ghcr.io/rpeters1430/solverr:latest@sha256:6b44a0cdc0eacceb88500b87670e13831188b5dcbabe2613d9cea13822ff00ce
+    container_name: solverr
+    restart: unless-stopped
+    ports:
+      - "8191:8191"
+    cpus: "2.0"
+    mem_limit: 3g
+    pids_limit: 512
+    shm_size: "1gb"
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=256M,mode=1777
+      - /app/.cache/camoufox/tmp:size=256M,mode=1777
+    environment:
+      PORT: "8191"
+      HOST: "0.0.0.0"
+      TZ: "America/Los_Angeles"
+      LOG_LEVEL: "INFO"
+      NAS_MODE: "true"
+      MAX_BROWSER_WORKERS: "2"
+      ENABLE_FAST_TLS: "true"
+      FAST_TLS_POOL_ENABLED: "true"
+      FAST_TLS_POOL_SIZE: "16"
+      CAMOUFOX_POOL_ENABLED: "true"
+      CAMOUFOX_POOL_RECYCLE_USES: "30"
+      CAMOUFOX_POOL_RECYCLE_SECONDS: "1800"
+      COOKIE_CACHE_TTL: "7200"
+      MAX_CACHE_DOMAINS: "250"
+      MAX_COOKIES_PER_DOMAIN: "50"
+      MAX_SESSIONS: "100"
+      MAX_REQUEST_BODY_MB: "2"
+      MAX_RESPONSE_BODY_MB: "20"
+      MAX_SCREENSHOT_MB: "4"
+      ENABLE_MCP: "false"
+      PUID: "1000"
+      PGID: "10"
+    volumes:
+      - /volume1/docker/solverr/data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8191/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

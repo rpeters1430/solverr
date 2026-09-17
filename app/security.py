@@ -1,3 +1,4 @@
+import asyncio
 import ipaddress
 import socket
 from urllib.parse import urlparse
@@ -30,50 +31,27 @@ def _is_blocked_ip(ip_str: str) -> bool:
     )
 
 
-def check_target_url(url: str, label: str = "Target") -> None:
-    """Raise SSRFBlockedError if `url`'s host is disallowed by policy.
-
-    `label` only affects the error message (e.g. "Proxy" when validating a
-    caller-supplied proxy endpoint instead of the actual fetch target), so
-    callers get an accurate message about which field triggered the block.
-
-    Only validates the initial request target - it does not follow
-    redirects, so a target that redirects to an internal address only after
-    this check runs is not caught here.
-    """
-    if settings.ALLOW_PRIVATE_NETWORKS or not url:
-        return
-
-    # urlparse() only recognizes a netloc (and therefore .hostname) when the
-    # string has a "//" authority marker - a scheme-less "host:port" (a
-    # legitimate way to write a proxy endpoint) parses with .hostname=None
-    # and would otherwise sail through the `if not host: return` below
-    # unchecked. Treat anything without "://" as an authority so it's
-    # actually inspected.
+def _validated_host(url: str, label: str) -> str | None:
+    if not url:
+        return None
     parse_target = url if "://" in url else f"//{url}"
-
     try:
         host = urlparse(parse_target).hostname
     except Exception:
-        return
+        return None
     if not host:
-        return
+        return None
     host_lower = host.lower()
-
-    if host_lower in settings.ALLOWED_HOSTS:
-        return
     if host_lower in settings.DENIED_HOSTS:
         raise SSRFBlockedError(f"{label} host '{host}' is explicitly denied by DENIED_HOSTS")
+    if settings.ALLOW_PRIVATE_NETWORKS or host_lower in settings.ALLOWED_HOSTS:
+        return None
     if host_lower == "localhost" or host_lower in _METADATA_HOSTNAMES:
         raise SSRFBlockedError(f"{label} host '{host}' is not allowed (blocked hostname)")
+    return host
 
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
-        # Can't resolve - let the real request fail naturally downstream
-        # rather than raising a confusing SSRF error for a typo'd hostname.
-        return
 
+def _reject_blocked_addresses(host: str, infos, label: str) -> None:
     for info in infos:
         ip_str = info[4][0]
         if _is_blocked_ip(ip_str):
@@ -82,3 +60,29 @@ def check_target_url(url: str, label: str = "Target") -> None:
                 f"({ip_str}) - set ALLOW_PRIVATE_NETWORKS=true or add it to "
                 f"ALLOWED_HOSTS to permit this"
             )
+
+
+def check_target_url(url: str, label: str = "Target") -> None:
+    """Validate a target synchronously for compatibility with existing callers."""
+    host = _validated_host(url, label)
+    if not host:
+        return
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        raise SSRFBlockedError(
+            f"{label} host '{host}' could not be resolved safely"
+        ) from exc
+    _reject_blocked_addresses(host, infos, label)
+
+
+async def check_target_url_async(url: str, label: str = "Target") -> None:
+    """Validate without blocking Uvicorn's event loop during DNS lookup."""
+    host = _validated_host(url, label)
+    if not host:
+        return
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, None)
+    except socket.gaierror:
+        return
+    _reject_blocked_addresses(host, infos, label)

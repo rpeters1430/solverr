@@ -1,3 +1,4 @@
+import asyncio
 import json
 import uuid
 import time
@@ -73,6 +74,7 @@ class SessionManager:
         self.redis_client = None
         self._redis_last_attempt = 0.0
         self.redis_url = redis_url if redis_url is not None else settings.REDIS_URL
+        self._async_lock = asyncio.Lock()
         if self.redis_url:
             self._redis()
 
@@ -259,5 +261,30 @@ class SessionManager:
             self._delete(sid)
             logger.info(f"[SessionManager] Pruned expired session '{sid}'")
         return len(expired)
+
+    async def get_session_async(self, session_id: str) -> Optional[Session]:
+        async with self._async_lock:
+            return await asyncio.to_thread(self.get_session, session_id)
+
+    async def update_session_cookies_async(self, session_id: str, cookies: List[CookieModel]) -> Optional[Session]:
+        async with self._async_lock:
+            return await asyncio.to_thread(self.update_session_cookies, session_id, cookies)
+
+    async def create_session_async(self, session_id: Optional[str] = None, proxy: Optional[str] = None, ttl: int = 7200) -> str:
+        async with self._async_lock:
+            return await asyncio.to_thread(self.create_session, session_id, proxy, ttl)
+
+    async def destroy_session_async(self, session_id: str) -> bool:
+        async with self._async_lock:
+            return await asyncio.to_thread(self.destroy_session, session_id)
+
+    async def list_sessions_async(self) -> List[str]:
+        async with self._async_lock:
+            return await asyncio.to_thread(self.list_sessions)
+
+    async def prune_expired_sessions_async(self) -> int:
+        async with self._async_lock:
+            return await asyncio.to_thread(self.prune_expired_sessions)
+
 
 session_manager = SessionManager()

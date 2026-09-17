@@ -47,63 +47,47 @@
 
 ## 🟢 Quick Deployment: UGREEN NASync DXP4800 Pro (UGOS Pro)
 
-The **UGREEN NASync DXP4800 Pro** ships with an Intel Core i3-1315U - 6 cores (2P+4E) / 8 threads, up to 4.5GHz, integrated UHD Graphics (no Iris Xe) - and 8GB DDR5-5600 stock, expandable to 96GB across 2 SODIMM slots. `MAX_BROWSER_WORKERS=auto` sizes off both CPU thread count *and* available RAM (see [Environment Configuration](#-environment-configuration)), so on the 8GB stock config it lands well under 8 concurrent browser workers by default rather than assuming a 10-12 thread machine. If you're running Sonarr/Radarr/Prowlarr on the same box, budget worker count against the RAM they need too - set `MAX_BROWSER_WORKERS` explicitly rather than relying on `auto` once other containers are sharing the NAS.
+The included `compose.ugreen.yml` is tuned for the DXP4800 Pro while it is
+also running Jellyfin and the Arr stack. It fixes Solverr at two browser
+workers, two CPU cores, 3GB RAM, 1GB shared memory, bounded caches, rotated
+logs, and your common UGOS ownership values (`PUID=1000`, `PGID=10`).
+Camoufox is tested under that exact non-root identity before an image can be
+published.
 
-### Method 1: Using UGOS Pro Docker Compose (Recommended)
+Do not map `/dev/dri` into Solverr. Media requests are blocked during solves,
+so the Intel GPU provides little benefit here and is better left available to
+Jellyfin transcoding.
 
-1. Open **Docker** in the UGOS Pro desktop.
-2. Go to **Projects** &rarr; **Create Project**.
-3. Name the project `solverr` and paste the compose configuration below:
+### Using UGOS Pro Docker Compose
 
-```yaml
-services:
-  solverr:
-    image: ghcr.io/rpeters1430/solverr:latest
-    container_name: solverr
-    restart: unless-stopped
-    ports:
-      - "8191:8191"
-    shm_size: '2gb' # Recommended 1gb-2gb for Camoufox multi-worker rendering
-    environment:
-      - PORT=8191
-      - HOST=0.0.0.0
-      - LOG_LEVEL=INFO
-      - MAX_BROWSER_WORKERS=auto # Auto-scales across CPU cores, clamped to available RAM (see Environment Configuration below)
-      - HEADLESS=true
-      - ENABLE_FAST_TLS=true
-      - COOKIE_CACHE_TTL=7200
-      # - PUID=1000 # Optional: run container process as this UID (must be set with PGID)
-      # - PGID=1000 # Optional: run container process as this GID (must be set with PUID)
-    volumes:
-      - /volume1/docker/solverr/data:/app/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8191/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-```
+1. Open **Docker** in UGOS Pro and create a project named `solverr`.
+2. Copy `compose.ugreen.yml` into the project, or paste its contents into the
+   UGOS Compose editor.
+3. Create `/volume1/docker/solverr/data` if it does not already exist.
+4. Deploy the project and open `http://YOUR-NAS-IP:8191`.
 
-4. Click **Deploy / Done**. Solverr dashboard is now available at `http://YOUR-NAS-IP:8191`.
+If the NAS has only 8GB RAM and regularly performs Jellyfin transcodes, reduce
+`MAX_BROWSER_WORKERS` to `1` and `mem_limit` to `2g`. Raising the worker
+count is rarely useful for a single Prowlarr instance; watch the browser queue
+metric before increasing it.
 
-### Method 2: Command Line / SSH on UGREEN NAS
+### Command-line equivalent
 
 ```bash
-# Pull and run directly
 docker run -d \
   --name solverr \
   --restart unless-stopped \
+  --cpus=2 \
+  --memory=3g \
+  --pids-limit=512 \
+  --shm-size=1g \
   -p 8191:8191 \
-  --shm-size=2g \
   -v /volume1/docker/solverr/data:/app/data \
-  -e MAX_BROWSER_WORKERS=auto \
+  -e NAS_MODE=true \
+  -e MAX_BROWSER_WORKERS=2 \
+  -e ENABLE_MCP=false \
   -e PUID=1000 \
-  -e PGID=1000 \
+  -e PGID=10 \
   ghcr.io/rpeters1430/solverr:latest
 ```
 
@@ -132,7 +116,7 @@ services:
     volumes:
       - ./data:/app/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8191/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8191/health', timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -250,7 +234,7 @@ On by default; set `ENABLE_MCP=false` to disable.
 | `HOST` | `0.0.0.0` | Server binding IP |
 | `PUID` | `None` | Optional runtime UID override for the main process (must be paired with `PGID`) |
 | `PGID` | `None` | Optional runtime GID override for the main process (must be paired with `PUID`) |
-| `MAX_BROWSER_WORKERS` | `auto` | Max concurrent browser workers, and Camoufox pool size (`auto` matches CPU cores - the container's `--cpus`/cgroup quota if set, else the host - then clamps to a RAM-based cap using the same container-aware limit - see `RAM_PER_WORKER_GB`/`RAM_RESERVED_GB`) |
+| `MAX_BROWSER_WORKERS` | `auto` | Max concurrent browser workers and Camoufox pool size. Auto mode respects cgroup CPU/RAM limits and caps NAS mode at two workers; an explicit value is clamped to 1–16. |
 | `RAM_PER_WORKER_GB` | `1.0` | RAM budgeted per browser worker when auto-tuning `MAX_BROWSER_WORKERS` |
 | `RAM_RESERVED_GB` | `2.0` | RAM reserved for the OS/other containers and excluded from auto-tuning's worker budget |
 | `ENABLE_FAST_TLS` | `true` | Enables 50ms TLS impersonation fast path |
@@ -266,7 +250,7 @@ On by default; set `ENABLE_MCP=false` to disable.
 | `FALLBACK_PROXY_URL` | `None` | Optional Tier 4 fallback proxy URL |
 | `API_KEY` | `None` | When set, requires a matching `X-Api-Key` header (header only - never a query param) on every endpoint except `/health`, and `/metrics` unless `METRICS_REQUIRE_AUTH=true` |
 | `METRICS_REQUIRE_AUTH` | `false` | Require `X-Api-Key` on `/metrics` too, instead of leaving it open for Prometheus scrapers |
-| `ALLOW_PRIVATE_NETWORKS` | `false` | Allow target URLs that resolve to loopback/RFC1918/link-local/cloud-metadata addresses. Only the initial target is checked, not redirects |
+| `ALLOW_PRIVATE_NETWORKS` | `false` | Allow initial targets, redirects, and browser subresources that resolve to loopback/RFC1918/link-local/cloud-metadata addresses. |
 | `ALLOWED_HOSTS` | (empty) | Comma-separated hostnames exempted from the private-network block above |
 | `DENIED_HOSTS` | (empty) | Comma-separated hostnames always rejected, regardless of `ALLOW_PRIVATE_NETWORKS` |
 | `MAX_REQUEST_BODY_MB` | `10` | Reject incoming requests whose `Content-Length` exceeds this (`0` disables) |

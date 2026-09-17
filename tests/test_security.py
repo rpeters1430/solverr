@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 from app.config import settings
-from app.security import check_target_url, SSRFBlockedError
+from app.security import check_target_url, check_target_url_async, SSRFBlockedError
 
 
 class TestSSRFProtection(unittest.TestCase):
@@ -28,6 +28,12 @@ class TestSSRFProtection(unittest.TestCase):
         with patch.object(settings, "ALLOW_PRIVATE_NETWORKS", True):
             check_target_url("http://127.0.0.1/")  # must not raise
 
+    def test_denied_hosts_wins_over_private_network_override(self):
+        with patch.object(settings, "ALLOW_PRIVATE_NETWORKS", True), \
+             patch.object(settings, "DENIED_HOSTS", {"example.com"}):
+            with self.assertRaises(SSRFBlockedError):
+                check_target_url("https://example.com/")
+
     def test_allowed_hosts_overrides_block(self):
         with patch.object(settings, "ALLOWED_HOSTS", {"127.0.0.1"}):
             check_target_url("http://127.0.0.1/")  # must not raise
@@ -37,8 +43,9 @@ class TestSSRFProtection(unittest.TestCase):
             with self.assertRaises(SSRFBlockedError):
                 check_target_url("https://example.com/")
 
-    def test_unresolvable_host_does_not_raise(self):
-        check_target_url("http://this-host-does-not-exist.invalid/")  # must not raise
+    def test_unresolvable_host_is_rejected(self):
+        with self.assertRaises(SSRFBlockedError):
+            check_target_url("http://this-host-does-not-exist.invalid/")
 
     def test_scheme_less_loopback_blocked(self):
         # urlparse() only populates .hostname when a "//" authority marker
@@ -50,6 +57,18 @@ class TestSSRFProtection(unittest.TestCase):
 
     def test_scheme_less_public_host_allowed(self):
         check_target_url("example.com:8080")  # must not raise
+
+
+class TestAsyncSSRFProtection(unittest.IsolatedAsyncioTestCase):
+    async def test_async_loopback_blocked(self):
+        with self.assertRaises(SSRFBlockedError):
+            await check_target_url_async("http://127.0.0.1/private", label="Redirect target")
+
+    async def test_async_public_resolution_allowed(self):
+        with patch("asyncio.BaseEventLoop.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("93.184.216.34", 0))
+        ]):
+            await check_target_url_async("https://example.com/")
 
 
 class TestProxySSRFProtection(unittest.IsolatedAsyncioTestCase):

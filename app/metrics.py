@@ -6,7 +6,7 @@ from app.solver.sessions import session_manager
 from app.solver.browser import browser_pool
 from app.config import settings
 
-def generate_prometheus_metrics() -> str:
+def generate_prometheus_metrics(cached_domains_count: int | None = None, active_sessions_count: int | None = None) -> str:
     """
     Generates standard Prometheus exposition format text for /metrics endpoint.
     Compatible with Prometheus, VictoriaMetrics, Grafana Agent, and OpenTelemetry collector.
@@ -16,6 +16,10 @@ def generate_prometheus_metrics() -> str:
     cpu_pct = psutil.cpu_percent(interval=None)
 
     stats = metrics.to_dict()
+    if cached_domains_count is None:
+        cached_domains_count = cookie_cache.count_domains()
+    if active_sessions_count is None:
+        active_sessions_count = len(session_manager.list_sessions())
 
     from app.solver.browser import CAMOUFOX_AVAILABLE
     stealth_engine = "camoufox" if CAMOUFOX_AVAILABLE else "unavailable"
@@ -48,11 +52,11 @@ def generate_prometheus_metrics() -> str:
         "",
         "# HELP solverr_cached_domains_count Number of unique domains with active cached cookies",
         "# TYPE solverr_cached_domains_count gauge",
-        f'solverr_cached_domains_count {len(cookie_cache.get_all_entries())}',
+        f'solverr_cached_domains_count {cached_domains_count}',
         "",
         "# HELP solverr_active_sessions Number of active pinned proxy sessions",
         "# TYPE solverr_active_sessions gauge",
-        f'solverr_active_sessions {len(session_manager.list_sessions())}',
+        f'solverr_active_sessions {active_sessions_count}',
         "",
         "# HELP solverr_memory_bytes Resident set memory size consumed by Solverr process in bytes",
         "# TYPE solverr_memory_bytes gauge",

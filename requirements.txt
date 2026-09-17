@@ -1,12 +1,14 @@
 fastapi==0.141.1
 uvicorn[standard]==0.53.0
 curl_cffi==0.16.3
-playwright>=1.60.0
+# Camoufox 0.5.6 requires playwright<1.63. Keep this pinned until Camoufox
+# publishes a release compatible with Playwright 1.63 or newer.
+playwright==1.62.0
 camoufox==0.5.6
 pydantic==2.13.5
 psutil==7.2.2
 httpx==0.28.1
 python-multipart==0.0.32
-beautifulsoup4>=4.12.0
-redis>=5.0.0
+beautifulsoup4==4.15.0
+redis==8.1.0
 mcp==2.2.0

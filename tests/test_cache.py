@@ -1,3 +1,4 @@
+import asyncio
 import os
 import time
 import tempfile
@@ -163,6 +164,11 @@ class TestCookieCache(unittest.TestCase):
                     raise ConnectionError("redis down")
                 return self.store.get(key)
 
+            def mget(self, keys):
+                if not self.healthy:
+                    raise ConnectionError("redis down")
+                return [self.store.get(key) for key in keys]
+
             def scan_iter(self, match=None, count=None):
                 if not self.healthy:
                     raise ConnectionError("redis down")
@@ -287,6 +293,30 @@ class TestCookieCache(unittest.TestCase):
             client.healthy = True
             cache._redis_last_attempt = 0
             self.assertIs(cache._redis(), client)
+
+    def test_count_domains_uses_local_store(self):
+        self.cache.set_cookies("https://a.example.com", [CookieModel(name="a", value="1", domain="a.example.com")])
+        self.cache.set_cookies("https://b.example.com", [CookieModel(name="b", value="2", domain="b.example.com")])
+        self.assertEqual(self.cache.count_domains(), 2)
+
+    def test_count_domains_excludes_expired_local_entries(self):
+        self.cache.set_cookies("https://stale.example.com", [
+            CookieModel(name="stale", value="1", domain="stale.example.com")
+        ])
+        self.cache._store["stale.example.com"]["stale|/"]["timestamp"] = (
+            time.time() - settings.COOKIE_CACHE_TTL - 1
+        )
+        self.cache._domain_count_cache_at = 0.0
+        self.assertEqual(self.cache.count_domains(), 0)
+
+    def test_async_set_keeps_disk_flush_debounced(self):
+        async def write():
+            with patch.object(self.cache, "_save_to_disk") as save:
+                await self.cache.set_cookies_async("https://example.com", [
+                    CookieModel(name="a", value="1", domain="example.com")
+                ])
+                save.assert_not_called()
+        asyncio.run(write())
 
     def test_export_netscape_format(self):
         cookies = [
