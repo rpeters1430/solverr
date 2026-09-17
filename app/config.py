@@ -50,7 +50,8 @@ def _cgroup_cpu_limit() -> Optional[float]:
 
 class Settings:
     PORT: int = int(os.getenv("PORT", "8191"))
-    HOST: str = os.getenv("HOST", "0.0.0.0")
+    # Default bind-all interface for container deployments.
+    HOST: str = os.getenv("HOST", "0.0.0.0")  # nosec B104
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
     # Hardware & CPU Info - cgroup limit (container) if present, else host.
