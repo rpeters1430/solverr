@@ -242,6 +242,7 @@ On by default; set `ENABLE_MCP=false` to disable.
 | `CAMOUFOX_POOL_ENABLED` | `true` | Reuse warm Camoufox processes across no-proxy solves instead of spawning one per request |
 | `CAMOUFOX_POOL_RECYCLE_USES` | `40` | Recycle a pooled browser instance after this many solves |
 | `CAMOUFOX_POOL_RECYCLE_SECONDS` | `1800` | Recycle a pooled browser instance after this many seconds, whichever comes first |
+| `CAMOUFOX_GEOIP_ON_PROXY` | `true` | When a request carries its own proxy (or Tier 4 fallback-proxy escalation fires), derive Camoufox's timezone/locale/geolocation/WebRTC-visible IP from that proxy's actual exit IP instead of the container's real location - avoids the classic "proxy IP in one country, browser fingerprint in another" mismatch. Costs one extra request through the proxy at launch time |
 | `REDIS_URL` | `None` | Optional Redis URL for distributed cookie cache & sessions - required when running multiple replicas, see [Horizontal Scaling](#-horizontal-scaling) |
 | `COOKIE_CACHE_TTL` | `7200` | Clearance cookie cache TTL in seconds |
 | `MAX_CACHE_DOMAINS` | `1000` | Local (non-Redis) cookie cache: max distinct domains before the oldest is evicted |
@@ -263,6 +264,25 @@ On by default; set `ENABLE_MCP=false` to disable.
 | `MCP_ALLOWED_ORIGINS` | (empty) | Comma-separated Origin header values `/mcp` accepts beyond `localhost`/`127.0.0.1`. Only consulted when `API_KEY` is unset |
 | `HEADLESS` | `true` | Run browser in headless mode |
 | `LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+
+---
+
+## 🕵️ Verifying Stealth Effectiveness
+
+Automated bot-detection sites aren't part of CI (they're third-party live services - hitting them on every push would be flaky and could look like abuse), but they're the fastest manual check after upgrading Camoufox, changing a launch option (`humanize`, `geoip`, `os`, fingerprint pinning), or editing `app/solver/human_cursor.py`. Point a solved session (`POST /scrape` with `screenshot: true`, or the dashboard's live test bench) at a few of these and confirm nothing regresses:
+
+| Target | Checks |
+| :--- | :--- |
+| [CreepJS](https://abrahamjuliot.github.io/creepjs/) | Deep fingerprint consistency (canvas/WebGL/fonts/audio) and an overall "trust score" - the most sensitive single check |
+| [Sannysoft](https://bot.sannysoft.com/) | Quick automation-flag checklist (`navigator.webdriver`, headless UA, plugin/permission mismatches) |
+| [BrowserLeaks](https://browserleaks.com/) | Per-surface fingerprint breakdown (canvas, WebGL, fonts, WebRTC, TCP/IP) |
+| [Pixelscan](https://pixelscan.net/) & [Pixelscan Bot Check](https://pixelscan.net/bot-check) | Consistency between IP geolocation and browser-reported timezone/locale - the check `CAMOUFOX_GEOIP_ON_PROXY` is meant to pass |
+| [Brotector](https://kaliiiiiiiiii.github.io/brotector/) | Interaction-pattern automation detection (mouse/keyboard event synthesis) - exercises the Bézier cursor path in `human_cursor.py` |
+| [Rebrowser bot-detector](https://bot-detector.rebrowser.net/) | Task-driven automation detection |
+| [browserscan.net](https://www.browserscan.net/en) | General bot-detection score, alternative to CreepJS |
+| [IPRoyal WebRTC leak test](https://iproyal.com/webrtc-leak-test/) | Confirms WebRTC reports the proxy's IP, not the container's real one, when a proxy is set |
+
+A regression on any of these after a Camoufox bump usually means a fingerprint field it randomizes changed shape upstream - check the diff of `python -m camoufox version` and the [Camoufox changelog](https://github.com/daijro/camoufox/releases) first.
 
 ---
 

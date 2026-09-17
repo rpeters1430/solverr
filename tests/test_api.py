@@ -96,6 +96,33 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertGreaterEqual(len(path), 20)
         self.assertEqual(path[-1], (400, 300))
 
+    def test_human_cursor_bezier_path_overshoots_before_correcting(self):
+        # Forces the overshoot branch (random.random() < 0.55 always true)
+        # and checks the path actually passes the target before the final
+        # correction steps ease it back - not just that it lands on target,
+        # which the old dead-stop trajectory would also satisfy.
+        import random
+        from unittest.mock import patch
+        start = (0.0, 0.0)
+        end = (500.0, 0.0)
+        with patch("random.random", return_value=0.0):
+            path = generate_bezier_path(start, end, steps=25)
+        self.assertEqual(path[-1], end)
+        self.assertTrue(any(pt[0] > end[0] for pt in path[:-1]))
+
+    def test_human_cursor_bezier_path_always_lands_on_target(self):
+        # Long moves have a chance to overshoot and correct back (see
+        # human_cursor.py) - whichever branch fires, the path must still end
+        # exactly on the requested target, since callers (human_click) rely
+        # on that for the final click coordinate.
+        import random
+        random.seed(42)
+        for _ in range(200):
+            start = (random.uniform(0, 1920), random.uniform(0, 1080))
+            end = (random.uniform(0, 1920), random.uniform(0, 1080))
+            path = generate_bezier_path(start, end, steps=random.randint(2, 30))
+            self.assertEqual(path[-1], end)
+
     def test_api_key_auth_modes(self):
         from unittest.mock import patch
         from app.config import settings

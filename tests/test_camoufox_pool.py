@@ -116,6 +116,60 @@ class FakeCamoufoxPoolWithBrowser(FakeCamoufoxPool):
         return _PooledCamoufox(cm=object(), browser=FakeBrowser(), created_at=time.time())
 
 
+class FakeAsyncCamoufoxCtx:
+    """Records the kwargs it was launched with and hands back a FakeBrowser,
+    so tests can assert on what BrowserPool actually passes to Camoufox
+    without spawning a real browser process."""
+
+    captured_kwargs: list = []
+
+    def __init__(self, **kwargs):
+        FakeAsyncCamoufoxCtx.captured_kwargs.append(kwargs)
+
+    async def __aenter__(self):
+        return FakeBrowser()
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class TestEphemeralCamoufoxGeoip(unittest.IsolatedAsyncioTestCase):
+    """A request carrying its own proxy (including Tier 4 fallback-proxy
+    escalation, which re-enters this same path) should have Camoufox derive
+    timezone/locale/geolocation/WebRTC from that proxy's real exit IP via
+    the `geoip` launch option - otherwise the browser fingerprint can
+    contradict the proxy's IP, which is exactly the mismatch WAFs look for."""
+
+    def setUp(self):
+        FakeAsyncCamoufoxCtx.captured_kwargs = []
+        patcher = patch("app.solver.browser.browser.AsyncCamoufox", FakeAsyncCamoufoxCtx)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def _solve(self, pw_proxy):
+        pool = BrowserPool()
+        with patch.object(pool, "_execute_solve_flow", return_value="ok"):
+            return await pool._solve_with_ephemeral_camoufox(
+                url="https://example.com", method="GET", post_data=None, cookies=None,
+                pw_proxy=pw_proxy, user_agent=None, timeout_ms=5000, active_ua="fake-ua",
+                headers=None, start_time=time.time(), wait_selector=None,
+                wait_delay_ms=None, capture_screenshot=False
+            )
+
+    async def test_geoip_enabled_when_proxy_set(self):
+        await self._solve(pw_proxy={"server": "http://proxy.example.com:8080"})
+        self.assertTrue(FakeAsyncCamoufoxCtx.captured_kwargs[-1]["geoip"])
+
+    async def test_geoip_disabled_without_proxy(self):
+        await self._solve(pw_proxy=None)
+        self.assertFalse(FakeAsyncCamoufoxCtx.captured_kwargs[-1]["geoip"])
+
+    async def test_geoip_respects_config_toggle(self):
+        with patch.object(settings, "CAMOUFOX_GEOIP_ON_PROXY", False):
+            await self._solve(pw_proxy={"server": "http://proxy.example.com:8080"})
+        self.assertFalse(FakeAsyncCamoufoxCtx.captured_kwargs[-1]["geoip"])
+
+
 class TestBrowserPoolCancellation(unittest.IsolatedAsyncioTestCase):
     async def test_pooled_instance_is_released_when_solve_flow_raises(self):
         """A crash (or cancellation) mid-solve must still close the page/
