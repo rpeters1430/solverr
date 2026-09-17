@@ -486,7 +486,7 @@ class CookieCache:
                     # can still read/write it, without making a file full of
                     # live cf_clearance/session cookies world-readable to
                     # every other local user or co-mounted container.
-                    os.chmod(tmp_file, 0o660)
+                    os.chmod(tmp_file, 0o660)  # nosec B103
                 except Exception:
                     pass
                 os.replace(tmp_file, self.cache_file)
