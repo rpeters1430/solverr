@@ -1,6 +1,6 @@
 services:
   solverr:
-    image: ghcr.io/rpeters1430/solverr:latest@sha256:01d972f2855fd4f0431f1cdeb3b8d94a9b3e86eb6b0bcf844edc1c7432d31256
+    image: ghcr.io/rpeters1430/solverr:latest@sha256:43b5447e0cd6442dbb28525e976579de970a581935822ce73fcbfaccc9c6dc4d
     container_name: solverr
     restart: unless-stopped
     ports:
