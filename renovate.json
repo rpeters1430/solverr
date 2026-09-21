@@ -23,6 +23,16 @@
   "prConcurrentLimit": 0,
   "packageRules": [
     {
+      "description": "Do not update Solverr's own published image digest in this repository",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "ghcr.io/rpeters1430/solverr"
+      ],
+      "enabled": false
+    },
+    {
       "description": "Keep Playwright compatible with Camoufox 0.5.6",
       "matchManagers": [
         "pip_requirements"
