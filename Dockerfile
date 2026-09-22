@@ -84,7 +84,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
-      tini ca-certificates gosu \
+      tini curl ca-certificates gosu \
       libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 \
       libcairo2 libcairo-gobject2 \
       libdbus-1-3 libdbus-glib-1-2 \
