@@ -50,7 +50,8 @@ def _cgroup_cpu_limit() -> Optional[float]:
 
 class Settings:
     PORT: int = int(os.getenv("PORT", "8191"))
-    HOST: str = os.getenv("HOST", "0.0.0.0")
+    # Default bind-all interface for container deployments.
+    HOST: str = os.getenv("HOST", "0.0.0.0")  # nosec B104
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
     # Hardware & CPU Info - cgroup limit (container) if present, else host.
@@ -141,6 +142,17 @@ class Settings:
     CAMOUFOX_POOL_ENABLED: bool = os.getenv("CAMOUFOX_POOL_ENABLED", "true").lower() in ("true", "1", "yes")
     CAMOUFOX_POOL_RECYCLE_USES: int = int(os.getenv("CAMOUFOX_POOL_RECYCLE_USES", "40"))
     CAMOUFOX_POOL_RECYCLE_SECONDS: int = int(os.getenv("CAMOUFOX_POOL_RECYCLE_SECONDS", "1800"))
+
+    # When a request carries its own proxy (or Tier 4 fallback-proxy
+    # escalation kicks in), have Camoufox derive timezone/locale/geolocation/
+    # WebRTC-visible IP from that proxy's actual exit IP (Camoufox's built-in
+    # `geoip` launch option) instead of leaving them at the container's real
+    # location. A proxy IP in one country next to a browser reporting another
+    # timezone/locale is exactly the kind of mismatch WAFs like DataDome/
+    # Akamai fingerprint on. Costs one extra request through the proxy at
+    # launch time to resolve the exit IP; disable if that latency matters
+    # more than the fingerprint consistency.
+    CAMOUFOX_GEOIP_ON_PROXY: bool = os.getenv("CAMOUFOX_GEOIP_ON_PROXY", "true").lower() in ("true", "1", "yes")
 
     # Optional API key auth. When set, all endpoints except /health and
     # /metrics require an `X-Api-Key` header matching this value.

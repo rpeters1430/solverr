@@ -2,7 +2,7 @@
 # Solverr - Ultra-fast & Lightweight FlareSolverr Alternative
 # Optimized for high-efficiency container deployments (UGREEN NASync / Linux / Docker)
 
-FROM python:3.14-slim-bookworm@sha256:9ab8d9c8514b44f90cf0029dd42fdd7e9e211e639c8b995304cc04568dee900f AS base
+FROM python:3.14-slim-bookworm@sha256:82bc3c539b8813ada9d68c63b40158fa002f7f33de9bf3312a3dfdc0620dff56 AS base
 ENV PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -18,6 +18,12 @@ ENV PYTHONUNBUFFERED=1 \
 # ---- Stage 1: Install Python dependencies + fetch browser engines ----
 FROM base AS deps
 WORKDIR /app
+
+# Pin the Camoufox browser engine separately from the Python wrapper package.
+# Keeping this explicit makes Docker rebuild the browser-fetch layer whenever
+# the upstream engine is bumped instead of silently reusing an older cached
+# browser binary. Camoufox 152.0.4-beta.30 is paired with pythonlib 0.5.6.
+ARG CAMOUFOX_BROWSER_VERSION=152.0.4-beta.30
 
 # uv resolves and installs far faster than pip; pinned to a specific PyPI
 # release for reproducible builds. Installed into the base image's system
@@ -40,12 +46,17 @@ COPY requirements.txt .
 RUN --mount=type=cache,target=/app/.cache/uv \
     uv pip install --python /opt/venv/bin/python -r requirements.txt
 
-# Fetch the Camoufox stealth Firefox browser binary, then trim it down:
+# Fetch and activate the exact Camoufox stealth Firefox browser binary, then
+# trim it down. Passing the version directly prevents the image from drifting
+# with the remote channel, while the ARG guarantees a version bump invalidates
+# this Docker layer.
 # - Fingerprint generation is pinned to os="linux" (app/solver/browser.py),
 #   so the macos/windows font sets Camoufox also downloads by default are
 #   dead weight (~890MB) - only ship the font set that's ever used.
 # - Debug symbols in the Firefox binary/shared libs aren't needed at runtime.
-RUN python -m camoufox fetch \
+RUN python -m camoufox fetch "official/stable/${CAMOUFOX_BROWSER_VERSION}" \
+    && python -m camoufox set "official/stable/${CAMOUFOX_BROWSER_VERSION}" \
+    && python -m camoufox version \
     && rm -rf /app/.cache/camoufox/browsers/official/*/fonts/macos \
               /app/.cache/camoufox/browsers/official/*/fonts/windows
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \

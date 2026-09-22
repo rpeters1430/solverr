@@ -290,13 +290,16 @@ class BrowserPool:
         capture_screenshot: bool
     ) -> SolutionModel:
         """Dedicated (non-pooled) Camoufox launch for requests carrying their
-        own proxy or an explicit user_agent - Camoufox ties geolocation/
-        timezone/WebRTC fingerprint derivation to the proxy's exit IP and to
-        the launch-time UA, so these can't share the warm no-proxy pool."""
-        logger.info(f"[CamoufoxEngine] Spawning ephemeral Camoufox stealth Firefox solve for {url} (proxy={'yes' if pw_proxy else 'no'}, custom_ua={'yes' if user_agent else 'no'})...")
+        own proxy or an explicit user_agent - these can't share the warm
+        no-proxy pool since the launch-time UA is fixed at launch, and (with
+        `geoip` below) so is the proxy-derived geolocation/timezone/WebRTC
+        fingerprint."""
+        use_geoip = bool(pw_proxy) and settings.CAMOUFOX_GEOIP_ON_PROXY
+        logger.info(f"[CamoufoxEngine] Spawning ephemeral Camoufox stealth Firefox solve for {url} (proxy={'yes' if pw_proxy else 'no'}, custom_ua={'yes' if user_agent else 'no'}, geoip={'yes' if use_geoip else 'no'})...")
         async with AsyncCamoufox(
             headless=settings.HEADLESS,
             proxy=pw_proxy,
+            geoip=use_geoip,
             humanize=True,
             disable_coop=True,
             os="linux",
