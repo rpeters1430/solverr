@@ -65,6 +65,52 @@ class TestFastTLSProfileRotation(unittest.TestCase):
         self.assertIn("domain3.test", engine._domain_scores)
         self.assertIn("domain4.test", engine._domain_scores)
 
+    def test_non_positive_max_domain_scores_setting_is_clamped(self):
+        # MAX_FAST_TLS_DOMAIN_SCORES=0 (or negative) must not leave the
+        # engine with a cap that makes the eviction branch always true on an
+        # empty mapping, which raised KeyError on the first new domain.
+        from unittest.mock import patch
+        with patch("app.solver.fast_tls.settings") as mock_settings:
+            mock_settings.FAST_TLS_TARGET = "firefox"
+            mock_settings.FAST_TLS_ROTATE = True
+            mock_settings.MAX_FAST_TLS_DOMAIN_SCORES = 0
+            mock_settings.FAST_TLS_POOL_ENABLED = True
+            mock_settings.FAST_TLS_POOL_SIZE = 50
+            engine = FastTLSEngine()
+        self.assertGreaterEqual(engine._max_domain_scores, 1)
+        engine.record_outcome("https://example.com/", "firefox144", success=True)
+        self.assertIn("example.com", engine._domain_scores)
+
+
+class TestFastTLSCookieSelection(unittest.TestCase):
+    def _cookie(self, name, value, domain, path="/"):
+        from app.models.flaresolverr import CookieModel
+        return CookieModel(name=name, value=value, domain=domain, path=path)
+
+    def test_same_name_cookies_on_different_domains_do_not_shadow_each_other(self):
+        engine = FastTLSEngine()
+        cookies = [
+            self._cookie("session", "unrelated-domain-value", domain="other.test"),
+            self._cookie("session", "target-domain-value", domain="target.test"),
+        ]
+        selected = engine._select_cookies_for_url(cookies, "https://target.test/page")
+        self.assertEqual(selected.get("session"), "target-domain-value")
+
+    def test_same_name_cookies_on_different_paths_prefer_more_specific_path(self):
+        engine = FastTLSEngine()
+        cookies = [
+            self._cookie("token", "root-value", domain="target.test", path="/"),
+            self._cookie("token", "scoped-value", domain="target.test", path="/account"),
+        ]
+        selected = engine._select_cookies_for_url(cookies, "https://target.test/account/settings")
+        self.assertEqual(selected.get("token"), "scoped-value")
+
+    def test_cookie_scoped_to_unrelated_path_is_excluded(self):
+        engine = FastTLSEngine()
+        cookies = [self._cookie("token", "scoped-value", domain="target.test", path="/account")]
+        selected = engine._select_cookies_for_url(cookies, "https://target.test/other")
+        self.assertNotIn("token", selected)
+
 
 class TestFastTLSChallengeDetection(unittest.IsolatedAsyncioTestCase):
     async def test_detects_challenge_on_status_200_with_cloudflare_title(self):
