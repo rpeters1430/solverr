@@ -240,6 +240,7 @@ class BrowserPool:
         inst = await self.camoufox_pool.acquire()
         context = None
         page = None
+        setup_ok = False
         try:
             logger.info(f"[CamoufoxPool] Checked out warm instance (use #{inst.uses}) for {url}...")
             if hasattr(inst.browser, "new_context"):
@@ -250,6 +251,11 @@ class BrowserPool:
                 context = inst.browser
             page = await context.new_page()
             active_ua = await page.evaluate("() => navigator.userAgent")
+            # Context/page creation and a live JS eval all succeeded - the
+            # underlying Firefox process is responsive, so a failure from
+            # here on is a normal solve-level failure, not a reason to force
+            # this instance out of the pool.
+            setup_ok = True
             return await self._execute_solve_flow(
                 context=context,
                 page=page,
@@ -276,7 +282,12 @@ class BrowserPool:
                     await context.close()
                 except Exception:
                     pass
-            await self.camoufox_pool.release(inst)
+            # A failure before setup_ok (context/page creation, or the
+            # liveness-probing navigator.userAgent eval) looks process-level
+            # rather than page-level - force this instance out of rotation
+            # now instead of silently re-queuing a possibly wedged/crashed
+            # Firefox process until its normal use/age recycle threshold.
+            await self.camoufox_pool.release(inst, force_recycle=not setup_ok)
 
     async def _solve_with_ephemeral_camoufox(
         self,
@@ -424,6 +435,19 @@ class BrowserPool:
             active_challenge = detect_challenge(title, content, check_content)
             if active_challenge:
                 last_detected_challenge = active_challenge
+            elif not check_content and last_detected_challenge:
+                # Most WAF/CAPTCHA markers (hCaptcha, reCAPTCHA, GeeTest,
+                # Imperva, DataDome, Akamai, AWS WAF) only ever appear in
+                # page content, never in the title - detect_challenge() on a
+                # content-skipped iteration (page.content() is only re-fetched
+                # every content_check_every iterations) can't see them and
+                # returns None. Treat a previously-detected challenge as
+                # still active until the next content-checked iteration
+                # actually confirms it's gone, instead of letting a
+                # content-less lookup masquerade as "cleared" - otherwise the
+                # loop can declare victory on an unsolved widget before the
+                # click-dispatcher even gets a chance to run.
+                active_challenge = last_detected_challenge
 
             # Check if challenge is cleared:
             # 1. Normal clean page (no challenge title, and no challenge detected)

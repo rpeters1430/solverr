@@ -11,6 +11,7 @@ from app.solver.cache import cookie_cache
 from app.solver.sessions import session_manager
 from app.solver.fast_tls import fast_tls_engine
 from app.config import settings
+from app.logging_config import get_request_id
 
 logger = logging.getLogger("solverr.api.dashboard")
 router = APIRouter()
@@ -124,7 +125,12 @@ async def test_solver(req: TestRequestModel):
             "screenshot": sol.screenshot
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"[DashboardTest] Test solve failed for {req.url}: {e}", exc_info=True)
+        # Never echo raw exception text back to the client - it can carry
+        # internal paths, proxy credentials, or other details from deep in
+        # the solve pipeline. Full detail is already in the server-side log
+        # above, correlated by request_id.
+        raise HTTPException(status_code=500, detail=f"Test solve failed (request_id: {get_request_id()})")
 
 @router.get("/events")
 async def sse_event_stream():

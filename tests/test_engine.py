@@ -1,12 +1,16 @@
 import unittest
 from unittest.mock import AsyncMock, patch
-from app.models.flaresolverr import V1Request, SolutionModel
+from app.models.flaresolverr import V1Request, SolutionModel, CookieModel
 from app.solver.engine import HybridSolverEngine
 from app.config import settings
 
 
 def _sol(status=200, cookies=None, challenge_type=None):
     return SolutionModel(url="https://example.com", status=status, response="<html></html>", cookies=cookies or [], challengeType=challenge_type)
+
+
+def _cookie(name, value, domain, path="/"):
+    return CookieModel(name=name, value=value, domain=domain, path=path, expires=-1, size=len(name) + len(value), httpOnly=False, secure=False, session=False, sameSite="Lax")
 
 
 class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
@@ -121,6 +125,81 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
             # A caller's requested timeout budget must not be silently
             # inherited from a concurrent request for the same URL.
             self.assertEqual(browser_mock.call_count, 2)
+
+    async def test_concurrent_requests_collapse_retry_after_shared_failure(self):
+        import asyncio
+        call_count = {"n": 0}
+
+        async def flaky_solve(*args, **kwargs):
+            call_count["n"] += 1
+            await asyncio.sleep(0.02)
+            if call_count["n"] == 1:
+                raise RuntimeError("boom")
+            return _sol(200)
+
+        with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock(side_effect=flaky_solve)), \
+             patch.object(settings, "FALLBACK_PROXY_URL", None):
+            req = V1Request(cmd="request.get", url="https://example.com/thundering-herd")
+            results = await asyncio.gather(
+                *[self.engine.process_request(req) for _ in range(5)],
+                return_exceptions=True,
+            )
+            # The shared failure must trigger exactly one retry, not one
+            # independent retry per coalesced waiter (thundering herd).
+            self.assertEqual(call_count["n"], 2)
+            # The single request whose attempt actually failed rightfully
+            # sees that failure (it isn't a "joiner"); every other coalesced
+            # waiter must observe the one retry's success rather than each
+            # kicking off (and racing on popping) its own separate retry.
+            errors = [r for r in results if isinstance(r, Exception)]
+            successes = [r for r in results if not isinstance(r, Exception)]
+            self.assertEqual(len(errors), 1)
+            self.assertEqual(len(successes), 4)
+            self.assertTrue(all(r.status == 200 for r in successes))
+
+    async def test_cancelling_owner_releases_coalesced_waiters(self):
+        import asyncio
+
+        async def slow_browser_solve(*args, **kwargs):
+            await asyncio.sleep(5)
+            return _sol(200)
+
+        with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock(side_effect=slow_browser_solve)):
+            req = V1Request(cmd="request.get", url="https://example.com/cancel-releases-waiters")
+            owner_task = asyncio.create_task(self.engine.process_request(req))
+            await asyncio.sleep(0.01)  # let the owner install its in-flight future
+            joiner_task = asyncio.create_task(self.engine.process_request(req))
+            await asyncio.sleep(0.01)  # let the joiner coalesce onto it
+
+            owner_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await owner_task
+
+            # A coalesced waiter must be released (not hang forever) once
+            # the owner it's shielded onto is cancelled - previously the
+            # `finally` block popped the still-pending future without
+            # cancelling it, leaving joiners blocked indefinitely.
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(joiner_task), timeout=1)
+            joiner_task.cancel()
+
+    async def test_cookie_merge_keys_by_domain_path_name_not_name_alone(self):
+        input_cookie = _cookie("session", "input-value", domain="other.example.com")
+        cached_cookie = _cookie("session", "cached-value", domain="example.com")
+        with patch("app.solver.engine.cookie_cache.get_cookies_async", new=AsyncMock(return_value=[cached_cookie])), \
+             patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(False, _sol(200)))) as fast_mock, \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock()):
+            req = V1Request(cmd="request.get", url="https://example.com", cookies=[input_cookie])
+            await self.engine.process_request(req)
+            called_cookies = fast_mock.call_args.kwargs["cookies"]
+            seen = {(c.domain, c.name, c.value) for c in called_cookies}
+            # Both must survive the merge - the cache's cookie for the
+            # actual target domain must not be dropped just because an
+            # unrelated domain's cookie happens to share its name.
+            self.assertIn(("other.example.com", "session", "input-value"), seen)
+            self.assertIn(("example.com", "session", "cached-value"), seen)
 
     async def test_request_budget_propagates_remaining_timeout_to_browser(self):
         with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \

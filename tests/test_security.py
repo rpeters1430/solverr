@@ -28,6 +28,17 @@ class TestSSRFProtection(unittest.TestCase):
         with patch.object(settings, "ALLOW_PRIVATE_NETWORKS", True):
             check_target_url("http://127.0.0.1/")  # must not raise
 
+    def test_unresolvable_host_blocked_sync(self):
+        # A DNS lookup failure must fail closed, not be treated as "no
+        # resolvable IP to check, so allow it through".
+        with self.assertRaises(SSRFBlockedError):
+            check_target_url("http://this-host-does-not-exist.invalid/")
+
+    def test_unresolvable_host_blocked_async(self):
+        import asyncio
+        with self.assertRaises(SSRFBlockedError):
+            asyncio.run(check_target_url_async("http://this-host-does-not-exist.invalid/"))
+
     def test_denied_hosts_wins_over_private_network_override(self):
         with patch.object(settings, "ALLOW_PRIVATE_NETWORKS", True), \
              patch.object(settings, "DENIED_HOSTS", {"example.com"}):
@@ -118,7 +129,11 @@ class TestProxySSRFProtection(unittest.IsolatedAsyncioTestCase):
         from app.solver.engine import HybridSolverEngine
 
         engine = HybridSolverEngine()
-        req = V1Request(cmd="request.get", url="https://example.com", proxy="http://proxy.example.com:8080")
+        # Use a real, publicly-resolvable host (example.com) rather than a
+        # made-up subdomain - an NXDOMAIN lookup must be treated as blocked
+        # (see test_security.py's SSRF-fail-closed test), not "allowed",
+        # so a fake hostname here would defeat the point of this test.
+        req = V1Request(cmd="request.get", url="https://example.com", proxy="http://example.com:8080")
         # Pin every downstream call so this stays a fast, deterministic unit
         # test of the SSRF check itself, not an accidental integration test
         # of the browser/fallback-proxy tiers.

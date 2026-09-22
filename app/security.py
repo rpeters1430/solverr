@@ -83,6 +83,8 @@ async def check_target_url_async(url: str, label: str = "Target") -> None:
         return
     try:
         infos = await asyncio.get_running_loop().getaddrinfo(host, None)
-    except socket.gaierror:
-        return
+    except socket.gaierror as exc:
+        raise SSRFBlockedError(
+            f"{label} host '{host}' could not be resolved safely"
+        ) from exc
     _reject_blocked_addresses(host, infos, label)
