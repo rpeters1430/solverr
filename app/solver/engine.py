@@ -213,12 +213,24 @@ class HybridSolverEngine:
         inflight_key = hashlib.sha256(
             json.dumps(fingerprint, sort_keys=True, default=str).encode()
         ).hexdigest()
-        if inflight_key in self._inflight:
+
+        # Loop rather than a single check-then-join: if the attempt we
+        # coalesce onto fails, re-check self._inflight before starting our
+        # own retry - another waiter may already have installed a fresh
+        # future in the meantime (no await happens between the check and
+        # the install below, so this is race-free under the single-threaded
+        # event loop). Without this, every one of N coalesced waiters would
+        # independently retry after a shared failure (thundering herd), and
+        # popping the wrong future out of self._inflight in the process.
+        while True:
+            existing = self._inflight.get(inflight_key)
+            if existing is None:
+                break
             logger.info(f"[HybridEngine] Coalescing duplicate concurrent solve for {url}...")
             try:
-                return await asyncio.shield(self._inflight[inflight_key])
+                return await asyncio.shield(existing)
             except Exception:
-                pass
+                continue
 
         loop = asyncio.get_running_loop()
         future = loop.create_future()
@@ -239,7 +251,12 @@ class HybridSolverEngine:
                 future.exception()
             raise e
         finally:
-            self._inflight.pop(inflight_key, None)
+            # Only remove our own future - a concurrent attempt may already
+            # have replaced it (e.g. another waiter's retry after this one
+            # failed), and popping that one out from under it would defeat
+            # coalescing for anyone joining it.
+            if self._inflight.get(inflight_key) is future:
+                self._inflight.pop(inflight_key, None)
 
     async def _do_process_request(self, req: V1Request, budget: RequestBudget, url: str, method: str) -> SolutionModel:
         proxy_url = req.get_proxy_url()
@@ -249,15 +266,23 @@ class HybridSolverEngine:
         cached_cookies = await cookie_cache.get_cookies_async(url)
         metrics.record_cookie_cache_lookup(hit=bool(cached_cookies))
 
-        input_cookie_names = set()
+        # Identity is domain + path + name, not name alone - two cookies with
+        # the same name on different domains/paths (e.g. a session cookie
+        # accumulated from one domain under a FlareSolverr session, and this
+        # domain's own cached clearance cookie) are distinct and must not
+        # shadow each other. Mirrors cookie_cache._cookie_key's identity model.
+        def _cookie_identity(c: CookieModel):
+            return ((c.domain or "").lstrip(".").lower(), c.path or "/", c.name)
+
+        input_cookie_ids = set()
         if req.cookies:
             for c in req.cookies:
                 combined_cookies.append(c)
-                input_cookie_names.add(c.name)
-        
+                input_cookie_ids.add(_cookie_identity(c))
+
         had_cache = False
         for cc in cached_cookies:
-            if cc.name not in input_cookie_names:
+            if _cookie_identity(cc) not in input_cookie_ids:
                 combined_cookies.append(cc)
                 had_cache = True
 
@@ -277,7 +302,8 @@ class HybridSolverEngine:
                 headers=req.headers,
                 proxy=proxy_url,
                 timeout=tls_timeout,
-                user_agent=req.userAgent
+                user_agent=req.userAgent,
+                session_id=req.session
             )
 
             if not is_cf_challenge and solution and (solution.status < 400 or solution.status == 404):

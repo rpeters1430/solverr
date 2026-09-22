@@ -50,6 +50,21 @@ class TestFastTLSProfileRotation(unittest.TestCase):
         profile = engine._profile_for_domain(url)
         self.assertEqual(profile[0], "firefox144")
 
+    def test_domain_scores_are_bounded_and_evict_oldest(self):
+        engine = FastTLSEngine()
+        engine._max_domain_scores = 3
+        for i in range(5):
+            engine.record_outcome(f"https://domain{i}.test/", "firefox144", success=True)
+        # Never allowed to grow past the configured bound...
+        self.assertLessEqual(len(engine._domain_scores), 3)
+        # ...and it's the oldest (least-recently-touched) domains that get
+        # evicted, not an arbitrary one - the most recent 3 must survive.
+        self.assertNotIn("domain0.test", engine._domain_scores)
+        self.assertNotIn("domain1.test", engine._domain_scores)
+        self.assertIn("domain2.test", engine._domain_scores)
+        self.assertIn("domain3.test", engine._domain_scores)
+        self.assertIn("domain4.test", engine._domain_scores)
+
 
 class TestFastTLSChallengeDetection(unittest.IsolatedAsyncioTestCase):
     async def test_detects_challenge_on_status_200_with_cloudflare_title(self):

@@ -3,6 +3,7 @@ import logging
 import re
 import time
 import zlib
+from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 from curl_cffi.requests import AsyncSession
@@ -42,7 +43,8 @@ class FastTLSEngine:
         self.impersonate_target = getattr(settings, "FAST_TLS_TARGET", "firefox")
         self.rotate = getattr(settings, "FAST_TLS_ROTATE", True)
         self.profiles = FIREFOX_PROFILES if self.impersonate_target.startswith("firefox") else CHROME_PROFILES
-        self._domain_scores: Dict[str, Dict[str, int]] = {}
+        self._domain_scores: "OrderedDict[str, Dict[str, int]]" = OrderedDict()
+        self._max_domain_scores: int = getattr(settings, "MAX_FAST_TLS_DOMAIN_SCORES", 2000)
         self._sessions: Dict[str, AsyncSession] = {}
         self._pool_enabled: bool = getattr(settings, "FAST_TLS_POOL_ENABLED", True)
         self._pool_size: int = getattr(settings, "FAST_TLS_POOL_SIZE", 50)
@@ -59,7 +61,14 @@ class FastTLSEngine:
         """Track success/failure per-domain profile to adaptively pick optimal TLS profiles."""
         domain = self._normalize_domain(url)
         if domain not in self._domain_scores:
+            # Bounded like the sibling _sessions pool below - evict the
+            # least-recently-touched domain once at capacity, instead of
+            # growing this dict for the life of the process.
+            if len(self._domain_scores) >= self._max_domain_scores:
+                self._domain_scores.popitem(last=False)
             self._domain_scores[domain] = {}
+        else:
+            self._domain_scores.move_to_end(domain)
         curr = self._domain_scores[domain].get(profile_target, 0)
         if success:
             self._domain_scores[domain][profile_target] = min(curr + 1, 10)
@@ -135,7 +144,8 @@ class FastTLSEngine:
         headers: Optional[Dict[str, str]] = None,
         proxy: Optional[str] = None,
         timeout: int = 15,
-        user_agent: Optional[str] = None
+        user_agent: Optional[str] = None,
+        session_id: Optional[str] = None
     ) -> Tuple[bool, Optional[SolutionModel]]:
         # Only rotate the TLS/UA pair when the caller didn't pin a specific
         # User-Agent - an explicit user_agent means the caller wants control,
@@ -148,7 +158,12 @@ class FastTLSEngine:
             impersonate_target, active_ua = self._profile_for_domain(url)
 
         domain = self._normalize_domain(url)
-        pool_key = f"{domain}:{impersonate_target}:{proxy or ''}"
+        # Include the caller's FlareSolverr session id in the pool key - the
+        # pooled AsyncSession carries its own persistent cookie jar, so two
+        # concurrent callers hitting the same domain under different (or no)
+        # session ids must not share one jar and bleed cookies into each
+        # other's requests/responses.
+        pool_key = f"{domain}:{impersonate_target}:{proxy or ''}:{session_id or ''}"
 
         cookie_dict = {}
         if cookies:
@@ -281,7 +296,14 @@ class FastTLSEngine:
                 logger.info(f"[FastTLS] Direct HTTP response received (HTTP Status: {resp.status_code}, Length: {len(resp.text)} bytes)")
 
             captured_cookies: List[CookieModel] = []
-            parsed_req_url = urlparse(url)
+            # Use the actual responding URL (post-redirect-chain), not the
+            # original request `url` - a redirect chain that crosses domains
+            # would otherwise tag cookies set by the real responding domain
+            # under the original domain, poisoning the shared cache for every
+            # future request to that original domain (see cookies.py's
+            # extract_captured_cookies on the browser tier, which reads the
+            # real domain via Playwright and doesn't have this problem).
+            parsed_req_url = urlparse(str(resp.url))
             cookie_domain = parsed_req_url.netloc.split(":")[0].lstrip(".")
             for name, val in resp.cookies.items():
                 captured_cookies.append(

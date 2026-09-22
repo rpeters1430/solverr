@@ -68,8 +68,14 @@ class CamoufoxPool:
         inst.uses += 1
         return inst
 
-    async def release(self, inst: _PooledCamoufox):
-        if self._should_recycle(inst):
+    async def release(self, inst: _PooledCamoufox, force_recycle: bool = False):
+        """`force_recycle` lets a caller that just observed this instance
+        fail in a way that looks process-level (e.g. new_context()/new_page()
+        raised before a solve even started) force it out of rotation
+        immediately, instead of waiting for its normal use/age-based
+        recycle threshold - otherwise a crashed/wedged Firefox process keeps
+        getting silently re-queued and handed to the next acquire()."""
+        if force_recycle or self._should_recycle(inst):
             self.recycles_total += 1
             self._all_instances.discard(inst)
             await self._close_instance(inst)

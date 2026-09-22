@@ -189,6 +189,10 @@ class Settings:
     # to avoid repeating TLS/HTTP2 handshakes on recurring indexer queries.
     FAST_TLS_POOL_ENABLED: bool = os.getenv("FAST_TLS_POOL_ENABLED", "true").lower() in ("true", "1", "yes")
     FAST_TLS_POOL_SIZE: int = int(os.getenv("FAST_TLS_POOL_SIZE", "50"))
+    # Cap on FastTLSEngine's per-domain adaptive TLS-profile score tracking
+    # (record_outcome/_profile_for_domain) - without a bound this dict grows
+    # for the life of the process, one entry per distinct domain ever seen.
+    MAX_FAST_TLS_DOMAIN_SCORES: int = int(os.getenv("MAX_FAST_TLS_DOMAIN_SCORES", "2000"))
 
     # MCP (Model Context Protocol) server: exposes solving/scraping as tools
     # an AI agent can call directly, mounted at /mcp alongside the existing

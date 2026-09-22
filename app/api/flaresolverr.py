@@ -7,7 +7,7 @@ from app.models.flaresolverr import V1Request, V1Response, ScrapeRequest, Scrape
 from app.solver.engine import solver_engine
 from app.solver.sessions import session_manager
 from app.config import settings
-from app.logging_config import sanitize_proxy_url
+from app.logging_config import sanitize_proxy_url, get_request_id
 
 try:
     from bs4 import BeautifulSoup
@@ -121,9 +121,13 @@ async def flaresolverr_api(req: V1Request):
         except Exception as e:
             elapsed_ms = int(time.time() * 1000) - start_ts
             logger.error(f"Solve request failed after {elapsed_ms}ms for {req.url}: {type(e).__name__} - {str(e)}", exc_info=True)
+            # Never echo raw exception text back to the client - it can carry
+            # internal paths, proxy credentials, or other details from deep in
+            # the solve pipeline. Full detail is already in the server-side
+            # log above, correlated by request_id.
             return V1Response(
                 status="error",
-                message=f"Error solving request: {str(e)}",
+                message=f"Error solving request (request_id: {get_request_id()})",
                 startTimestamp=start_ts,
                 endTimestamp=int(time.time() * 1000),
                 version=settings.VERSION
@@ -213,7 +217,9 @@ async def native_scrape_api(req: ScrapeRequest):
         )
     except Exception as e:
         logger.error(f"[ScrapeAPI] Scrape failed for {req.url}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Scrape failed: {str(e)}")
+        # See the /v1 handler above: raw exception text can carry internal
+        # paths or proxy credentials, so it never goes back to the client.
+        raise HTTPException(status_code=500, detail=f"Scrape failed (request_id: {get_request_id()})")
 
 @router.get("/proxy")
 @router.post("/proxy")
@@ -289,4 +295,7 @@ async def transparent_proxy(request: FastAPIRequest, url: Optional[str] = None):
                     pass
         return response
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Proxy error solving '{target_url}': {e}")
+        logger.error(f"[ProxyAPI] Proxy error solving '{target_url}': {e}", exc_info=True)
+        # See the /v1 handler above: raw exception text can carry internal
+        # paths or proxy credentials, so it never goes back to the client.
+        raise HTTPException(status_code=500, detail=f"Proxy error solving target url (request_id: {get_request_id()})")
