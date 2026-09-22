@@ -111,6 +111,26 @@ class TestFastTLSChallengeDetection(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sol.status, 200)
             self.assertEqual(len(sol.cookies), 1)
 
+    async def test_api_json_response_not_marked_as_challenge(self):
+        from unittest.mock import AsyncMock, patch, MagicMock
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = '{"akamai_fingerprint": "1:65536;2:0;4:1310", "status": "ok"}'
+        mock_resp.headers = {"content-type": "application/json"}
+        mock_resp.cookies = {}
+        mock_resp.url = "https://tls.peet.ws/api/all"
+
+        mock_session = AsyncMock()
+        mock_session.get = AsyncMock(return_value=mock_resp)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("app.solver.fast_tls.AsyncSession", return_value=mock_session):
+            engine = FastTLSEngine()
+            is_challenge, sol = await engine.request("https://tls.peet.ws/api/all")
+            self.assertFalse(is_challenge)
+            self.assertEqual(sol.status, 200)
+
 
 class TestFastTLSSessionPool(unittest.IsolatedAsyncioTestCase):
     async def test_session_reused_across_requests_for_same_domain(self):
@@ -137,7 +157,7 @@ class TestFastTLSSessionPool(unittest.IsolatedAsyncioTestCase):
             self.assertIn("example.com", list(engine._sessions.keys())[0])
 
     async def test_session_evicted_on_failure(self):
-        from unittest.mock import AsyncMock, patch, MagicMock
+        from unittest.mock import AsyncMock, patch
         mock_session = AsyncMock()
         mock_session.get = AsyncMock(side_effect=RuntimeError("Connection reset"))
         mock_session.close = AsyncMock()

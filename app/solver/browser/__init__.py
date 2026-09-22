@@ -23,8 +23,10 @@ from app.solver.browser.challenges import (
     CHALLENGE_MARKERS,
     AGE_GATE_MARKERS,
     CHALLENGE_TITLE_MARKERS,
+    BROWSER_ERROR_TITLES,
     detect_challenge,
     is_challenge_title,
+    is_browser_error,
     has_age_gate_marker,
 )
 from app.solver.browser.captcha import (
@@ -47,8 +49,10 @@ __all__ = [
     "CHALLENGE_MARKERS",
     "AGE_GATE_MARKERS",
     "CHALLENGE_TITLE_MARKERS",
+    "BROWSER_ERROR_TITLES",
     "detect_challenge",
     "is_challenge_title",
+    "is_browser_error",
     "has_age_gate_marker",
     "CAPTCHA_SOLVER_WIDGETS",
     "extract_sitekey",

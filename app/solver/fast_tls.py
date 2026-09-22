@@ -233,30 +233,45 @@ class FastTLSEngine:
             matched_marker = None
             body_text = resp.text or ""
             body_lower = body_text.lower()
+            content_type = (resp.headers.get("content-type") or "").lower()
+            is_non_html_api = any(
+                ct in content_type for ct in [
+                    "application/json",
+                    "application/problem+json",
+                    "text/plain",
+                    "application/xml",
+                    "text/xml",
+                    "application/octet-stream",
+                ]
+            )
 
-            # Extract title tag if present
-            title_match = re.search(r"<title[^>]*>(.*?)</title>", body_text, re.IGNORECASE | re.DOTALL)
-            page_title = title_match.group(1).strip() if title_match else ""
+            if resp.status_code == 200 and is_non_html_api:
+                # A 200 OK API response (JSON, XML, plain text) is never an HTML anti-bot challenge interstitial
+                is_cf_challenge = False
+            else:
+                # Extract title tag if present
+                title_match = re.search(r"<title[^>]*>(.*?)</title>", body_text, re.IGNORECASE | re.DOTALL)
+                page_title = title_match.group(1).strip() if title_match else ""
 
-            detected_challenge = detect_challenge(page_title, body_lower, check_content=True)
+                detected_challenge = detect_challenge(page_title, body_lower, check_content=True)
 
-            embedded_script_markers = [
-                "challenges.cloudflare.com", "cf-challenge", "turnstile.min.js",
-                "check.ddos-guard.net", "geo.captcha-delivery.com"
-            ]
+                embedded_script_markers = [
+                    "challenges.cloudflare.com", "cf-challenge", "turnstile.min.js",
+                    "check.ddos-guard.net", "geo.captcha-delivery.com"
+                ]
 
-            if detected_challenge:
-                is_cf_challenge = True
-                matched_marker = detected_challenge
-            elif is_challenge_title(page_title):
-                is_cf_challenge = True
-                matched_marker = "challenge_title"
-            elif resp.status_code in [403, 429, 503]:
-                is_cf_challenge = True
-                matched_marker = f"http_{resp.status_code}"
-            elif any(marker in body_lower for marker in embedded_script_markers):
-                is_cf_challenge = True
-                matched_marker = "embedded_challenge_script"
+                if detected_challenge:
+                    is_cf_challenge = True
+                    matched_marker = detected_challenge
+                elif is_challenge_title(page_title):
+                    is_cf_challenge = True
+                    matched_marker = "challenge_title"
+                elif resp.status_code in [403, 429, 503]:
+                    is_cf_challenge = True
+                    matched_marker = f"http_{resp.status_code}"
+                elif any(marker in body_lower for marker in embedded_script_markers):
+                    is_cf_challenge = True
+                    matched_marker = "embedded_challenge_script"
 
             if is_cf_challenge:
                 self.record_outcome(url, impersonate_target, False)

@@ -11,7 +11,12 @@ from app.solver.captcha_solver import captcha_solver
 from app.logging_config import sanitize_proxy_url
 
 from app.solver.browser.pool import CamoufoxPool, CAMOUFOX_AVAILABLE
-from app.solver.browser.challenges import detect_challenge, is_challenge_title, has_age_gate_marker
+from app.solver.browser.challenges import (
+    detect_challenge,
+    is_challenge_title,
+    has_age_gate_marker,
+    is_browser_error,
+)
 from app.solver.browser.captcha import CAPTCHA_SOLVER_WIDGETS, try_captcha_solver_escalation
 from app.solver.browser.cookies import build_playwright_cookies, read_context_cookies, extract_captured_cookies
 from app.solver.browser.navigation import install_media_blocking, navigate_to_target
@@ -402,6 +407,11 @@ class BrowserPool:
             except Exception:
                 title = ""
 
+            curr_url = page.url or ""
+            if is_browser_error(title, curr_url):
+                logger.warning(f"[BrowserPool] Browser error page encountered: '{title}' ({curr_url})")
+                break
+
             content = ""
             if check_content:
                 try:
@@ -415,8 +425,39 @@ class BrowserPool:
             if active_challenge:
                 last_detected_challenge = active_challenge
 
-            # Check if page is clean and ready
-            if not is_challenge_title(title) and not active_challenge:
+            # Check if challenge is cleared:
+            # 1. Normal clean page (no challenge title, and no challenge detected)
+            # 2. Challenge was detected, but clearance cookie (cf_clearance, aws-waf-token) is present
+            # 3. Challenge was detected on an embedded widget/form, but response token is populated
+            challenge_cleared = False
+            if not is_challenge_title(title):
+                if not active_challenge:
+                    challenge_cleared = True
+                elif check_content:
+                    try:
+                        raw_cookies = await read_context_cookies(context)
+                        if any(c.get("name") in ("cf_clearance", "aws-waf-token") for c in raw_cookies):
+                            challenge_cleared = True
+                    except Exception:
+                        pass
+
+                    if not challenge_cleared:
+                        try:
+                            widget_solved = await page.evaluate("""() => {
+                                const ts = document.querySelector('[name="cf-turnstile-response"], input[name*="turnstile-response"]');
+                                if (ts && ts.value && ts.value.length > 10) return true;
+                                const rc = document.querySelector('[name="g-recaptcha-response"]');
+                                if (rc && rc.value && rc.value.length > 10) return true;
+                                const hc = document.querySelector('[name="h-captcha-response"]');
+                                if (hc && hc.value && hc.value.length > 10) return true;
+                                return false;
+                            }""")
+                            if widget_solved:
+                                challenge_cleared = True
+                        except Exception:
+                            pass
+
+            if challenge_cleared:
                 # Ensure the page has actually navigated and the body has arrived (avoid mid-redirect hollow snapshots)
                 page_ready = False
                 if title and title.strip():
@@ -535,7 +576,9 @@ class BrowserPool:
         # every redirect/reload of the challenge flow. Fall back to the
         # initial navigation response, then a generic guess only if neither
         # is available.
-        if last_main_status["code"] is not None:
+        if is_browser_error(final_title, final_url):
+            status_code = 502
+        elif last_main_status["code"] is not None:
             status_code = last_main_status["code"]
         elif response:
             status_code = response.status

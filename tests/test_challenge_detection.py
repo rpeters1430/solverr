@@ -1,5 +1,10 @@
 import unittest
-from app.solver.browser import detect_challenge, is_challenge_title, has_age_gate_marker
+from app.solver.browser import (
+    detect_challenge,
+    is_challenge_title,
+    has_age_gate_marker,
+    is_browser_error,
+)
 
 
 class TestChallengeDetection(unittest.TestCase):
@@ -47,6 +52,26 @@ class TestChallengeDetection(unittest.TestCase):
         self.assertFalse(is_challenge_title("Welcome to my site"))
         self.assertFalse(is_challenge_title(""))
 
+    def test_legitimate_pages_with_cloudflare_in_title_are_not_challenge_titles(self):
+        # Titles mentioning "Cloudflare" in legitimate contexts must not trigger challenge loops
+        self.assertFalse(is_challenge_title("Home – Cloudflare Tools"))
+        self.assertFalse(is_challenge_title("Cloudflare Turnstile demo: Sample Form with Cloudflare Turnstile"))
+        self.assertFalse(is_challenge_title("Cloudflare - Wikipedia"))
+        self.assertFalse(is_challenge_title("What is Cloudflare? | Cloudflare Learning"))
+
+    def test_bare_turnstile_in_text_does_not_trigger_challenge(self):
+        self.assertIsNone(detect_challenge("News", "The subway turnstile was broken today", check_content=True))
+
+    def test_turnstile_cf_turnstile_class_triggers_challenge(self):
+        self.assertEqual(detect_challenge("Login", "<div class='cf-turnstile'></div>", check_content=True), "cloudflare_turnstile")
+        self.assertEqual(
+            detect_challenge("Login", "<script src='https://challenges.cloudflare.com/turnstile/v0/api.js'></script>", check_content=True),
+            "cloudflare_turnstile"
+        )
+
+    def test_bare_akamai_in_json_text_does_not_trigger_challenge(self):
+        self.assertIsNone(detect_challenge("", '{"akamai_fingerprint": "1:65536;2:0"}', check_content=True))
+
     def test_cloudflare_loading_redirect_title_is_still_a_challenge(self):
         # Cloudflare shows "Loading <target-url>" as a transitional title
         # while its JS challenge finishes and window.location redirects -
@@ -65,6 +90,16 @@ class TestChallengeDetection(unittest.TestCase):
         self.assertFalse(has_age_gate_marker(content_lower, check_content=False))
         self.assertTrue(has_age_gate_marker(content_lower, check_content=True))
         self.assertFalse(has_age_gate_marker("nothing interesting here", check_content=True))
+
+    def test_is_browser_error(self):
+        self.assertTrue(is_browser_error("Problem loading page", "https://torrentgalaxy.to"))
+        self.assertTrue(is_browser_error("Warning: Security Risk Ahead", "https://nyaa.si"))
+        self.assertTrue(is_browser_error("Server Not Found", "https://example.com"))
+        self.assertTrue(is_browser_error("Address Not Found", "https://example.com"))
+        self.assertTrue(is_browser_error("Anything", "about:neterror?e=dnsNotFound"))
+        self.assertTrue(is_browser_error("Anything", "about:certerror?e=nssBadCert"))
+        self.assertFalse(is_browser_error("Search results - Example Indexer", "https://example.com"))
+        self.assertFalse(is_browser_error("Home", "https://cloudflare.manfredi.io/"))
 
 
 if __name__ == "__main__":
