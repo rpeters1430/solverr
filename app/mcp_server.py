@@ -1,4 +1,4 @@
-"""MCP server mounted at /mcp, exposing Solverr's solver as agent tools.
+"""MCP server optionally mounted at /mcp, exposing Solverr's solver as agent tools.
 
 Tools share the HTTP routes' singletons, so MCP solves appear in /metrics and the dashboard.
 """
