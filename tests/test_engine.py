@@ -153,6 +153,33 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(successes), 4)
             self.assertTrue(all(r.status == 200 for r in successes))
 
+    async def test_cancelling_owner_releases_coalesced_waiters(self):
+        import asyncio
+
+        async def slow_browser_solve(*args, **kwargs):
+            await asyncio.sleep(5)
+            return _sol(200)
+
+        with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock(side_effect=slow_browser_solve)):
+            req = V1Request(cmd="request.get", url="https://example.com/cancel-releases-waiters")
+            owner_task = asyncio.create_task(self.engine.process_request(req))
+            await asyncio.sleep(0.01)  # let the owner install its in-flight future
+            joiner_task = asyncio.create_task(self.engine.process_request(req))
+            await asyncio.sleep(0.01)  # let the joiner coalesce onto it
+
+            owner_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await owner_task
+
+            # A coalesced waiter must be released (not hang forever) once
+            # the owner it's shielded onto is cancelled - previously the
+            # `finally` block popped the still-pending future without
+            # cancelling it, leaving joiners blocked indefinitely.
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(joiner_task), timeout=1)
+            joiner_task.cancel()
+
     async def test_cookie_merge_keys_by_domain_path_name_not_name_alone(self):
         input_cookie = _cookie("session", "input-value", domain="other.example.com")
         cached_cookie = _cookie("session", "cached-value", domain="example.com")

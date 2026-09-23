@@ -41,8 +41,12 @@ class FastTLSEngine:
         self.rotate = getattr(settings, "FAST_TLS_ROTATE", True)
         self.profiles = FIREFOX_PROFILES if self.impersonate_target.startswith("firefox") else CHROME_PROFILES
         self._domain_scores: "OrderedDict[str, Dict[str, int]]" = OrderedDict()
-        self._max_domain_scores: int = getattr(settings, "MAX_FAST_TLS_DOMAIN_SCORES", 2000)
-        self._sessions: Dict[str, AsyncSession] = {}
+        # Clamp to at least 1 - a non-positive value would make the eviction
+        # check in record_outcome() always true, causing popitem(last=False)
+        # to raise KeyError on the still-empty mapping on the very first
+        # new domain seen.
+        self._max_domain_scores: int = max(1, getattr(settings, "MAX_FAST_TLS_DOMAIN_SCORES", 2000))
+        self._sessions: Dict[Tuple[str, str, str, str], AsyncSession] = {}
         self._pool_enabled: bool = getattr(settings, "FAST_TLS_POOL_ENABLED", True)
         self._pool_size: int = getattr(settings, "FAST_TLS_POOL_SIZE", 50)
         self._lock = asyncio.Lock()
@@ -53,6 +57,30 @@ class FastTLSEngine:
         else:
             domain = url.split("/")[0].split(":")[0].lower()
         return domain.lstrip(".")
+
+    def _select_cookies_for_url(self, cookies: Optional[List[CookieModel]], url: str) -> Dict[str, str]:
+        """Collapse identity-distinct cookies (domain+path+name) to the flat
+        name->value mapping curl_cffi's `cookies` kwarg accepts for a single
+        request, applying standard cookie-matching rules (domain suffix,
+        path prefix) rather than letting same-name cookies from unrelated
+        domains/paths silently overwrite each other by insertion order.
+        """
+        if not cookies:
+            return {}
+        target_domain = self._normalize_domain(url)
+        target_path = urlparse(url).path or "/"
+        best: Dict[str, Tuple[str, str]] = {}  # name -> (path, value), keeping the most specific path
+        for c in cookies:
+            cookie_domain = (c.domain or "").lstrip(".").lower()
+            if cookie_domain and cookie_domain != target_domain and not target_domain.endswith("." + cookie_domain):
+                continue
+            cookie_path = c.path or "/"
+            if not (target_path == cookie_path or target_path.startswith(cookie_path.rstrip("/") + "/") or cookie_path == "/"):
+                continue
+            existing = best.get(c.name)
+            if existing is None or len(cookie_path) >= len(existing[0]):
+                best[c.name] = (cookie_path, c.value)
+        return {name: value for name, (_, value) in best.items()}
 
     def record_outcome(self, url: str, profile_target: str, success: bool):
         """Track success/failure per-domain profile to adaptively pick optimal TLS profiles."""
@@ -90,7 +118,7 @@ class FastTLSEngine:
         idx = zlib.crc32(domain.encode("utf-8")) % len(valid_profiles)
         return valid_profiles[idx]
 
-    async def _get_session(self, pool_key: str, impersonate_target: str) -> AsyncSession:
+    async def _get_session(self, pool_key: Tuple[str, str, str, str], impersonate_target: str) -> AsyncSession:
         if not self._pool_enabled:
             return AsyncSession(impersonate=impersonate_target)
         async with self._lock:
@@ -108,7 +136,7 @@ class FastTLSEngine:
             self._sessions[pool_key] = sess
             return sess
 
-    async def _evict_session(self, pool_key: str):
+    async def _evict_session(self, pool_key: Tuple[str, str, str, str]):
         if not self._pool_enabled:
             return
         async with self._lock:
@@ -150,13 +178,16 @@ class FastTLSEngine:
             impersonate_target, active_ua = self._profile_for_domain(url)
 
         domain = self._normalize_domain(url)
-        # Each pooled session has its own cookie jar, so the session id keys it to prevent cookie bleed.
-        pool_key = f"{domain}:{impersonate_target}:{proxy or ''}:{session_id or ''}"
+        # Include the caller's FlareSolverr session id in the pool key - the
+        # pooled AsyncSession carries its own persistent cookie jar, so two
+        # concurrent callers hitting the same domain under different (or no)
+        # session ids must not share one jar and bleed cookies into each
+        # other's requests/responses. A tuple key (rather than colon-joined
+        # string) avoids ambiguous collisions between fields that can
+        # themselves contain colons (e.g. a proxy URL's port).
+        pool_key = (domain, impersonate_target, proxy or "", session_id or "")
 
-        cookie_dict = {}
-        if cookies:
-            for c in cookies:
-                cookie_dict[c.name] = c.value
+        cookie_dict = self._select_cookies_for_url(cookies, url)
 
         req_headers = {
             "User-Agent": active_ua,

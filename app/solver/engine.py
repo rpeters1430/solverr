@@ -226,6 +226,13 @@ class HybridSolverEngine:
             if not future.done():
                 future.set_result(res)
             return res
+        except asyncio.CancelledError:
+            # A cancelled owner task must still release any waiters shielded
+            # onto this future via asyncio.shield(existing) above - otherwise
+            # they block forever on a future nothing will ever resolve.
+            if not future.done():
+                future.cancel()
+            raise
         except Exception as e:
             if not future.done():
                 future.set_exception(e)
