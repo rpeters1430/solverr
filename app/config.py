@@ -117,7 +117,7 @@ class Settings:
     # Match timezone/locale/geolocation to the proxy's exit IP; costs one extra request per launch.
     CAMOUFOX_GEOIP_ON_PROXY: bool = os.getenv("CAMOUFOX_GEOIP_ON_PROXY", "true").lower() in ("true", "1", "yes")
 
-    # When set, every endpoint except /health and /metrics requires a matching X-Api-Key.
+# When set, all routes except health checks, /static/*, /favicon.ico, and /metrics unless METRICS_REQUIRE_AUTH=true require X-Api-Key or Authorization: Bearer.
     API_KEY: Optional[str] = os.getenv("API_KEY", None)
 
     # Off by default because typical Prometheus scrapers send no auth headers.
