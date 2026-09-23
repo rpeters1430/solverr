@@ -5,13 +5,8 @@ import psutil
 
 
 def _cgroup_memory_limit_bytes() -> Optional[int]:
-    """Effective container memory limit, cgroup v2 first then v1. `psutil`
-    reports host-level RAM even inside a container (it reads /proc/meminfo,
-    which isn't namespaced), which overstates what a memory-limited
-    container (`docker run --memory=`, or a Kubernetes/Compose limit) can
-    actually use - so auto-tuning worker count off host RAM alone can size
-    up a pool the container will get OOM-killed for. Returns None when
-    unlimited or undetectable, so callers fall back to host-level info."""
+    """Container memory limit (cgroup v2, then v1), or None if unlimited.
+    psutil reads /proc/meminfo, which reports host RAM inside a container."""
     for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
         try:
             with open(path) as f:
@@ -26,9 +21,8 @@ def _cgroup_memory_limit_bytes() -> Optional[int]:
 
 
 def _cgroup_cpu_limit() -> Optional[float]:
-    """Effective container CPU quota (fractional cores), cgroup v2 first
-    then v1. Same rationale as _cgroup_memory_limit_bytes: os.cpu_count()
-    reports host cores even under a `--cpus=` limit."""
+    """Container CPU quota in cores (cgroup v2, then v1), or None.
+    os.cpu_count() reports host cores even under `--cpus=`."""
     try:
         with open("/sys/fs/cgroup/cpu.max") as f:
             quota_str, period_str = f.read().split()
@@ -50,11 +44,9 @@ def _cgroup_cpu_limit() -> Optional[float]:
 
 class Settings:
     PORT: int = int(os.getenv("PORT", "8191"))
-    # Default bind-all interface for container deployments.
     HOST: str = os.getenv("HOST", "0.0.0.0")  # nosec B104
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
-    # Hardware & CPU Info - cgroup limit (container) if present, else host.
     _cgroup_cpus: Optional[float] = _cgroup_cpu_limit()
     _cgroup_mem_bytes: Optional[int] = _cgroup_memory_limit_bytes()
 
@@ -64,17 +56,10 @@ class Settings:
         else (round(psutil.virtual_memory().total / (1024**3), 1) if hasattr(psutil, "virtual_memory") else 8.0)
     )
 
-    # NAS Mode: When enabled (default in docker-compose.yml for NAS deployments),
-    # caps auto workers to a conservative 2-3 instances so Solverr never
-    # competes with media transcode pipelines (Plex/Jellyfin) or NAS caches.
+    # Caps auto workers low so Solverr doesn't starve Plex/Jellyfin transcodes on a NAS.
     NAS_MODE: bool = os.getenv("NAS_MODE", "false").lower() in ("true", "1", "yes")
 
-    # Worker Auto-Tuning: "auto" or 0 calculates based on effective CPU cores
-    # (host, or the container's cgroup CPU quota when lower) - min 1, max 16
-    # - then clamps to what effective RAM can actually support. Each worker
-    # is a warm Camoufox (Firefox) process - budget ~1GB/worker (or 2GB/worker in NAS_MODE)
-    # and always leave ~2GB of RAM for the OS, the container runtime, and any other
-    # services (Sonarr/Radarr/Prowlarr, etc.) sharing the box.
+    # "auto"/0 sizes workers by CPU cores (1-16), then clamps to the RAM left after the reserve.
     RAM_PER_WORKER_GB: float = float(os.getenv("RAM_PER_WORKER_GB", "2.0" if NAS_MODE else "1.0"))
     RAM_RESERVED_GB: float = float(os.getenv("RAM_RESERVED_GB", "2.0"))
 
@@ -104,117 +89,69 @@ class Settings:
     ENABLE_FAST_TLS: bool = os.getenv("ENABLE_FAST_TLS", "true").lower() in ("true", "1", "yes")
     FALLBACK_PROXY_URL: Optional[str] = os.getenv("FALLBACK_PROXY_URL", None)
     
-    # Caching: Dual-Mode (Disk JSON + Optional Redis)
     REDIS_URL: Optional[str] = os.getenv("REDIS_URL", None)
     COOKIE_CACHE_PERSISTENT: bool = os.getenv("COOKIE_CACHE_PERSISTENT", "true").lower() in ("true", "1", "yes")
     COOKIE_CACHE_TTL: int = int(os.getenv("COOKIE_CACHE_TTL", "7200"))
     CACHE_FILE: str = os.getenv("CACHE_FILE", "data/cookies_cache.json")
 
-    # Local in-memory/disk cache bounds - a caller hammering many distinct
-    # domains/cookies (or sessions) shouldn't be able to grow these
-    # unboundedly. Only enforced for the non-Redis (local) backends; Redis
-    # already has its own TTL-based expiry (COOKIE_CACHE_TTL / session ttl).
+    # Local-backend bounds only; Redis relies on TTL expiry instead.
     MAX_CACHE_DOMAINS: int = int(os.getenv("MAX_CACHE_DOMAINS", "1000"))
     MAX_COOKIES_PER_DOMAIN: int = int(os.getenv("MAX_COOKIES_PER_DOMAIN", "100"))
     MAX_SESSIONS: int = int(os.getenv("MAX_SESSIONS", "500"))
     
-    # Impersonation & User-Agent - Firefox profile, matching Camoufox's
-    # Firefox-based fingerprint (the only browser engine Solverr launches).
-    # NOTE: target and UA must be for the *same* browser version - a JA3/JA4
-    # fingerprint claiming Firefox 147 next to a "Firefox/135.0" UA header is
-    # itself a mismatch signal that WAFs can key off. Keep these in sync, or
-    # rely on FAST_TLS_ROTATE (app/solver/fast_tls.py) to pick a matched pair.
+    # Target and UA must name the same Firefox version; a TLS/UA mismatch is a WAF signal.
     FAST_TLS_TARGET: str = os.getenv("FAST_TLS_TARGET", "firefox147")
     DEFAULT_USER_AGENT: str = os.getenv(
         "DEFAULT_USER_AGENT",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0"
     )
-    # Rotate the TLS/UA pair per-domain (sticky) across a small pool of
-    # matched profiles in the configured target's browser family, instead of
-    # presenting one fixed fingerprint to every site this instance touches.
+    # Sticky per-domain choice among matched TLS/UA profiles, instead of one fixed fingerprint.
     FAST_TLS_ROTATE: bool = os.getenv("FAST_TLS_ROTATE", "true").lower() in ("true", "1", "yes")
 
-    # Camoufox stealth-browser pool tuning: keep warm browser processes
-    # around instead of spawning a fresh one per solve. Instances are
-    # recycled after N uses or N seconds to bound fingerprint reuse and
-    # memory growth. A request carrying its own proxy always gets a
-    # dedicated ephemeral instance (proxy/geo/fingerprint must line up).
+    # Warm Camoufox processes, recycled to bound fingerprint reuse and memory growth.
+    # Requests with their own proxy always bypass the pool.
     CAMOUFOX_POOL_ENABLED: bool = os.getenv("CAMOUFOX_POOL_ENABLED", "true").lower() in ("true", "1", "yes")
     CAMOUFOX_POOL_RECYCLE_USES: int = int(os.getenv("CAMOUFOX_POOL_RECYCLE_USES", "40"))
     CAMOUFOX_POOL_RECYCLE_SECONDS: int = int(os.getenv("CAMOUFOX_POOL_RECYCLE_SECONDS", "1800"))
 
-    # When a request carries its own proxy (or Tier 4 fallback-proxy
-    # escalation kicks in), have Camoufox derive timezone/locale/geolocation/
-    # WebRTC-visible IP from that proxy's actual exit IP (Camoufox's built-in
-    # `geoip` launch option) instead of leaving them at the container's real
-    # location. A proxy IP in one country next to a browser reporting another
-    # timezone/locale is exactly the kind of mismatch WAFs like DataDome/
-    # Akamai fingerprint on. Costs one extra request through the proxy at
-    # launch time to resolve the exit IP; disable if that latency matters
-    # more than the fingerprint consistency.
+    # Match timezone/locale/geolocation to the proxy's exit IP; costs one extra request per launch.
     CAMOUFOX_GEOIP_ON_PROXY: bool = os.getenv("CAMOUFOX_GEOIP_ON_PROXY", "true").lower() in ("true", "1", "yes")
 
-    # Optional API key auth. When set, all endpoints except /health and
-    # /metrics require an `X-Api-Key` header matching this value.
+# When set, all routes except health checks, /static/*, /favicon.ico, and /metrics unless METRICS_REQUIRE_AUTH=true require X-Api-Key or Authorization: Bearer.
     API_KEY: Optional[str] = os.getenv("API_KEY", None)
 
-    # Gate /metrics behind the same X-Api-Key auth as everything else.
-    # Defaults to open (matches prior behavior / typical Prometheus scrape
-    # setups that don't send auth headers) - set true for exposed deployments.
+    # Off by default because typical Prometheus scrapers send no auth headers.
     METRICS_REQUIRE_AUTH: bool = os.getenv("METRICS_REQUIRE_AUTH", "false").lower() in ("true", "1", "yes")
 
-    # SSRF protection: initial targets, redirects, and browser subresources
-    # are validated before access so a public page cannot trampoline into
-    # internal/loopback services or cloud metadata endpoints.
+    # SSRF protection covers initial targets, redirects, and browser subresources.
     ALLOW_PRIVATE_NETWORKS: bool = os.getenv("ALLOW_PRIVATE_NETWORKS", "false").lower() in ("true", "1", "yes")
     ALLOWED_HOSTS: set = {h.strip().lower() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()}
     DENIED_HOSTS: set = {h.strip().lower() for h in os.getenv("DENIED_HOSTS", "").split(",") if h.strip()}
 
-    # Request/response size limits (MB). None/0 disables the check.
+    # Size limits in MB; 0 disables the check.
     MAX_REQUEST_BODY_MB: float = float(os.getenv("MAX_REQUEST_BODY_MB", "10"))
     MAX_RESPONSE_BODY_MB: float = float(os.getenv("MAX_RESPONSE_BODY_MB", "50"))
     MAX_SCREENSHOT_MB: float = float(os.getenv("MAX_SCREENSHOT_MB", "8"))
 
-    # Optional paid captcha-solving service (2Captcha-protocol compatible)
-    # used as a last-resort escalation for interactive image challenges
-    # (hCaptcha puzzle grids, reCAPTCHA image selection) that the free
-    # click-based solver in app/solver/browser.py can't clear on its own.
-    # Unset by default - no network calls happen unless an API key is set.
+    # Paid 2Captcha-compatible fallback for image challenges clicks can't clear. Off without a key.
     CAPTCHA_SOLVER_API_KEY: Optional[str] = os.getenv("CAPTCHA_SOLVER_API_KEY", None)
     CAPTCHA_SOLVER_BASE_URL: str = os.getenv("CAPTCHA_SOLVER_BASE_URL", "https://2captcha.com")
     CAPTCHA_SOLVER_TIMEOUT: int = int(os.getenv("CAPTCHA_SOLVER_TIMEOUT", "120"))
     CAPTCHA_SOLVER_POLL_INTERVAL: int = int(os.getenv("CAPTCHA_SOLVER_POLL_INTERVAL", "5"))
 
-    # Fast TLS connection pool: Reuses curl_cffi AsyncSessions per (domain, target, proxy)
-    # to avoid repeating TLS/HTTP2 handshakes on recurring indexer queries.
+    # Reuse curl_cffi sessions per (domain, target, proxy) to skip repeat TLS handshakes.
     FAST_TLS_POOL_ENABLED: bool = os.getenv("FAST_TLS_POOL_ENABLED", "true").lower() in ("true", "1", "yes")
     FAST_TLS_POOL_SIZE: int = int(os.getenv("FAST_TLS_POOL_SIZE", "50"))
-    # Cap on FastTLSEngine's per-domain adaptive TLS-profile score tracking
-    # (record_outcome/_profile_for_domain) - without a bound this dict grows
-    # for the life of the process, one entry per distinct domain ever seen.
+    # Bounds the per-domain TLS profile score dict, which otherwise grows forever.
     MAX_FAST_TLS_DOMAIN_SCORES: int = int(os.getenv("MAX_FAST_TLS_DOMAIN_SCORES", "2000"))
 
-    # MCP (Model Context Protocol) server: exposes solving/scraping as tools
-    # an AI agent can call directly, mounted at /mcp alongside the existing
-    # FlareSolverr/native HTTP API. Subject to the same X-Api-Key gate as the
-    # rest of the API when API_KEY is set (see app/main.py's middleware).
     ENABLE_MCP: bool = os.getenv("ENABLE_MCP", "true").lower() in ("true", "1", "yes")
-    # Extra Host/Origin values the MCP endpoint accepts beyond localhost,
-    # when API_KEY is NOT set. See app/mcp_server.py's create_mcp_asgi_app:
-    # with no API_KEY, the MCP SDK's DNS-rebinding/Host-header check is the
-    # only thing standing between an arbitrary webpage and tools like
-    # solverr_get_cookies, so it stays on and localhost-only by default
-    # rather than disabled outright. Comma-separated; MCP_ALLOWED_HOSTS
-    # entries are "host:port" or "host:*" (e.g. "my-nas.local:8191"),
-    # MCP_ALLOWED_ORIGINS are full origins (e.g. "http://my-nas.local:8191").
-    # Both are ignored once API_KEY is set, since a shared secret is a much
-    # stronger gate than a Host header.
+    # Without API_KEY, the Host/Origin check is MCP's only DNS-rebinding guard, so it defaults to localhost.
+    # Hosts are "host:port" or "host:*"; origins are full URLs. Both are ignored once API_KEY is set.
     MCP_ALLOWED_HOSTS: List[str] = [h.strip() for h in os.getenv("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
     MCP_ALLOWED_ORIGINS: List[str] = [o.strip() for o in os.getenv("MCP_ALLOWED_ORIGINS", "").split(",") if o.strip()]
 
-    # API Version - plain semver, no "v" prefix or edition suffix baked in, so
-    # it can be embedded directly (e.g. "vX.Y.Z" or "X.Y.Z-ultra" strings
-    # elsewhere would otherwise double up the prefix/suffix).
+    # Plain semver, no "v" prefix or edition suffix, so callers can add their own.
     VERSION: str = "1.7.0"
     EDITION: str = "ultra"
     DISPLAY_VERSION: str = f"{VERSION}-{EDITION}"

@@ -11,14 +11,10 @@ from app.config import settings
 
 logger = logging.getLogger("solverr.cache")
 
-# Minimum interval between disk flushes when running inside an event loop.
-# Rapid successive set_cookies() calls (e.g. many concurrent solves) coalesce
-# into a single write instead of one blocking json.dump() per call.
+# Bursts of set_cookies() within this window coalesce into one disk write.
 DEBOUNCE_SECONDS = 2.0
 
-# Minimum interval between Redis reconnection attempts once the client is
-# down. Without this, a permanently-unreachable Redis would retry (and pay
-# the socket_connect_timeout) on every single cache lookup.
+# Without a cooldown, a dead Redis would cost a connect timeout on every lookup.
 REDIS_RECONNECT_INTERVAL_SECONDS = 30.0
 
 class CookieCache:
@@ -31,8 +27,7 @@ class CookieCache:
         self._write_lock = threading.Lock()
         self._save_pending = False
         self._save_task: Optional[asyncio.Task] = None
-        # Application-facing async wrappers serialize local-store access and
-        # run blocking disk/redis-py operations outside Uvicorn's event loop.
+        # Async wrappers serialize store access and run blocking I/O off the event loop.
         self._async_lock = asyncio.Lock()
         self._domain_count_cache_value = 0
         self._domain_count_cache_at = 0.0
@@ -40,20 +35,11 @@ class CookieCache:
         if self.redis_url:
             self._redis()
         if not self.redis_client:
-            # Either Redis isn't configured, or the initial connection attempt
-            # above failed - fall back to local disk so the process still
-            # functions. If Redis later comes back, _redis() migrates
-            # whatever accumulated here into it (see
-            # _migrate_local_store_to_redis) rather than leaving it stranded.
+            # Local fallback; _redis() migrates it into Redis if Redis comes back.
             self._load_from_disk()
 
     def _redis(self):
-        """Return a live Redis client, retrying the connection on a cooldown
-        if the last attempt failed. Previously a failed connection at
-        __init__ time (e.g. Redis not up yet when this container started,
-        common under `docker compose --profile distributed up`) permanently
-        disabled Redis for the process's entire lifetime - this makes that
-        recoverable without a restart."""
+        """Return a live Redis client, retrying a failed connection on a cooldown."""
         if self.redis_client is not None:
             return self.redis_client
         if not self.redis_url:
@@ -69,41 +55,17 @@ class CookieCache:
             self.redis_client = client
             logger.info(f"[CookieCache] Connected to distributed Redis cache backend at {self.redis_url}")
             self._migrate_local_store_to_redis(client)
-            # _migrate_local_store_to_redis calls _invalidate_redis() (which
-            # clears self.redis_client) if Redis died again mid-migration -
-            # return the current value rather than the now-possibly-stale
-            # `client` reference so a caller never gets back a client this
-            # method has already given up on.
+            # Migration may have invalidated the client, so don't return the stale local.
             return self.redis_client
         except Exception as e:
             logger.warning(f"[CookieCache] Redis connection attempt failed ({e}). Using local disk JSON cache until the next retry.")
             return None
 
     def _migrate_local_store_to_redis(self, client):
-        """Flush cookies accumulated in the local fallback store (written
-        while Redis was unreachable) into Redis now that it's back. Reads go
-        to Redis exclusively once `_redis()` returns a live client (see
-        get_cookies/get_all_entries below), so without this, anything cached
-        locally during the outage would simply stop being served the moment
-        Redis reconnects - not lost from disk, but invisible to callers.
+        """Move cookies cached locally during a Redis outage into Redis, which serves all reads once up.
 
-        Called synchronously from `_redis()`, itself called from the async
-        request path - one blocking call per entry (up to MAX_CACHE_DOMAINS *
-        MAX_COOKIES_PER_DOMAIN of them) would stall the event loop for
-        everyone else for however long that burst takes. A single pipelined
-        batch keeps it to one round trip.
-
-        Each entry keeps the *remaining* portion of its original TTL window
-        (based on its local `timestamp`), not a fresh full COOKIE_CACHE_TTL -
-        otherwise an entry that's nearly (or already) expired locally would
-        get resurrected with a brand new lifetime in Redis. Already-expired
-        entries are dropped without ever going to Redis. If the pipeline
-        itself fails (Redis drops mid-migration), a real connection failure
-        doesn't tell us which queued commands the server actually saw before
-        the connection died - so the whole batch is treated as not migrated,
-        the client is invalidated, and every entry is left in place for the
-        next reconnect to retry (re-sending an already-migrated SET is
-        harmless)."""
+        One pipelined batch, keeping each entry's remaining TTL rather than a fresh one.
+        On failure, everything stays local for the next reconnect; re-sending a SET is harmless."""
         if not self._store:
             return
         now = time.time()
@@ -135,24 +97,16 @@ class CookieCache:
                 logger.warning(f"[CookieCache] Failed to migrate {len(pending)} locally-cached cookie(s) to Redis, will retry on next reconnect: {e}")
                 self._invalidate_redis()
 
-        # Persist the compacted store (expired entries dropped, migrated
-        # ones removed) so the disk fallback doesn't serve stale data if
-        # Redis goes down again before anything else triggers a save.
+        # Persist the compacted store so the disk fallback isn't stale if Redis drops again.
         self._save_to_disk()
 
     def _invalidate_redis(self):
-        """Drop the current client after an operation failure (as opposed to
-        a failed connection attempt in _redis()) so the next call goes
-        through _redis()'s cooldown-gated reconnect instead of retrying a
-        now-dead connection - and paying its socket_connect_timeout - on
-        every single subsequent cache operation."""
+        """Drop the client after a failed operation so reconnects go through _redis()'s cooldown."""
         self.redis_client = None
         self._redis_last_attempt = time.time()
 
     def _cookie_key(self, cookie: CookieModel) -> str:
-        # Identity is domain + path + name, not just name - two cookies with
-        # the same name on different paths of the same domain are distinct
-        # and must not overwrite each other.
+        # Domain is the outer key; path keeps same-name cookies on one domain apart.
         return f"{cookie.name}|{cookie.path or '/'}"
 
     def _normalize_domain(self, domain_or_url: str) -> str:
@@ -164,10 +118,7 @@ class CookieCache:
         return domain.lstrip(".").lower()
 
     def _scan_keys(self, pattern: str) -> List[str]:
-        # SCAN instead of KEYS: KEYS is O(N) over the *entire* keyspace and
-        # blocks the single-threaded Redis server for its whole duration -
-        # fine on a dev box, a real problem on a shared/production Redis
-        # with other tenants. SCAN walks in bounded increments instead.
+        # Never KEYS: it blocks the single-threaded Redis server for the whole keyspace walk.
         return list(self.redis_client.scan_iter(match=pattern, count=200))
 
     def get_cookies(self, url_or_domain: str) -> List[CookieModel]:
@@ -178,7 +129,7 @@ class CookieCache:
         if self._redis():
             try:
                 keys = self._scan_keys(f"solverr:cookie:{target_domain}:*")
-                # Also check wildcard parent domains
+                # Also check the parent domain.
                 parts = target_domain.split(".")
                 if len(parts) > 2:
                     parent_domain = ".".join(parts[-2:])
@@ -259,9 +210,7 @@ class CookieCache:
             self._schedule_save()
 
     def _evict_domain_if_at_capacity(self):
-        """LRU-ish eviction: drop the domain whose freshest cookie is oldest,
-        so a caller hitting many distinct domains can't grow the in-memory/
-        disk cache unboundedly."""
+        """Drop the domain whose freshest cookie is oldest once MAX_CACHE_DOMAINS is reached."""
         if len(self._store) < settings.MAX_CACHE_DOMAINS:
             return
         oldest_domain = min(
@@ -379,10 +328,7 @@ class CookieCache:
 
     async def set_cookies_async(self, url_or_domain: str, cookies: List[CookieModel]) -> None:
         async with self._async_lock:
-            # Mutate local/Redis state in a worker, but schedule the debounced
-            # disk flush back on the owning event loop. Calling _schedule_save
-            # in the worker has no running loop and falls back to an immediate
-            # full JSON rewrite for every solve.
+            # Schedule the flush here: in the worker thread there's no loop, so it would write immediately.
             await asyncio.to_thread(self.set_cookies, url_or_domain, cookies, False)
             if not self.redis_client:
                 self._schedule_save()
@@ -434,10 +380,7 @@ class CookieCache:
         return "\n".join(lines) + "\n"
 
     def _schedule_save(self):
-        """Debounce disk writes: coalesce bursts of set_cookies() into one
-        background flush instead of a blocking write per call. Falls back to
-        an immediate synchronous save when there's no running event loop
-        (e.g. sync test/CLI usage)."""
+        """Debounce disk writes, or save synchronously when no event loop is running."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -449,17 +392,13 @@ class CookieCache:
             self._save_task = loop.create_task(self._debounced_flush(loop))
 
     async def _debounced_flush(self, loop: asyncio.AbstractEventLoop):
-        # Throttle: wait once, then flush whatever accumulated in _store,
-        # regardless of how many set_cookies() calls arrived during the wait.
         while True:
             await asyncio.sleep(DEBOUNCE_SECONDS)
             self._save_pending = False
             await loop.run_in_executor(None, self._save_to_disk)
             if not self._save_pending:
                 break
-            # A set_cookies() call landed while the write was in flight
-            # (a separate thread via run_in_executor) - loop back and flush
-            # again instead of silently dropping that update.
+            # A write landed during the flush; loop so it isn't dropped.
 
     def _load_from_disk(self):
         if os.path.exists(self.cache_file):
@@ -481,11 +420,7 @@ class CookieCache:
                 with open(tmp_file, "w", encoding="utf-8") as f:
                     json.dump(self._store, f, indent=2)
                 try:
-                    # Group-writable (not world) so a PUID/PGID container
-                    # user sharing the bind mount's group with a host user
-                    # can still read/write it, without making a file full of
-                    # live cf_clearance/session cookies world-readable to
-                    # every other local user or co-mounted container.
+                    # Group-writable for PUID/PGID bind mounts, never world-readable: it holds live cookies.
                     os.chmod(tmp_file, 0o660)  # nosec B103
                 except Exception:
                     pass

@@ -21,7 +21,6 @@ from app.logging_config import setup_logging, set_request_id
 from app.solver.sessions import session_manager
 from app.solver.cache import cookie_cache
 
-# Configure Logging
 setup_logging(settings.LOG_LEVEL)
 logger = logging.getLogger("solverr.main")
 
@@ -37,12 +36,7 @@ async def periodic_session_cleanup():
         except Exception as e:
             logger.warning(f"Error in session cleanup task: {e}")
 
-# MCP server (optional, on by default - see ENABLE_MCP in app/config.py). The
-# ASGI app must be built before mcp_server.session_manager is accessible, so
-# this happens at import time; the lifespan below enters that session
-# manager's run() context, which mounting alone does not do for a
-# Starlette/FastAPI sub-app (its lifespan is only invoked when the ASGI
-# server runs it directly, not when merely mounted into a parent app).
+# Built at import so session_manager exists; the lifespan enters its run() because mounting doesn't.
 mcp_asgi_app = None
 if settings.ENABLE_MCP:
     from app.mcp_server import create_mcp_asgi_app, mcp_server
@@ -55,9 +49,6 @@ async def lifespan(app: FastAPI):
         logger.info(f"Configuration | Host: {settings.HOST}:{settings.PORT} | Log Level: {settings.LOG_LEVEL.upper()} | Workers: {settings.MAX_BROWSER_WORKERS} | Fast TLS: {settings.ENABLE_FAST_TLS}")
         cleanup_task = asyncio.create_task(periodic_session_cleanup())
         if CAMOUFOX_AVAILABLE:
-            # The warm Camoufox pool launches its instances lazily on first
-            # solve (see CamoufoxPool.acquire), instead of paying that cost on
-            # every process start.
             logger.info("Camoufox stealth engine ready; the warm browser pool launches lazily on first solve.")
         else:
             logger.error("Camoufox stealth engine is not available (import failed) - Tier 3 browser-based solving will fail for every request until this is fixed.")
@@ -77,10 +68,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# HTTP Request Logging, Optional API-Key Auth & Exception Middleware
-# /health is always open (needed for the Docker/compose HEALTHCHECK before
-# any key is configured). /metrics is open by default but can be gated
-# behind the same key via METRICS_REQUIRE_AUTH for exposed deployments.
+# Health checks stay open so the container HEALTHCHECK works with API_KEY set.
 _ALWAYS_UNAUTHENTICATED_PATHS = {"/health", "/health/live", "/health/ready"}
 
 @app.middleware("http")
@@ -101,9 +89,7 @@ async def request_logging_middleware(request: Request, call_next):
         or request.url.path == "/favicon.ico"
     )
     if settings.API_KEY and not is_exempt_path:
-        # Deliberately header-only: a query-string key (?api_key=/?key=) would
-        # leak into access logs, reverse-proxy logs, browser history, and the
-        # Referer header of any outbound request the solved page makes.
+        # Header-only: a query-string key would leak into logs, history, and Referer headers.
         supplied = request.headers.get("x-api-key")
         if not supplied:
             auth_header = request.headers.get("authorization", "")
@@ -135,16 +121,12 @@ async def request_logging_middleware(request: Request, call_next):
         elapsed_ms = (time.time() - start_time) * 1000
         err_msg = f"{type(exc).__name__}: {str(exc)}"
         logger.error(f"Unhandled Exception on {request.method} {request.url.path} after {elapsed_ms:.1f}ms: {err_msg}\n{traceback.format_exc()}")
-        # Never leak raw exception text to the client - it can carry internal
-        # paths, proxy credentials, or other details from deep in the solve
-        # pipeline. The full traceback is already in the server-side log
-        # above, correlated by request_id.
+        # Exception text can carry proxy credentials; clients get only the request_id.
         return JSONResponse(
             status_code=500,
             content={"status": "error", "error": "Internal solver error", "request_id": req_id}
         )
 
-# Setup Static Files Directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 static_dir = os.path.join(BASE_DIR, "static")
 if not os.path.exists(static_dir):
@@ -153,13 +135,9 @@ if not os.path.exists(static_dir):
 if os.path.exists(static_dir):
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
-# Mount Routers
 app.include_router(flaresolverr_router)
 app.include_router(dashboard_router, prefix="/api")
 
-# Mount MCP Server (optional - see ENABLE_MCP). Subject to the same
-# X-Api-Key gate as every other endpoint below, since "/mcp" isn't in
-# _ALWAYS_UNAUTHENTICATED_PATHS.
 if mcp_asgi_app is not None:
     app.mount("/mcp", mcp_asgi_app)
 
@@ -178,10 +156,7 @@ async def dashboard_index():
     return HTMLResponse("<h1>⚡ Solverr Engine Active</h1><p>API Endpoint active at <code>/v1</code></p>")
 
 def _readiness_body() -> dict:
-    # Camoufox launches lazily on first solve (see lifespan) and its pool
-    # instances are also lazy, so "not yet used" is healthy - the only
-    # unhealthy state is the Camoufox import itself having failed, since
-    # there's no other engine left to service Tier 3 requests.
+    # An unused lazy pool is healthy; only a failed Camoufox import leaves Tier 3 with no engine.
     ready = CAMOUFOX_AVAILABLE
     return {
         "status": "ok" if ready else "degraded",
@@ -199,23 +174,17 @@ async def health_check():
 
 @app.get("/health/live")
 async def liveness_check():
-    """Liveness only: the process is up and serving HTTP. Never checks
-    Camoufox/browser-pool state, so an orchestrator won't restart a
-    perfectly-alive process just because Tier 3 is degraded."""
+    """Never checks Camoufox, so a degraded Tier 3 doesn't trigger a restart."""
     return JSONResponse(status_code=200, content={"status": "ok"})
 
 @app.get("/health/ready")
 async def readiness_check():
-    """Readiness: can this instance actually accept and complete work.
-    Same check as /health today; split out so an orchestrator can restart
-    on liveness failure but only pull from a load balancer on readiness
-    failure, without conflating the two."""
+    """Same check as /health, split out so a load balancer can drain without restarting."""
     body, ready = _readiness_body()
     return JSONResponse(status_code=200 if ready else 503, content=body)
 
 @app.get("/metrics")
 async def prometheus_metrics():
-    """Exposes Prometheus-formatted metrics without blocking the event loop."""
     cached_domains, sessions = await asyncio.gather(
         cookie_cache.count_domains_async(),
         session_manager.list_sessions_async(),

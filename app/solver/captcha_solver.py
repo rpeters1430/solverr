@@ -7,21 +7,10 @@ from app.config import settings
 logger = logging.getLogger("solverr.captcha_solver")
 
 class CaptchaSolverClient:
-    """Optional last-resort escalation to a paid third-party captcha-solving
-    service, used only after the free click-based approach in browser.py
-    (Turnstile/reCAPTCHA/hCaptcha checkbox clicking) has already exhausted
-    the normal solve timeout without clearing. Covers the interactive
-    image-challenge case (hCaptcha puzzle grids, reCAPTCHA image selection)
-    that a checkbox click alone can't clear.
+    """Paid captcha-solver client for image challenges the click loop can't clear.
 
-    Speaks the 2Captcha HTTP protocol (POST /in.php to submit a task, poll
-    GET /res.php for the result) - CapSolver and most other providers also
-    expose a 2captcha-compatible endpoint, so CAPTCHA_SOLVER_BASE_URL can
-    point at those instead of switching client code.
-
-    Disabled unless CAPTCHA_SOLVER_API_KEY is configured; solve_* methods
-    return None immediately when disabled so callers never need to branch
-    on whether it's turned on.
+    Speaks the 2Captcha protocol (POST /in.php, poll /res.php), which CapSolver and others also accept.
+    solve_* returns None when no API key is set.
     """
 
     def __init__(self):

@@ -89,11 +89,7 @@ async def delete_session(session_id: str):
 
 @router.get("/diagnostics/browser")
 async def diagnostics_browser():
-    """Browser self-test: launches a real Camoufox instance end-to-end
-    (context, page, JS execution) instead of just checking the import
-    succeeded. Covered by the same global X-Api-Key auth as every other
-    /api route (see app/main.py's middleware) - there's nothing
-    endpoint-specific to add here."""
+    """Launch a real Camoufox end to end, unlike /health which only checks the import."""
     from app.solver.browser import browser_pool
     result = await browser_pool.self_test()
     status_code = 200 if result.get("ok") else 503
@@ -126,10 +122,7 @@ async def test_solver(req: TestRequestModel):
         }
     except Exception as e:
         logger.error(f"[DashboardTest] Test solve failed for {req.url}: {e}", exc_info=True)
-        # Never echo raw exception text back to the client - it can carry
-        # internal paths, proxy credentials, or other details from deep in
-        # the solve pipeline. Full detail is already in the server-side log
-        # above, correlated by request_id.
+        # Exception text can carry proxy credentials; clients get only the request_id.
         raise HTTPException(status_code=500, detail=f"Test solve failed (request_id: {get_request_id()})")
 
 @router.get("/events")

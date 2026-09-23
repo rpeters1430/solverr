@@ -7,10 +7,7 @@ from app.solver.captcha_solver import captcha_solver
 
 logger = logging.getLogger("solverr.browser")
 
-# Widgets the paid captcha-solver escalation knows how to handle: which
-# challenge-type key maps to which CaptchaSolverClient method, which DOM
-# selectors carry the sitekey, and which response field(s) the solved
-# token needs to be written into.
+# Per widget: the CaptchaSolverClient method, sitekey selectors, and token response fields.
 CAPTCHA_SOLVER_WIDGETS = {
     "recaptcha": {
         "solve_method": "solve_recaptcha_v2",
@@ -31,10 +28,7 @@ CAPTCHA_SOLVER_WIDGETS = {
 
 
 async def extract_sitekey(page: Page, selectors: List[str]) -> Optional[Tuple[str, Optional[str]]]:
-    """Find the first matching widget's data-sitekey (and data-callback, if
-    the site defines one - the stable, documented way to hand a solved
-    token back to the widget's own JS instead of poking internal client
-    state). Returns None if no widget with a sitekey is found."""
+    """Return the first widget's (data-sitekey, data-callback), or None."""
     for sel in selectors:
         try:
             loc = page.locator(sel).first
@@ -49,9 +43,7 @@ async def extract_sitekey(page: Page, selectors: List[str]) -> Optional[Tuple[st
 
 
 async def inject_captcha_token(page: Page, response_field_names: List[str], token: str, callback_name: Optional[str]):
-    """Write a solved token into the widget's response field(s) and invoke
-    its data-callback if one is declared, mirroring what the widget's own
-    JS does when a human solves it interactively."""
+    """Write the token into the response fields and call data-callback, as the widget does for a human."""
     try:
         await page.evaluate(
             """(args) => {
@@ -74,10 +66,7 @@ async def inject_captcha_token(page: Page, response_field_names: List[str], toke
 
 
 async def try_captcha_solver_escalation(page: Page, url: str, challenge_type: str) -> bool:
-    """Tier 3.5: hand an unsolved widget's sitekey to the paid captcha-solver
-    service and inject the returned token back into the page. No-ops when
-    the challenge type has no known widget or `captcha_solver` is disabled
-    (see BrowserPool._execute_solve_flow, the only caller)."""
+    """Tier 3.5: solve the widget's sitekey via the paid service and inject the token."""
     widget = CAPTCHA_SOLVER_WIDGETS.get(challenge_type)
     if not widget:
         return False

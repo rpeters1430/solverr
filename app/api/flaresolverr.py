@@ -84,7 +84,6 @@ async def flaresolverr_api(req: V1Request):
                 endTimestamp=int(time.time() * 1000)
             )
         
-        # Attach session proxy/cookies if session ID is provided
         if req.session:
             sess = await session_manager.get_session_async(req.session)
             if sess:
@@ -96,11 +95,9 @@ async def flaresolverr_api(req: V1Request):
         try:
             solution = await solver_engine.process_request(req)
             
-            # Update session cookies if applicable
             if req.session and solution.cookies:
                 await session_manager.update_session_cookies_async(req.session, solution.cookies)
 
-            # Filter solution if returnOnlyCookies requested
             if req.returnOnlyCookies:
                 solution.response = ""
                 solution.headers = {}
@@ -121,10 +118,7 @@ async def flaresolverr_api(req: V1Request):
         except Exception as e:
             elapsed_ms = int(time.time() * 1000) - start_ts
             logger.error(f"Solve request failed after {elapsed_ms}ms for {req.url}: {type(e).__name__} - {str(e)}", exc_info=True)
-            # Never echo raw exception text back to the client - it can carry
-            # internal paths, proxy credentials, or other details from deep in
-            # the solve pipeline. Full detail is already in the server-side
-            # log above, correlated by request_id.
+            # Exception text can carry proxy credentials; clients get only the request_id.
             return V1Response(
                 status="error",
                 message=f"Error solving request (request_id: {get_request_id()})",
@@ -186,10 +180,7 @@ async def flaresolverr_api(req: V1Request):
 
 @router.post("/scrape", response_model=ScrapeResponse)
 async def native_scrape_api(req: ScrapeRequest):
-    """
-    High-Performance Native Scrape API (Trawl Parity & Extensions).
-    Provides fine-grained tier controls, DOM selector waiting, data extraction, and screenshots.
-    """
+    """Native scrape API with tier overrides, selector waiting, extraction rules, and screenshots."""
     start_ts = time.time()
     v1_req = req.to_v1_request()
 
@@ -217,22 +208,14 @@ async def native_scrape_api(req: ScrapeRequest):
         )
     except Exception as e:
         logger.error(f"[ScrapeAPI] Scrape failed for {req.url}: {e}", exc_info=True)
-        # See the /v1 handler above: raw exception text can carry internal
-        # paths or proxy credentials, so it never goes back to the client.
         raise HTTPException(status_code=500, detail=f"Scrape failed (request_id: {get_request_id()})")
 
 @router.get("/proxy")
 @router.post("/proxy")
 async def transparent_proxy(request: FastAPIRequest, url: Optional[str] = None):
-    """
-    Transparent Challenge-Aware HTTP Proxy Endpoint (TRAWL-Style).
-    Passes requests through Solverr's 4-tier engine and returns the solved response directly.
-    """
+    """Transparent proxy: solves the target through the tiered engine and returns its response."""
     cmd = f"request.{request.method.lower()}"
-    # A caller's own target URL commonly carries its own unescaped "&"-joined
-    # query string (e.g. ?url=https://example.com/api?a=1&b=2) - Starlette's
-    # query_params would split that at the outer "&" and truncate it, so take
-    # everything after "url=" verbatim instead of relying on parsed params.
+    # The target often has its own unescaped "&" query, which query_params would truncate.
     raw_query = str(request.url.query)
     target_url = url or ""
     if "url=" in raw_query:
@@ -247,11 +230,7 @@ async def transparent_proxy(request: FastAPIRequest, url: Optional[str] = None):
     body = await request.body()
     post_data = body.decode("utf-8") if body else None
 
-    # Strip hop-by-hop / identity headers before forwarding: these describe
-    # the connection between the caller and Solverr, not the outbound
-    # request Solverr makes to the target site (a stale Content-Length after
-    # the body's been re-read, or a Host pointing at Solverr itself, would
-    # otherwise leak straight into the outbound request).
+    # These describe the caller-to-Solverr hop, not the outbound request.
     _HOP_BY_HOP_HEADERS = {
         "host", "connection", "content-length", "transfer-encoding",
         "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -296,6 +275,4 @@ async def transparent_proxy(request: FastAPIRequest, url: Optional[str] = None):
         return response
     except Exception as e:
         logger.error(f"[ProxyAPI] Proxy error solving '{target_url}': {e}", exc_info=True)
-        # See the /v1 handler above: raw exception text can carry internal
-        # paths or proxy credentials, so it never goes back to the client.
         raise HTTPException(status_code=500, detail=f"Proxy error solving target url (request_id: {get_request_id()})")

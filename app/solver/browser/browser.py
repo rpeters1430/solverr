@@ -27,20 +27,12 @@ if CAMOUFOX_AVAILABLE:
 
 logger = logging.getLogger("solverr.browser")
 
-# Wall-clock safety net layered on top of each solve tier's own internal
-# timeouts (navigation waits, selector waits, etc). If a Playwright/Camoufox
-# call hangs on something that doesn't respect its own timeout=, this forces
-# the tier to give up and release its browser/pool slot rather than pinning
-# it (and, on a small worker count, a meaningful fraction of total capacity)
-# indefinitely.
+# Outer wall-clock cap per tier, for Playwright calls that ignore their own timeout= and would pin a pool slot.
 SOLVE_WALLCLOCK_GRACE_SECONDS = 15
 
 
 def _describe_solve_error(e: BaseException, tier_timeout: float, tier_label: str) -> BaseException:
-    """asyncio.wait_for raises a bare TimeoutError/CancelledError with no
-    message (str(e) == "") - left as-is, that surfaces to API callers as an
-    empty "Error solving request: " with no actual information. Wrap it with
-    a message identifying which tier and timeout actually fired."""
+    """Name the tier and timeout on bare TimeoutErrors, whose str() is empty."""
     if isinstance(e, (asyncio.TimeoutError, TimeoutError)) and not str(e):
         return TimeoutError(f"{tier_label} timed out after {tier_timeout:.0f}s")
     return e
@@ -54,8 +46,7 @@ class BrowserPool:
             if (CAMOUFOX_AVAILABLE and settings.CAMOUFOX_POOL_ENABLED)
             else None
         )
-        # Queue-pressure/crash telemetry, exposed via pool_stats() for
-        # /metrics and the dashboard - see app/metrics.py.
+        # Exposed via pool_stats() for /metrics and the dashboard.
         self._queue_wait_total_s: float = 0.0
         self._queue_wait_count: int = 0
         self._crashes_total: int = 0
@@ -85,18 +76,9 @@ class BrowserPool:
         }
 
     async def self_test(self) -> Dict[str, Any]:
-        """Diagnostic-only smoke test: launch a real (ephemeral) Camoufox
-        instance, create a context/page, execute JS, then tear it all down.
-        Verifies Tier 3 is actually usable end-to-end, not just that the
-        Camoufox package imported successfully (see GET /health, which only
-        checks the import). Used by GET /api/diagnostics/browser.
+        """Launch an ephemeral Camoufox and run JS to prove Tier 3 works end to end.
 
-        Explicitly timeout-bounded: launching under some deployment
-        configurations (observed: PUID/PGID non-root + certain capability
-        restrictions) can leave the Playwright<->Firefox IPC handshake
-        hanging indefinitely rather than erroring, and this is the one
-        BrowserPool code path that doesn't already sit under an
-        asyncio.wait_for from solve()'s tier_timeout."""
+        Has its own timeout because a PUID/PGID launch can hang the IPC handshake forever."""
         if not CAMOUFOX_AVAILABLE:
             return {"ok": False, "error": "Camoufox import failed - stealth engine unavailable"}
 
@@ -171,11 +153,7 @@ class BrowserPool:
 
             tier_timeout = (timeout_ms / 1000.0) + SOLVE_WALLCLOCK_GRACE_SECONDS
 
-            # Pooled path: reuse a warm browser process (no per-request UA
-            # override, since Camoufox ties navigator.userAgent to the
-            # fingerprint it generated when that process launched - the
-            # HTTP UA header and JS-visible UA must match). Only usable
-            # when there's no proxy and no explicit user_agent request.
+            # A warm process's UA and proxy are fixed at launch, so custom-UA/proxy requests skip the pool.
             use_pool = self.camoufox_pool is not None and not pw_proxy and not user_agent
             last_error: Optional[BaseException] = None
 
@@ -197,12 +175,7 @@ class BrowserPool:
                     last_error = _describe_solve_error(e, tier_timeout, "Pooled Camoufox solve")
                     logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve notice/fallback: {last_error}. Retrying with a fresh ephemeral Camoufox instance...")
 
-            # Fresh-fingerprint escalation: a brand-new Camoufox process with
-            # its own randomly generated fingerprint (and its own proxy
-            # binding, if one was requested) - either the pooled path's
-            # retry after a warm-process-specific failure, or the only
-            # attempt for proxy/custom-UA requests that can't share the
-            # warm pool to begin with.
+            # Fresh fingerprint: the pooled path's retry, or the only attempt for proxy/custom-UA requests.
             try:
                 sol = await asyncio.wait_for(
                     self._solve_with_ephemeral_camoufox(
@@ -251,10 +224,7 @@ class BrowserPool:
                 context = inst.browser
             page = await context.new_page()
             active_ua = await page.evaluate("() => navigator.userAgent")
-            # Context/page creation and a live JS eval all succeeded - the
-            # underlying Firefox process is responsive, so a failure from
-            # here on is a normal solve-level failure, not a reason to force
-            # this instance out of the pool.
+            # The process answered JS, so later failures are page-level and shouldn't evict it.
             setup_ok = True
             return await self._execute_solve_flow(
                 context=context,
@@ -282,11 +252,7 @@ class BrowserPool:
                     await context.close()
                 except Exception:
                     pass
-            # A failure before setup_ok (context/page creation, or the
-            # liveness-probing navigator.userAgent eval) looks process-level
-            # rather than page-level - force this instance out of rotation
-            # now instead of silently re-queuing a possibly wedged/crashed
-            # Firefox process until its normal use/age recycle threshold.
+            # A failure before setup_ok means the process may be wedged, so recycle it now.
             await self.camoufox_pool.release(inst, force_recycle=not setup_ok)
 
     async def _solve_with_ephemeral_camoufox(
@@ -305,11 +271,7 @@ class BrowserPool:
         wait_delay_ms: Optional[int],
         capture_screenshot: bool
     ) -> SolutionModel:
-        """Dedicated (non-pooled) Camoufox launch for requests carrying their
-        own proxy or an explicit user_agent - these can't share the warm
-        no-proxy pool since the launch-time UA is fixed at launch, and (with
-        `geoip` below) so is the proxy-derived geolocation/timezone/WebRTC
-        fingerprint."""
+        """Non-pooled launch for requests with their own proxy or user_agent, both fixed at launch."""
         use_geoip = bool(pw_proxy) and settings.CAMOUFOX_GEOIP_ON_PROXY
         logger.info(f"[CamoufoxEngine] Spawning ephemeral Camoufox stealth Firefox solve for {url} (proxy={'yes' if pw_proxy else 'no'}, custom_ua={'yes' if user_agent else 'no'}, geoip={'yes' if use_geoip else 'no'})...")
         async with AsyncCamoufox(
@@ -361,7 +323,6 @@ class BrowserPool:
         wait_delay_ms: Optional[int] = None,
         capture_screenshot: bool = False
     ) -> SolutionModel:
-        # Pre-load cookies into context
         pw_cookies = build_playwright_cookies(url, cookies)
         if pw_cookies:
             try:
@@ -372,9 +333,7 @@ class BrowserPool:
 
         await install_media_blocking(context)
 
-        # Track the true final HTTP status across the challenge-clearing
-        # navigations/redirects/reloads, instead of assuming 200 once the
-        # title looks clean - the real final page could be a 404/500/etc.
+        # Track the real final status across challenge redirects; a clean title can still be a 404.
         last_main_status: Dict[str, Optional[int]] = {"code": None}
 
         def _on_response(resp):
@@ -397,7 +356,6 @@ class BrowserPool:
 
         logger.info(f"[BrowserPool] Initial page load complete (HTTP Status: {initial_status}, Title: '{initial_title}')")
 
-        # Multi-WAF challenge detection and auto-resolver loop
         max_wait = timeout_ms / 1000.0
         step = 0.2
         loop_start = time.monotonic()
@@ -436,23 +394,10 @@ class BrowserPool:
             if active_challenge:
                 last_detected_challenge = active_challenge
             elif not check_content and last_detected_challenge:
-                # Most WAF/CAPTCHA markers (hCaptcha, reCAPTCHA, GeeTest,
-                # Imperva, DataDome, Akamai, AWS WAF) only ever appear in
-                # page content, never in the title - detect_challenge() on a
-                # content-skipped iteration (page.content() is only re-fetched
-                # every content_check_every iterations) can't see them and
-                # returns None. Treat a previously-detected challenge as
-                # still active until the next content-checked iteration
-                # actually confirms it's gone, instead of letting a
-                # content-less lookup masquerade as "cleared" - otherwise the
-                # loop can declare victory on an unsolved widget before the
-                # click-dispatcher even gets a chance to run.
+                # Most markers live only in page content, so a content-skipped pass can't prove it cleared.
                 active_challenge = last_detected_challenge
 
-            # Check if challenge is cleared:
-            # 1. Normal clean page (no challenge title, and no challenge detected)
-            # 2. Challenge was detected, but clearance cookie (cf_clearance, aws-waf-token) is present
-            # 3. Challenge was detected on an embedded widget/form, but response token is populated
+            # Cleared means no challenge, a clearance cookie, or a populated widget response token.
             challenge_cleared = False
             if not is_challenge_title(title):
                 if not active_challenge:
@@ -482,7 +427,7 @@ class BrowserPool:
                             pass
 
             if challenge_cleared:
-                # Ensure the page has actually navigated and the body has arrived (avoid mid-redirect hollow snapshots)
+                # Avoid returning a hollow mid-redirect snapshot.
                 page_ready = False
                 if title and title.strip():
                     try:
@@ -501,7 +446,6 @@ class BrowserPool:
                         page_ready = False
 
                 if page_ready:
-                    # If an age gate was already clicked or no modal is blocking, we are done!
                     if age_gate_clicked or not has_age_gate_marker(content_lower, check_content):
                         elapsed = time.monotonic() - loop_start
                         logger.info(f"[BrowserPool] Challenge cleared! Final Title: '{title}' in {elapsed:.2f}s")
@@ -515,18 +459,13 @@ class BrowserPool:
                 logger.info(f"[BrowserPool] Anti-bot / gate active ({state_label}, {elapsed:.1f}s elapsed) | Current Title: '{title}'")
                 last_logged_step = now_ts
 
-            # Periodic Interactive Challenge Solver Dispatcher
             if (now_ts - last_click_ts) >= 1.2 and (now_ts - loop_start) > 0.6:
                 last_click_ts = now_ts
                 _clicked, age_gate_clicked = await dispatch_challenge_click(page, active_challenge, title, age_gate_clicked)
 
             await asyncio.sleep(step)
 
-        # Tier 3.5: paid captcha-solver escalation. Only reached when the
-        # free click-based approach above ran out the full timeout without
-        # clearing - covers interactive image challenges (hCaptcha puzzle
-        # grids, reCAPTCHA image selection) a checkbox click can't solve.
-        # No-ops entirely when CAPTCHA_SOLVER_API_KEY isn't configured.
+        # Tier 3.5: paid solver, only after the free click loop used its whole timeout.
         if not cleared and captcha_solver.enabled and last_detected_challenge in CAPTCHA_SOLVER_WIDGETS:
             solved = await try_captcha_solver_escalation(page, url, last_detected_challenge)
             if solved:
@@ -541,7 +480,6 @@ class BrowserPool:
                         break
                     await asyncio.sleep(0.3)
 
-        # Optional wait_selector support
         if wait_selector:
             try:
                 logger.info(f"[BrowserPool] Waiting for custom selector '{wait_selector}'...")
@@ -549,13 +487,11 @@ class BrowserPool:
             except Exception as e:
                 logger.warning(f"[BrowserPool] wait_selector '{wait_selector}' timed out: {e}")
 
-        # Optional stabilization delay
         if wait_delay_ms and wait_delay_ms > 0:
             await asyncio.sleep(wait_delay_ms / 1000.0)
         else:
             await asyncio.sleep(0.3)
 
-        # Optional screenshot capture
         screenshot_b64 = None
         if capture_screenshot:
             try:
@@ -592,14 +528,10 @@ class BrowserPool:
                 final_title = final_title or ""
                 html_content = ""
 
-        # Extract captured cookies safely
         raw_cookies = await read_context_cookies(context)
         captured_cookies = extract_captured_cookies(raw_cookies)
 
-        # Prefer the real last main-frame document status captured across
-        # every redirect/reload of the challenge flow. Fall back to the
-        # initial navigation response, then a generic guess only if neither
-        # is available.
+        # Prefer the last main-frame status, then the initial response, then a guess.
         if is_browser_error(final_title, final_url):
             status_code = 502
         elif last_main_status["code"] is not None:

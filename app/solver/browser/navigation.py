@@ -12,8 +12,7 @@ logger = logging.getLogger("solverr.browser")
 
 
 async def install_media_blocking(context: BrowserContext) -> None:
-    """Block only video/audio media to save bandwidth, while preserving
-    fonts & challenge canvases (which some WAF challenges render to)."""
+    """Block video/audio and SSRF targets; fonts and canvases stay because some challenges need them."""
     async def block_heavy_media(route, request):
         if request.resource_type in ["media"]:
             await route.abort()
@@ -73,12 +72,9 @@ async def navigate_to_target(
     post_data: Optional[str],
     timeout_ms: int
 ) -> Tuple[Optional[Any], int]:
-    """Navigate the page to `url`, either via a real GET (page.goto) or by
-    building and auto-submitting a hidden POST form (Playwright has no
-    direct "navigate with POST body" API). Returns (response, initial_status)
-    - initial_status is best-effort and gets overridden later by the real
-    final main-frame status once a response listener is attached (see
-    BrowserPool._execute_solve_flow)."""
+    """GET via page.goto, or POST via an auto-submitting form since Playwright can't navigate with a body.
+
+    initial_status is best-effort; the caller's response listener supersedes it."""
     logger.info(f"[BrowserPool] Navigating to {url} ({method.upper()}, timeout: {timeout_ms}ms)")
     initial_status = 0
     response = None
@@ -86,11 +82,7 @@ async def navigate_to_target(
         try:
             form_html = _build_post_form_html(url, post_data)
             try:
-                # page.set_content() itself doesn't navigate - the injected
-                # <script> auto-submitting the form is what triggers the real
-                # navigation, so expect_navigation() has to wrap the
-                # set_content() call to observe it and hand back its Response
-                # (wait_for_load_state() would not - it always returns None).
+                # The form's submit script navigates, so wrap set_content to capture that Response.
                 async with page.expect_navigation(wait_until="domcontentloaded", timeout=timeout_ms) as nav_info:
                     await page.set_content(form_html)
                 response = await nav_info.value

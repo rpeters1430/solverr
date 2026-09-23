@@ -37,20 +37,14 @@ class TestEventBroadcaster(unittest.IsolatedAsyncioTestCase):
 
 class TestSSEEventStream(unittest.IsolatedAsyncioTestCase):
     async def test_generator_handles_cancellation_without_nameerror(self):
-        # Regression test: event_generator() in app/api/dashboard.py used to
-        # reference asyncio.CancelledError without importing asyncio, so a
-        # normal client disconnect (which cancels the pending `await q.get()`)
-        # raised a masking NameError instead of exiting cleanly.
+        # A client disconnect once raised NameError because asyncio wasn't imported.
         response = await sse_event_stream()
         agen = response.body_iterator
 
         first = await agen.__anext__()
         self.assertIn("connected", first)
 
-        # Cancelling the pending `await q.get()` used to raise a masking
-        # NameError (asyncio was unimported); the generator now catches the
-        # cancellation, unsubscribes, and the async generator simply ends -
-        # surfaced to the caller as StopAsyncIteration, not CancelledError.
+        # Cancellation should unsubscribe and end the generator (StopAsyncIteration).
         task = asyncio.ensure_future(agen.__anext__())
         await asyncio.sleep(0.05)
         task.cancel()

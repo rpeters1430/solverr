@@ -32,7 +32,7 @@ class V1Request(BaseModel):
     userAgent: Optional[str] = None
     headers: Optional[Dict[str, str]] = None
     
-    # Custom extension flags for high-performance tuning
+    # Solverr extensions beyond the FlareSolverr API.
     fastTlsOnly: Optional[bool] = False
     forceBrowser: Optional[bool] = False
     screenshot: Optional[bool] = False

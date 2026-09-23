@@ -15,27 +15,15 @@ ENV PYTHONUNBUFFERED=1 \
     MAX_BROWSER_WORKERS=auto \
     XDG_CACHE_HOME=/app/.cache
 
-# ---- Stage 1: Install Python dependencies + fetch browser engines ----
+# Stage 1: Python dependencies and the Camoufox browser.
 FROM base AS deps
 WORKDIR /app
 
-# Pin the Camoufox browser engine separately from the Python wrapper package.
-# Keeping this explicit makes Docker rebuild the browser-fetch layer whenever
-# the upstream engine is bumped instead of silently reusing an older cached
-# browser binary. Camoufox 152.0.4-beta.30 is paired with pythonlib 0.5.6.
+# Pinned here so an engine bump invalidates the fetch layer. 152.0.4-beta.30 pairs with pythonlib 0.5.6.
 ARG CAMOUFOX_BROWSER_VERSION=152.0.4-beta.30
 
-# uv resolves and installs far faster than pip; pinned to a specific PyPI
-# release for reproducible builds. Installed into the base image's system
-# site-packages (before the venv PATH switch below) so the uv binary itself
-# never ends up copied into the venv that ships in the runtime image.
-# (The pip cache mount here previously did nothing: PIP_NO_CACHE_DIR=1 plus
-# --no-cache-dir told pip never to populate its cache dir in the first place.
-# The mount targets /app/.cache/pip, not the usual /root/.cache/pip, because
-# XDG_CACHE_HOME=/app/.cache is set above and both pip and uv follow the XDG
-# base-directory spec on Linux - pointing the mount at /root/.cache would
-# just recreate the same class of dead-cache bug against a path neither
-# tool ever writes to.)
+# Installed before the venv exists so uv never ships in the runtime image.
+# Cache mounts live under /app/.cache because XDG_CACHE_HOME points there.
 RUN --mount=type=cache,target=/app/.cache/pip \
     pip install uv==0.12.5
 
@@ -46,14 +34,7 @@ COPY requirements.txt .
 RUN --mount=type=cache,target=/app/.cache/uv \
     uv pip install --python /opt/venv/bin/python -r requirements.txt
 
-# Fetch and activate the exact Camoufox stealth Firefox browser binary, then
-# trim it down. Passing the version directly prevents the image from drifting
-# with the remote channel, while the ARG guarantees a version bump invalidates
-# this Docker layer.
-# - Fingerprint generation is pinned to os="linux" (app/solver/browser.py),
-#   so the macos/windows font sets Camoufox also downloads by default are
-#   dead weight (~890MB) - only ship the font set that's ever used.
-# - Debug symbols in the Firefox binary/shared libs aren't needed at runtime.
+# Every launch pins os="linux", so the macOS/Windows font sets (~890MB) are never used.
 RUN python -m camoufox fetch "official/stable/${CAMOUFOX_BROWSER_VERSION}" \
     && python -m camoufox set "official/stable/${CAMOUFOX_BROWSER_VERSION}" \
     && python -m camoufox version \
@@ -66,19 +47,14 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && find /app/.cache/camoufox -type f \( -name 'camoufox' -o -name 'camoufox-bin' -o -name '*.so*' \) \
          -exec strip --strip-unneeded {} + 2>/dev/null || true
 
-# ---- Stage 2: Final minimal runtime image ----
+# Stage 2: runtime image.
 FROM base AS runtime
 WORKDIR /app
 
-# Copy virtual environment
 COPY --from=deps /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Install OS libraries for Firefox/Camoufox and tini
-# for PID 1 zombie reaping. This is a curated list (not `playwright
-# install-deps firefox`, which pulls in a much larger transitive closure -
-# Xvfb, X11 utilities, extra font packages - built to support any Playwright
-# browser robustly, not just headless Camoufox/Firefox).
+# Curated libs for headless Firefox; `playwright install-deps` pulls in far more (Xvfb, fonts).
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update \
@@ -103,10 +79,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Copy the pre-fetched Camoufox browser engine
 COPY --from=deps /app/.cache/camoufox /app/.cache/camoufox
 
-# Copy application source
 COPY app ./app
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN mkdir -p data /app/home /app/.cache/camoufox/tmp /app/.cache/camoufox/fontconfig \

@@ -23,19 +23,12 @@ if [ -n "${PUID:-}" ] || [ -n "${PGID:-}" ]; then
       ;;
   esac
 
-  # Keep the large, immutable Camoufox browser tree owned by the image user.
-  # Recursively chowning it on every NAS restart forces overlayfs to copy the
-  # browser into the writable layer. Only runtime-writable paths need the
-  # requested NAS ownership.
+  # Chowning the browser tree would make overlayfs copy it into the writable layer on every start.
   mkdir -p /app/data /app/home /app/.cache/camoufox/tmp /app/.cache/camoufox/fontconfig
   chown -R "${PUID}:${PGID}" /app/data /app/home \
     /app/.cache/camoufox/tmp /app/.cache/camoufox/fontconfig
 
-  # gosu derives $HOME from the target UID's /etc/passwd entry, ignoring any
-  # HOME already exported here - an arbitrary NAS PUID with no passwd entry
-  # falls back to HOME=/, which is read-only for a non-root user and breaks
-  # Chromium/Camoufox (both need to write config/cache under $HOME). Register
-  # a matching passwd/group entry so gosu resolves HOME to /app instead.
+  # gosu takes $HOME from /etc/passwd; an unknown UID gets a read-only HOME=/ and breaks Camoufox.
   if ! getent passwd "${PUID}" >/dev/null 2>&1; then
     echo "solverr:x:${PUID}:${PGID}:solverr:/app/home:/bin/sh" >> /etc/passwd
   fi

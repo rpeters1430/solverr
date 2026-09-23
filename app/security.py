@@ -10,9 +10,7 @@ class SSRFBlockedError(Exception):
     """Raised when a target URL resolves to a disallowed network."""
 
 
-# Cloud metadata endpoints aren't caught by the private-IP ranges below (they
-# live at a link-local address, which IS covered - but DNS names some clouds
-# accept for the same endpoint are listed explicitly for clarity/robustness).
+# The metadata IP is link-local and already blocked; these are its DNS aliases.
 _METADATA_HOSTNAMES = {"metadata.google.internal", "metadata.goog"}
 
 

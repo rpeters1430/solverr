@@ -12,10 +12,7 @@ logger = logging.getLogger("solverr.sessions")
 
 REDIS_KEY_PREFIX = "solverr:session:"
 
-# Minimum interval between Redis reconnection attempts once the client is
-# down - mirrors CookieCache's retry cooldown (app/solver/cache.py) so a
-# transient Redis outage at startup doesn't permanently strand sessions
-# in-memory-only for the rest of the process's lifetime.
+# Same reconnect cooldown as CookieCache.
 REDIS_RECONNECT_INTERVAL_SECONDS = 30.0
 
 class Session:
@@ -61,12 +58,9 @@ class Session:
         return sess
 
 class SessionManager:
-    """In-memory session store with optional Redis-backed persistence.
+    """In-memory session store, also persisted to Redis when REDIS_URL is set.
 
-    Sessions live in-memory for fast access, mirroring CookieCache's design.
-    When REDIS_URL is configured, sessions are also durably persisted so
-    they survive a process restart and are visible across instances -
-    without Redis, sessions are lost on restart and are per-process only.
+    Without Redis, sessions are per-process and lost on restart.
     """
 
     def __init__(self, redis_url: Optional[str] = None):
@@ -79,11 +73,7 @@ class SessionManager:
             self._redis()
 
     def _redis(self):
-        """Return a live Redis client, retrying the connection on a cooldown
-        if the last attempt failed. Previously a failed connection at
-        __init__ time permanently disabled Redis for the process's entire
-        lifetime - this makes that recoverable without a restart (see
-        CookieCache._redis() in cache.py for the same pattern)."""
+        """Return a live Redis client, retrying a failed connection on a cooldown."""
         if self.redis_client is not None:
             return self.redis_client
         if not self.redis_url:
@@ -99,30 +89,16 @@ class SessionManager:
             self.redis_client = client
             logger.info(f"[SessionManager] Connected to distributed Redis session backend at {self.redis_url}")
             self._migrate_local_sessions_to_redis(client)
-            # See CookieCache._redis() in cache.py for why this returns
-            # self.redis_client rather than the local `client` reference -
-            # migration may have invalidated it if Redis died again mid-way.
+            # Migration may have invalidated the client, so don't return the stale local.
             return self.redis_client
         except Exception as e:
             logger.warning(f"[SessionManager] Redis connection attempt failed ({e}). Sessions are in-memory only for this process until the next retry.")
             return None
 
     def _migrate_local_sessions_to_redis(self, client):
-        """Persist any sessions created while Redis was unreachable, now
-        that it's back. Without this, a session created during an outage
-        (create_session() always populates self._sessions in-memory even
-        when _persist() is a no-op) stays invisible to other replicas and
-        is lost on restart, until something happens to access it again and
-        re-trigger _persist().
+        """Persist sessions created during a Redis outage, in one pipelined batch.
 
-        Called synchronously from `_redis()`, itself called from the async
-        request path - one blocking call per session (up to MAX_SESSIONS of
-        them) would stall the event loop for everyone else. A single
-        pipelined batch keeps it to one round trip; if the pipeline itself
-        fails, a real connection failure gives no way to know which queued
-        commands the server saw before it died, so the whole batch is
-        treated as not migrated and left for the next reconnect to retry
-        (mirrors CookieCache._migrate_local_store_to_redis() in cache.py)."""
+        On failure the whole batch is retried on the next reconnect."""
         pending = [(sid, sess) for sid, sess in self._sessions.items() if not sess.is_expired()]
         if not pending:
             return
@@ -137,10 +113,7 @@ class SessionManager:
             self._invalidate_redis()
 
     def _invalidate_redis(self):
-        """Drop the current client after an operation failure (as opposed to
-        a failed connection attempt in _redis()) so the next call goes
-        through _redis()'s cooldown-gated reconnect instead of retrying a
-        now-dead connection on every subsequent session operation."""
+        """Drop the client after a failed operation so reconnects go through _redis()'s cooldown."""
         self.redis_client = None
         self._redis_last_attempt = time.time()
 
@@ -185,9 +158,7 @@ class SessionManager:
         return sid
 
     def _evict_oldest_if_at_capacity(self):
-        # In-memory bound only - Redis-backed sessions already expire via
-        # their own TTL (see _persist's `ex=sess.ttl`), so this only
-        # protects the local process's in-memory dict from unbounded growth.
+        # In-memory bound only; Redis sessions expire via their TTL.
         if len(self._sessions) < settings.MAX_SESSIONS:
             return
         self.prune_expired_sessions()
@@ -245,9 +216,7 @@ class SessionManager:
         redis_client = self._redis()
         if redis_client:
             try:
-                # SCAN, not KEYS: KEYS blocks the single-threaded Redis
-                # server for the whole keyspace scan, which is fine on a
-                # dev box but a real problem on a shared/production Redis.
+                # Never KEYS: it blocks the single-threaded Redis server for the whole keyspace walk.
                 for key in redis_client.scan_iter(match=f"{REDIS_KEY_PREFIX}*", count=200):
                     session_ids.add(key[len(REDIS_KEY_PREFIX):])
             except Exception as e:

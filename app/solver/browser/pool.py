@@ -14,29 +14,14 @@ except ImportError:
 
 logger = logging.getLogger("solverr.browser")
 
-# Bounds a single Camoufox process launch (cm.__aenter__()) independently of
-# the outer per-solve wall-clock timeout. Without this, a launch that hangs
-# (confirmed reproducible under PUID/PGID non-root execution - see CLAUDE.md)
-# holds CamoufoxPool._lock for the launch's full duration, serializing every
-# other acquire() behind it since the lock is only released when the caller's
-# outer asyncio.wait_for eventually cancels this task.
+# A hung launch (e.g. under PUID/PGID) would otherwise hold _lock and serialize every acquire().
 CAMOUFOX_LAUNCH_TIMEOUT_SECONDS = 30
 
 
 class CamoufoxPool:
-    """Bounded pool of warm, no-proxy Camoufox browser processes.
+    """Bounded pool of warm, no-proxy Camoufox processes, handing out a fresh context per solve.
 
-    Spawning a fresh Camoufox (Firefox) process per solve costs real wall
-    time (process start, fingerprint generation, extension load) on every
-    single tier-3 request. This pool keeps up to `size` processes alive and
-    hands out a fresh *context* per solve instead, closing the context (not
-    the process) when done. Instances are recycled after N uses or N
-    seconds so a single fingerprint isn't reused indefinitely.
-
-    Only used for the no-proxy path: a request-specific proxy needs its own
-    Camoufox launch so geolocation/timezone/WebRTC fingerprint derivation
-    (which Camoufox ties to the proxy's exit IP at launch time) stays
-    consistent - that path still spawns an ephemeral instance.
+    Instances are recycled after N uses or N seconds so one fingerprint isn't reused forever.
     """
 
     def __init__(self, size: int):
@@ -69,12 +54,7 @@ class CamoufoxPool:
         return inst
 
     async def release(self, inst: _PooledCamoufox, force_recycle: bool = False):
-        """`force_recycle` lets a caller that just observed this instance
-        fail in a way that looks process-level (e.g. new_context()/new_page()
-        raised before a solve even started) force it out of rotation
-        immediately, instead of waiting for its normal use/age-based
-        recycle threshold - otherwise a crashed/wedged Firefox process keeps
-        getting silently re-queued and handed to the next acquire()."""
+        """`force_recycle` evicts an instance that failed at the process level instead of re-queuing it."""
         if force_recycle or self._should_recycle(inst):
             self.recycles_total += 1
             self._all_instances.discard(inst)
@@ -143,13 +123,11 @@ class CamoufoxPool:
     async def close(self):
         """Close all pooled instances (idle and in-use) cleanly."""
         async with self._lock:
-            # Drain queue
             while True:
                 try:
                     self._idle.get_nowait()
                 except asyncio.QueueEmpty:
                     break
-            # Close all instances
             for inst in list(self._all_instances):
                 await self._close_instance(inst)
             self._all_instances.clear()

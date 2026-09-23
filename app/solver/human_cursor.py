@@ -9,7 +9,7 @@ import weakref
 
 logger = logging.getLogger("solverr.human_cursor")
 
-# Per-page cursor position tracking to isolate concurrent browser tasks
+# Per-page so concurrent solves don't share a cursor position.
 _page_cursors: "weakref.WeakKeyDictionary[Page, List[float]]" = weakref.WeakKeyDictionary()
 
 def _get_page_cursor(page: Page) -> List[float]:
@@ -33,13 +33,9 @@ def _bezier_point(p0: Tuple[float, float], p1: Tuple[float, float], p2: Tuple[fl
     return (x, y)
 
 def generate_bezier_path(start: Tuple[float, float], end: Tuple[float, float], steps: int = 25) -> List[Tuple[float, float]]:
-    """Generate realistic human-like mouse trajectory with randomized control points and jitter.
+    """Bézier mouse path with randomized control points and jitter.
 
-    Longer moves have a chance to aim slightly past the target and correct
-    back onto it in a few short final steps, mirroring the overshoot real
-    cursor movements exhibit (the same model Ghost-Cursor/HumanCursor use) -
-    a trajectory that decelerates to a dead stop exactly on target every
-    time is itself a detectable tell."""
+    Long moves sometimes overshoot and correct, since always stopping dead on target is a tell."""
     dx = end[0] - start[0]
     dy = end[1] - start[1]
     distance = math.hypot(dx, dy)
