@@ -13,9 +13,7 @@ import random
 
 import pytest
 
-# Keep the app's INFO-level logging out of the measurements: it writes to
-# stdout on every cache/session mutation, which is I/O the benchmarks are not
-# trying to characterize.
+# INFO logging writes to stdout on every cache/session mutation and would skew timings.
 logging.disable(logging.INFO)
 
 

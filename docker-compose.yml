@@ -11,24 +11,18 @@ services:
     shm_size: '2gb' # Recommended 1gb-2gb for Camoufox multi-worker rendering
     security_opt:
       - no-new-privileges:true
-    # Mount ephemeral browser scratchpad into RAM (tmpfs) to eliminate SSD write wear
-    # and prevent spinning HDDs from spinning up during solves on NAS deployments.
+    # Browser scratch in RAM: no SSD wear and no HDD spin-ups on a NAS.
     tmpfs:
       - /tmp:size=512M,mode=1777
       - /app/.cache/camoufox/tmp:size=512M,mode=1777
-    # cap_drop: [ALL] is intentionally NOT enabled by default here: verified
-    # working when the container runs as root (the default, no PUID/PGID),
-    # but Camoufox's Firefox sandbox hangs indefinitely under cap_drop:ALL
-    # once PUID/PGID drop the process to a non-root user via gosu, even with
-    # CHOWN/SETUID/SETGID/SYS_CHROOT/SYS_ADMIN added back - tested directly
-    # against this image. Only uncomment if you are NOT using PUID/PGID:
+    # Works as root, but Camoufox hangs under cap_drop: ALL with PUID/PGID. Uncomment only without PUID/PGID:
     # cap_drop:
     #   - ALL
     environment:
       - PORT=8191
       - HOST=0.0.0.0
       - LOG_LEVEL=INFO
-      - MAX_BROWSER_WORKERS=auto # Auto-scales across CPU cores, clamped to 2-3 workers in NAS mode
+      - MAX_BROWSER_WORKERS=auto # Scales with CPU cores and RAM; capped at 2 in NAS mode
       - NAS_MODE=true            # Conservative worker budgeting for UGREEN NASync / Synology / Unraid
       - HEADLESS=true
       - ENABLE_FAST_TLS=true

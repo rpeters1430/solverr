@@ -1,7 +1,6 @@
 from typing import Dict, List, Optional
 
-# Multi-WAF challenge marker table, keyed by the challenge type name used
-# both in logs and in PerformanceMetrics.challenges_solved (engine.py).
+# Keys double as challenge type names in logs and PerformanceMetrics.challenges_solved.
 CHALLENGE_MARKERS: Dict[str, List[str]] = {
     "cloudflare_turnstile": [
         "just a moment...",
@@ -19,13 +18,8 @@ CHALLENGE_MARKERS: Dict[str, List[str]] = {
     "imperva": ["incapsula", "_incapsula_resource", "visid_incap", "sec-cpt"],
     "datadome": ["datadome", "geo.captcha-delivery.com"],
     "akamai": ["ak_bmsc", "akamai-bot-manager", "akamai_bm"],
-    # AWS WAF's challenge page embeds its config as `window.gokuProps`
-    # ("goku" is AWS WAF's internal codename) in an inline <script> tag, so
-    # it's present in page.content() the same way the other markers above
-    # are. `aws-waf-token` (the cookie AWS WAF sets once solved) is
-    # deliberately not listed here: detect_challenge only ever sees the page
-    # title and page.content() (see the call site in browser.py), neither of
-    # which includes cookies, so a cookie-name marker could never match.
+    # AWS WAF inlines its config as window.gokuProps. The aws-waf-token cookie
+    # can't be a marker because detection only sees the title and HTML.
     "aws_waf": ["gokuprops", "awswaf"]
 }
 
@@ -51,10 +45,7 @@ BROWSER_ERROR_TITLES = [
 
 
 def detect_challenge(title: str, content: str, check_content: bool) -> Optional[str]:
-    """Pure lookup over CHALLENGE_MARKERS - no page/browser dependency, so
-    it's directly unit-testable. `content` is only consulted when
-    check_content is True (the loop only re-fetches page.content() every
-    few iterations to save time)."""
+    """Match CHALLENGE_MARKERS against the title, and against `content` only when check_content is set."""
     title_lower = title.lower() if title else ""
     content_lower = content.lower() if content else ""
     for ctype, markers in CHALLENGE_MARKERS.items():
@@ -67,12 +58,7 @@ def is_challenge_title(title: str) -> bool:
     title_lower = title.lower() if title else ""
     if any(t in title_lower for t in CHALLENGE_TITLE_MARKERS):
         return True
-    # Cloudflare's own transitional title ("Loading https://...") shown
-    # while its challenge JS finishes and window.location redirects to the
-    # real page - not a genuinely cleared page yet. Treating this as clean
-    # makes the loop break and snapshot the page mid-transition, which can
-    # capture a stale/incomplete response (and its real status code, now
-    # that status is tracked accurately - see the response listener above).
+    # Cloudflare's "Loading https://..." title appears mid-redirect, before the real page arrives.
     if title_lower.startswith("loading ") and "://" in title_lower:
         return True
     return False

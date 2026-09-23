@@ -15,15 +15,12 @@ async def dispatch_challenge_click(
     title: str,
     age_gate_clicked: bool
 ) -> Tuple[bool, bool]:
-    """Periodic interactive challenge solver dispatcher: tries each known
-    checkbox-style widget location in turn (Turnstile, reCAPTCHA, hCaptcha,
-    a generic shadow-DOM walk, then an age-gate dismissal) and dispatches a
-    human-like click on the first one found. Returns (clicked,
-    age_gate_clicked) - age_gate_clicked latches once an age gate has been
-    dismissed so it isn't re-clicked every iteration."""
+    """Human-click the first challenge widget found, trying each known location in order.
+
+    Returns (clicked, age_gate_clicked); age_gate_clicked latches so the gate isn't re-clicked."""
     clicked = False
 
-    # 1. Cloudflare Turnstile Frame-Level Checkbox Clicker
+    # Turnstile checkbox inside its own frame.
     if not clicked:
         for frame in page.frames:
             if any(x in frame.url.lower() for x in ["challenges.cloudflare.com", "turnstile", "cf-challenge"]):
@@ -40,7 +37,7 @@ async def dispatch_challenge_click(
                 except Exception as f_err:
                     logger.debug(f"[Turnstile] Frame click notice: {f_err}")
 
-    # 2. Cloudflare Turnstile Element / Top-Level Locator Checkbox Clicker
+    # Turnstile widget located from the top-level page.
     if not clicked:
         turnstile_locators = [
             "iframe[src*='challenges.cloudflare.com']",
@@ -71,7 +68,6 @@ async def dispatch_challenge_click(
             except Exception as t_err:
                 logger.debug(f"[Turnstile] Locator notice for '{t_sel}': {t_err}")
 
-    # 3. reCAPTCHA v2 / Enterprise Checkbox Locator
     if not clicked:
         try:
             recap_loc = page.locator("iframe[src*='recaptcha/api2/anchor'], iframe[src*='google.com/recaptcha']").first
@@ -86,7 +82,6 @@ async def dispatch_challenge_click(
         except Exception as recap_err:
             logger.debug(f"[reCAPTCHA] Notice: {recap_err}")
 
-    # 4. hCaptcha Checkbox Locator
     if not clicked:
         try:
             hcap_loc = page.locator("iframe[src*='hcaptcha.com']").first
@@ -101,7 +96,7 @@ async def dispatch_challenge_click(
         except Exception as hcap_err:
             logger.debug(f"[hCaptcha] Notice: {hcap_err}")
 
-    # 4.5. Deep Shadow DOM & Web Components Walker Fallback
+    # Fallback: walk shadow roots for widgets the locators above can't reach.
     if not clicked and (active_challenge in ["cloudflare_turnstile", "recaptcha", "hcaptcha"] or is_challenge_title(title)):
         try:
             shadow_box = await page.evaluate("""() => {
@@ -144,7 +139,7 @@ async def dispatch_challenge_click(
         except Exception as s_err:
             logger.debug(f"[ShadowDOM] Walker notice: {s_err}")
 
-    # 5. Modal Disclaimer / Age Gate Dismissal (Chaturbate, SpankBang, etc.)
+    # Age-gate / disclaimer modal.
     if not clicked and not age_gate_clicked:
         try:
             age_selectors = [

@@ -59,10 +59,7 @@ class TestSSRFProtection(unittest.TestCase):
             check_target_url("http://this-host-does-not-exist.invalid/")
 
     def test_scheme_less_loopback_blocked(self):
-        # urlparse() only populates .hostname when a "//" authority marker
-        # is present - a bare "host:port" (a legitimate way to write a
-        # proxy endpoint) must still be recognized, not silently pass
-        # through unchecked.
+        # urlparse() leaves .hostname empty without "//", so bare host:port proxies need their own check.
         with self.assertRaises(SSRFBlockedError):
             check_target_url("127.0.0.1:8080")
 
@@ -129,14 +126,9 @@ class TestProxySSRFProtection(unittest.IsolatedAsyncioTestCase):
         from app.solver.engine import HybridSolverEngine
 
         engine = HybridSolverEngine()
-        # Use a real, publicly-resolvable host (example.com) rather than a
-        # made-up subdomain - an NXDOMAIN lookup must be treated as blocked
-        # (see test_security.py's SSRF-fail-closed test), not "allowed",
-        # so a fake hostname here would defeat the point of this test.
+        # NXDOMAIN counts as blocked, so this needs a host that really resolves.
         req = V1Request(cmd="request.get", url="https://example.com", proxy="http://example.com:8080")
-        # Pin every downstream call so this stays a fast, deterministic unit
-        # test of the SSRF check itself, not an accidental integration test
-        # of the browser/fallback-proxy tiers.
+        # Stub every tier so only the SSRF check is under test.
         with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(False, None))) as fast_mock, \
              patch("app.solver.engine.browser_pool.solve", new=AsyncMock(side_effect=RuntimeError("browser should not be reached in this test"))) as browser_mock, \
              patch.object(settings, "FALLBACK_PROXY_URL", None):

@@ -82,9 +82,7 @@ class TestSessionManager(unittest.TestCase):
             self.assertIn(sid3, active)
 
     def test_redis_reconnects_after_initial_failure(self):
-        # Mirrors CookieCache's equivalent test (tests/test_cache.py): a
-        # Redis outage at startup must be retried, not permanent for the
-        # process's whole lifetime.
+        # A Redis outage at startup must be retried, not permanent.
         class FakeRedisClient:
             def __init__(self, healthy):
                 self.healthy = healthy
@@ -114,10 +112,7 @@ class TestSessionManager(unittest.TestCase):
             self.assertIs(mgr.redis_client, client)
 
     def test_local_sessions_are_migrated_to_redis_on_reconnect(self):
-        # A session created while Redis was down still lives in
-        # self._sessions (create_session() always populates it in-memory),
-        # but without migration it would stay invisible to other replicas
-        # and be lost on restart until something re-triggers _persist().
+        # Outage-era sessions exist only in memory until migrated.
         class FakeRedisClient:
             def __init__(self):
                 self.healthy = False
@@ -171,10 +166,7 @@ class TestSessionManager(unittest.TestCase):
         self.assertIs(mgr.redis_client, client)
 
     def test_redis_invalidated_and_retried_after_post_connect_outage(self):
-        # Mirrors CookieCache's equivalent test: a successful connection that
-        # later drops must be dropped by the client too, so the next call
-        # goes through _redis()'s cooldown instead of retrying a dead
-        # connection on every session operation.
+        # A connection that drops later must go through the reconnect cooldown too.
         class FlakyRedisClient:
             def __init__(self):
                 self.healthy = True

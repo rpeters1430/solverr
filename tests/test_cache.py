@@ -103,10 +103,7 @@ class TestCookieCache(unittest.TestCase):
         self.assertEqual(fetched[0].value, "new_val")
 
     def test_redis_reconnects_after_initial_failure(self):
-        # A Redis outage at process startup (e.g. `redis` not up yet under
-        # `docker compose --profile distributed up`) must not permanently
-        # strand the cache on local disk for the process's whole lifetime -
-        # it should retry and pick Redis back up once it's reachable.
+        # Redis being down at startup must not strand the cache on local disk.
         class FakeRedisClient:
             def __init__(self, healthy):
                 self.healthy = healthy
@@ -138,11 +135,7 @@ class TestCookieCache(unittest.TestCase):
             self.assertIs(cache.redis_client, client)
 
     def test_locally_cached_cookies_are_migrated_to_redis_on_reconnect(self):
-        # Cookies written to the local fallback store while Redis was down
-        # must not silently stop being served the moment Redis reconnects -
-        # get_cookies()/get_all_entries() read from Redis exclusively once
-        # it's live, so without migration they'd be invisible even though
-        # they're still sitting in _store.
+        # Reads go only to Redis once it's up, so outage-era cookies must migrate or vanish.
         import fnmatch
 
         class FakeRedisClient:
@@ -227,11 +220,7 @@ class TestCookieCache(unittest.TestCase):
         self.assertEqual(cache._store, {}, "the expired entry should be dropped, not migrated")
 
     def test_migration_leaves_everything_for_retry_if_the_pipeline_fails(self):
-        # Migration is one pipelined batch (see _FakePipeline): if Redis
-        # drops during execute(), there's no way to know which of the
-        # queued commands the server actually applied before the connection
-        # died, so the whole batch must be treated as not migrated - nothing
-        # removed from the local store, client invalidated for retry.
+        # A failed pipeline gives no per-command result, so nothing may leave the local store.
         class DyingMidPipelineClient:
             def __init__(self):
                 self.healthy = True
@@ -260,10 +249,7 @@ class TestCookieCache(unittest.TestCase):
         self.assertEqual(len(cache._store), 2, "nothing should be dropped when the whole batch fails")
 
     def test_redis_invalidated_and_retried_after_post_connect_outage(self):
-        # A successful initial connection that later drops (Redis restarted,
-        # network blip) must not be retried forever on every call with no
-        # backoff - it should be dropped so _redis()'s cooldown applies, the
-        # same as a failed initial connection.
+        # A connection that drops later must go through the reconnect cooldown too.
         class FlakyRedisClient:
             def __init__(self):
                 self.healthy = True

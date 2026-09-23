@@ -14,9 +14,7 @@ from app.security import check_target_url_async
 
 logger = logging.getLogger("solverr.engine")
 
-# Seconds. Spans Fast TLS (tens of ms) through a full browser challenge
-# solve (tens of seconds) in one bucket set, since both tiers share this
-# histogram (partitioned by the "tier" label instead of separate metrics).
+# Seconds. One bucket set spans Fast TLS (ms) to browser solves (tens of s) since all tiers share it.
 HISTOGRAM_BUCKETS_SECONDS = (0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60)
 
 class Histogram:
@@ -100,9 +98,7 @@ class PerformanceMetrics:
         self.timeouts_total += 1
 
     def record_cookie_cache_lookup(self, hit: bool):
-        # Distinct from self.cache_hits (tier2 = a request whose outcome was
-        # cached cookies) - this counts every cookie_cache.get_cookies()
-        # lookup regardless of which tier ultimately handled the request.
+        # Counts every lookup, unlike cache_hits which counts requests served by Tier 2.
         if hit:
             self.cookie_cache_lookup_hits += 1
         else:
@@ -182,18 +178,12 @@ class HybridSolverEngine:
         method = req.cmd.split(".")[-1].upper() if "." in req.cmd else "GET"
 
         await check_target_url_async(url)
-        # The proxy endpoint is just as capable of reaching internal/private
-        # network targets as `url` itself (it becomes the actual egress point
-        # for curl_cffi/Camoufox), so it must pass the same SSRF policy -
-        # otherwise a caller can point Solverr's egress at an internal
-        # service by setting `proxy` instead of `url`.
+        # The proxy is the real egress point, so it gets the same SSRF check as the URL.
         proxy_for_check = req.get_proxy_url()
         if proxy_for_check:
             await check_target_url_async(proxy_for_check, label="Proxy")
 
-        # Deduplication key for identical concurrent solves. Must cover every
-        # field that can change the outcome - two requests that only differ
-        # in, say, postData or session must never coalesce into one answer.
+        # Dedup key: every field that can change the outcome, so differing requests never coalesce.
         fingerprint = {
             "method": method,
             "url": url,
@@ -214,14 +204,8 @@ class HybridSolverEngine:
             json.dumps(fingerprint, sort_keys=True, default=str).encode()
         ).hexdigest()
 
-        # Loop rather than a single check-then-join: if the attempt we
-        # coalesce onto fails, re-check self._inflight before starting our
-        # own retry - another waiter may already have installed a fresh
-        # future in the meantime (no await happens between the check and
-        # the install below, so this is race-free under the single-threaded
-        # event loop). Without this, every one of N coalesced waiters would
-        # independently retry after a shared failure (thundering herd), and
-        # popping the wrong future out of self._inflight in the process.
+        # After a shared failure, re-check so one waiter retries and the rest join it (no thundering herd).
+        # Race-free because no await sits between the check and the install below.
         while True:
             existing = self._inflight.get(inflight_key)
             if existing is None:
@@ -245,32 +229,22 @@ class HybridSolverEngine:
         except Exception as e:
             if not future.done():
                 future.set_exception(e)
-                # Mark the exception as retrieved even if no concurrent
-                # waiter ever awaits this future, so asyncio doesn't log a
-                # spurious "exception was never retrieved" warning on GC.
+                # Mark retrieved so asyncio doesn't warn when no waiter awaited it.
                 future.exception()
             raise e
         finally:
-            # Only remove our own future - a concurrent attempt may already
-            # have replaced it (e.g. another waiter's retry after this one
-            # failed), and popping that one out from under it would defeat
-            # coalescing for anyone joining it.
+            # A waiter's retry may have replaced our future; don't pop theirs.
             if self._inflight.get(inflight_key) is future:
                 self._inflight.pop(inflight_key, None)
 
     async def _do_process_request(self, req: V1Request, budget: RequestBudget, url: str, method: str) -> SolutionModel:
         proxy_url = req.get_proxy_url()
 
-        # Combine input cookies with cached domain cookies
         combined_cookies: List[CookieModel] = []
         cached_cookies = await cookie_cache.get_cookies_async(url)
         metrics.record_cookie_cache_lookup(hit=bool(cached_cookies))
 
-        # Identity is domain + path + name, not name alone - two cookies with
-        # the same name on different domains/paths (e.g. a session cookie
-        # accumulated from one domain under a FlareSolverr session, and this
-        # domain's own cached clearance cookie) are distinct and must not
-        # shadow each other. Mirrors cookie_cache._cookie_key's identity model.
+        # Same identity as cookie_cache._cookie_key: same-name cookies on other paths are distinct.
         def _cookie_identity(c: CookieModel):
             return ((c.domain or "").lstrip(".").lower(), c.path or "/", c.name)
 
@@ -289,7 +263,7 @@ class HybridSolverEngine:
         if cached_cookies:
             logger.info(f"[HybridEngine] Merged {len(cached_cookies)} cached cookie(s) for domain '{cookie_cache._normalize_domain(url)}'")
 
-        # Level 1 & 2: Try Fast TLS (curl_cffi) first unless forceBrowser requested
+        # Tiers 1 and 2
         if settings.ENABLE_FAST_TLS and not req.forceBrowser:
             tls_timeout = max(1, min(10, int(budget.remaining_s)))
             logger.info(f"[HybridEngine] Level 1/2 Fast TLS: Attempting direct HTTP request (timeout={tls_timeout}s, remaining_budget={budget.remaining_s:.1f}s)...")
@@ -357,7 +331,7 @@ class HybridSolverEngine:
             reason = "forceBrowser=True requested" if req.forceBrowser else "ENABLE_FAST_TLS=false"
             logger.info(f"[HybridEngine] Skipping Level 1/2 Fast TLS ({reason}). Proceeding directly to Level 3 Stealth Browser...")
 
-        # Level 3: Stealth Camoufox / Playwright Browser Solve
+        # Tier 3
         if budget.is_expired or budget.remaining_s < 1.0:
             raise TimeoutError(f"Request timeout budget exhausted ({budget.elapsed_ms:.0f}ms elapsed)")
 
@@ -399,7 +373,7 @@ class HybridSolverEngine:
         except Exception as e:
             if isinstance(e, (asyncio.TimeoutError, TimeoutError)):
                 metrics.record_timeout()
-            # Tier 4: Fallback Proxy Escalation if configured and direct attempt failed
+            # Tier 4: retry through the fallback proxy.
             fallback_proxy = settings.FALLBACK_PROXY_URL
             if fallback_proxy and not proxy_url and not budget.is_expired and budget.remaining_s >= 2.0:
                 fallback_timeout_ms = max(3000, budget.remaining_ms)

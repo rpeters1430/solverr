@@ -7,10 +7,6 @@ from app.solver.browser import browser_pool
 from app.config import settings
 
 def generate_prometheus_metrics(cached_domains_count: int | None = None, active_sessions_count: int | None = None) -> str:
-    """
-    Generates standard Prometheus exposition format text for /metrics endpoint.
-    Compatible with Prometheus, VictoriaMetrics, Grafana Agent, and OpenTelemetry collector.
-    """
     proc = psutil.Process(os.getpid())
     mem_bytes = proc.memory_info().rss
     cpu_pct = psutil.cpu_percent(interval=None)

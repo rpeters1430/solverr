@@ -5,7 +5,7 @@ function escapeHtml(value) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-    // Tab Navigation
+    // Sidebar tabs
     const navItems = document.querySelectorAll('.nav-item');
     const tabPages = document.querySelectorAll('.tab-page');
     const tabTitle = document.getElementById('current-tab-title');
@@ -28,7 +28,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
-    // Toggle POST body field
+    // Show the POST body field only for POST
     const testMethodSelect = document.getElementById('test-method');
     const postDataContainer = document.getElementById('post-data-container');
     if (testMethodSelect && postDataContainer) {
@@ -41,7 +41,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Stats Fetcher & Poller
     async function fetchStats() {
         try {
             const res = await fetch('/api/stats');
@@ -56,7 +55,6 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('val-ram').innerHTML = `${data.ram_usage_mb || 0}<span class="unit">MB</span>`;
             document.getElementById('val-cpu').textContent = (data.cpu_usage_pct || 0) + '%';
 
-            // 4-Tier Pipeline counters
             if (document.getElementById('val-tier1-hits')) {
                 document.getElementById('val-tier1-hits').textContent = data.tier1_fast_tls_hits || 0;
             }
@@ -70,7 +68,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById('val-tier4-hits').textContent = data.tier4_fallback_proxy_hits || 0;
             }
 
-            // Browser Pool & Cache Health
             const pool = data.browser_pool || {};
             if (document.getElementById('val-pool-busy')) document.getElementById('val-pool-busy').textContent = pool.busy || 0;
             if (document.getElementById('val-pool-size')) document.getElementById('val-pool-size').textContent = pool.pool_size || 0;
@@ -125,7 +122,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('btn-refresh-stats').addEventListener('click', fetchStats);
 
-    // Real-Time Server-Sent Events (SSE) Listener
     function initEventStream() {
         const feed = document.getElementById('live-activity-feed');
         const statusLabel = document.getElementById('sse-status-label');
@@ -201,7 +197,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     initEventStream();
 
-    // Live URL Tester Form & Presets
+    // Live URL tester
     document.querySelectorAll('.test-preset').forEach(btn => {
         btn.addEventListener('click', () => {
             const url = btn.getAttribute('data-url');
@@ -256,11 +252,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            // Display Results
             testResults.classList.remove('hidden');
             document.getElementById('test-status-badge').textContent = `${data.http_status} OK (${elapsed}ms)`;
 
-            // Render cookies
             const tbody = document.getElementById('res-cookies-body');
             tbody.innerHTML = '';
             document.getElementById('res-cookie-count').textContent = data.cookies ? data.cookies.length : 0;
@@ -280,11 +274,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color: var(--text-muted);">No cookies captured</td></tr>';
             }
 
-            // Render Headers & HTML
             document.getElementById('res-headers-code').textContent = JSON.stringify(data.headers, null, 2);
             document.getElementById('res-html-code').textContent = data.html_snippet || 'No HTML content returned';
 
-            // Screenshot tab handling
             const screenshotTabBtn = document.getElementById('tab-btn-screenshot');
             const screenshotImg = document.getElementById('res-screenshot-img');
             if (data.screenshot) {
@@ -294,7 +286,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 screenshotTabBtn.classList.add('hidden');
             }
 
-            // Refresh overview stats
             fetchStats();
 
         } catch (err) {
@@ -304,7 +295,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Results Sub-tabs
+    // Result sub-tabs
     const resTabs = document.querySelectorAll('.res-tab');
     resTabs.forEach(tab => {
         tab.addEventListener('click', () => {
@@ -318,7 +309,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
-    // Cookie Cache Inspector
     async function fetchCookies() {
         const container = document.getElementById('cookie-domains-container');
         container.innerHTML = '<div style="color: var(--text-muted);">Loading cookie cache...</div>';

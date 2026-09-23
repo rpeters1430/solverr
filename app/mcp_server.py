@@ -1,13 +1,6 @@
-"""MCP (Model Context Protocol) server exposing Solverr's tiered solver as
-tools an AI agent can call directly, alongside the existing FlareSolverr
-(`/v1`, `/v2`) and native (`/scrape`) HTTP APIs. Mounted at `/mcp` by
-app/main.py when `settings.ENABLE_MCP` is true (the default).
+"""MCP server mounted at /mcp, exposing Solverr's solver as agent tools.
 
-Uses the `mcp` package's `MCPServer` (the `mcp` 2.x successor to the 1.x
-`FastMCP` class - see the migration note in `mcp.server.fastmcp`). Tools
-reuse the same `solver_engine`/`cookie_cache`/`browser_pool` singletons the
-HTTP routes use, so a solve/cache hit through MCP shows up in the same
-`/metrics` and dashboard the rest of Solverr does.
+Tools share the HTTP routes' singletons, so MCP solves appear in /metrics and the dashboard.
 """
 import base64
 import logging
@@ -80,10 +73,7 @@ async def solverr_scrape(
         ).to_v1_request()
         solution = await solver_engine.process_request(req)
     except Exception as e:
-        # Never surface the raw exception to the MCP caller - like
-        # app/main.py's catch-all handler, it can carry internal paths or
-        # proxy credentials from deep in the solve pipeline. Full detail
-        # goes to the server log only.
+        # Exception text can carry proxy credentials, so details go to the log only.
         logger.error(f"[MCP] solverr_scrape failed for {url}: {type(e).__name__}: {e}", exc_info=True)
         raise ToolError(f"Scrape failed for {url}; see server logs for details.") from e
 
@@ -121,9 +111,7 @@ async def solverr_screenshot(url: str, max_timeout_ms: int = 60000) -> Image:
 
     if not solution.screenshot:
         raise ToolError(f"No screenshot was captured for {url} (http_status={solution.status})")
-    # BrowserPool captures screenshots as JPEG (page.screenshot(type="jpeg"),
-    # app/solver/browser/browser.py) - format must match the actual bytes,
-    # not just the file extension callers might expect.
+    # BrowserPool captures JPEG, and the format must match the bytes.
     return Image(data=base64.b64decode(solution.screenshot), format="jpeg")
 
 
@@ -146,16 +134,7 @@ def solverr_get_stats() -> Dict[str, Any]:
     return stats
 
 
-# DNS-rebinding protection only ever matches literal Host/Origin values (or
-# a "host:*" port wildcard) - it has no "any host" wildcard, so it can't
-# simply be pointed at "whatever Solverr's real deployment hostname turns
-# out to be" (a NAS IP, a Docker network alias, a custom domain behind a
-# reverse proxy - all unknown at container-build time). These are the
-# defaults when API_KEY is unset and the operator hasn't set
-# MCP_ALLOWED_HOSTS/MCP_ALLOWED_ORIGINS: local-only, so MCP still works out
-# of the box for the common localhost/dev case without leaving an
-# unauthenticated deployment reachable from the whole network via DNS
-# rebinding.
+# The SDK has no "any host" wildcard, so with no API_KEY the default allowlist is localhost only.
 _LOCAL_ONLY_ALLOWED_HOSTS = [
     "127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*", "[::1]", "[::1]:*",
 ]
@@ -169,18 +148,10 @@ _LOCAL_ONLY_ALLOWED_ORIGINS = [
 
 def _mcp_transport_security() -> TransportSecuritySettings:
     if settings.API_KEY:
-        # A shared secret already gates every call (app/main.py's
-        # middleware) - a Host-header check on top of that would only ever
-        # reject legitimate requests to Solverr's actual deployment hostname
-        # without stopping anyone who doesn't already have the key.
+        # The API key already gates every call; a Host check would only reject real deployment hostnames.
         return TransportSecuritySettings(enable_dns_rebinding_protection=False)
-    # No API_KEY: MCP would otherwise be a fully open surface (tools like
-    # solverr_get_cookies included) reachable from any browser tab via DNS
-    # rebinding. Keep the SDK's protection on, restricted to localhost
-    # unless the operator opts into a wider deployment explicitly.
-    # Additive, not a replacement: an operator adding a real deployment
-    # hostname still expects localhost to keep working for local testing -
-    # MCP_ALLOWED_HOSTS/_ORIGINS widen the allowlist, they don't narrow it.
+    # Without a key, any browser tab could reach the tools via DNS rebinding.
+    # MCP_ALLOWED_HOSTS/_ORIGINS add to localhost rather than replace it.
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=_LOCAL_ONLY_ALLOWED_HOSTS + settings.MCP_ALLOWED_HOSTS,
@@ -189,16 +160,9 @@ def _mcp_transport_security() -> TransportSecuritySettings:
 
 
 def create_mcp_asgi_app() -> Starlette:
-    """Build the MCP Streamable HTTP ASGI app. Must be called exactly once,
-    before `mcp_server.session_manager` is accessed - app/main.py's lifespan
-    enters that session manager's run() context alongside its own setup.
+    """Call exactly once, before `mcp_server.session_manager` is accessed.
 
-    `stateless_http=True` avoids sticky-session requirements (each request
-    gets its own transport), which matters once Solverr runs multiple
-    replicas behind a load balancer (see the "Horizontal Scaling" README
-    section) with no guarantee two requests from the same MCP client land on
-    the same replica. See `_mcp_transport_security()` for the DNS-rebinding
-    protection decision.
+    Stateless so replicas behind a load balancer don't need sticky sessions.
     """
     return mcp_server.streamable_http_app(
         streamable_http_path="/",

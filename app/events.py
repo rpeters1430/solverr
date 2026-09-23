@@ -34,7 +34,6 @@ class EventBroadcaster:
                     pass
 
     def emit(self, event_type: str, data: Dict[str, Any]):
-        """Non-blocking event emission helper."""
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(self.broadcast(event_type, data))

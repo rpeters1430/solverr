@@ -31,10 +31,7 @@ class TestChallengeDetection(unittest.TestCase):
         self.assertEqual(detect_challenge("", "<script src='/awswaf/challenge.js'></script>", check_content=True), "aws_waf")
 
     def test_aws_waf_cookie_name_alone_is_not_detected(self):
-        # detect_challenge only ever sees title/page.content() (see the call
-        # site in browser.py) - cookies are never passed in, so a page whose
-        # only AWS WAF signal is the aws-waf-token cookie (not present in the
-        # page's own HTML/JS) must not match.
+        # Detection never sees cookies, so the aws-waf-token name alone must not match.
         self.assertIsNone(detect_challenge("", "document.cookie contains aws-waf-token=...", check_content=True))
 
     def test_clean_page_has_no_challenge(self):
@@ -73,11 +70,7 @@ class TestChallengeDetection(unittest.TestCase):
         self.assertIsNone(detect_challenge("", '{"akamai_fingerprint": "1:65536;2:0"}', check_content=True))
 
     def test_cloudflare_loading_redirect_title_is_still_a_challenge(self):
-        # Cloudflare shows "Loading <target-url>" as a transitional title
-        # while its JS challenge finishes and window.location redirects -
-        # treating this as cleared snapshots the page mid-transition
-        # (observed live: a real solve broke out here and reported the
-        # transitional page's 403 instead of waiting for the real result).
+        # Treating this mid-redirect title as cleared once returned the transitional page's 403.
         self.assertTrue(is_challenge_title("Loading https://eztvx.to/home"))
         self.assertTrue(is_challenge_title("Loading http://example.com/page"))
 

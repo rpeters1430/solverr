@@ -17,10 +17,7 @@ logger = logging.getLogger("solverr.fast_tls")
 
 MAX_REDIRECTS = 10
 
-# TLS impersonation profiles, each paired with a User-Agent that actually
-# matches the claimed browser/version. A JA3/JA4 fingerprint that says
-# "Firefox 147" alongside a "Firefox 135" User-Agent header is itself a
-# strong bot signal, so target and UA must always travel together.
+# Target and UA always travel together; a mismatched pair is itself a bot signal.
 FIREFOX_PROFILES = [
     ("firefox147", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0"),
     ("firefox144", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) Gecko/20100101 Firefox/144.0"),
@@ -61,9 +58,7 @@ class FastTLSEngine:
         """Track success/failure per-domain profile to adaptively pick optimal TLS profiles."""
         domain = self._normalize_domain(url)
         if domain not in self._domain_scores:
-            # Bounded like the sibling _sessions pool below - evict the
-            # least-recently-touched domain once at capacity, instead of
-            # growing this dict for the life of the process.
+            # Evict the least recently touched domain so this dict stays bounded.
             if len(self._domain_scores) >= self._max_domain_scores:
                 self._domain_scores.popitem(last=False)
             self._domain_scores[domain] = {}
@@ -147,10 +142,7 @@ class FastTLSEngine:
         user_agent: Optional[str] = None,
         session_id: Optional[str] = None
     ) -> Tuple[bool, Optional[SolutionModel]]:
-        # Only rotate the TLS/UA pair when the caller didn't pin a specific
-        # User-Agent - an explicit user_agent means the caller wants control,
-        # so we keep the configured default impersonation target as-is
-        # rather than risk a UA/JA3 mismatch.
+        # A caller-pinned UA keeps the default target instead of rotating.
         if user_agent:
             active_ua = user_agent
             impersonate_target = self.impersonate_target
@@ -158,11 +150,7 @@ class FastTLSEngine:
             impersonate_target, active_ua = self._profile_for_domain(url)
 
         domain = self._normalize_domain(url)
-        # Include the caller's FlareSolverr session id in the pool key - the
-        # pooled AsyncSession carries its own persistent cookie jar, so two
-        # concurrent callers hitting the same domain under different (or no)
-        # session ids must not share one jar and bleed cookies into each
-        # other's requests/responses.
+        # Each pooled session has its own cookie jar, so the session id keys it to prevent cookie bleed.
         pool_key = f"{domain}:{impersonate_target}:{proxy or ''}:{session_id or ''}"
 
         cookie_dict = {}
@@ -243,7 +231,6 @@ class FastTLSEngine:
                     current_post_data = None
                 current_url = next_url
 
-            # Check if page returned a WAF challenge response
             is_cf_challenge = False
             matched_marker = None
             body_text = resp.text or ""
@@ -261,10 +248,9 @@ class FastTLSEngine:
             )
 
             if resp.status_code == 200 and is_non_html_api:
-                # A 200 OK API response (JSON, XML, plain text) is never an HTML anti-bot challenge interstitial
+                # A 200 non-HTML API response is never a challenge page.
                 is_cf_challenge = False
             else:
-                # Extract title tag if present
                 title_match = re.search(r"<title[^>]*>(.*?)</title>", body_text, re.IGNORECASE | re.DOTALL)
                 page_title = title_match.group(1).strip() if title_match else ""
 
@@ -296,13 +282,7 @@ class FastTLSEngine:
                 logger.info(f"[FastTLS] Direct HTTP response received (HTTP Status: {resp.status_code}, Length: {len(resp.text)} bytes)")
 
             captured_cookies: List[CookieModel] = []
-            # Use the actual responding URL (post-redirect-chain), not the
-            # original request `url` - a redirect chain that crosses domains
-            # would otherwise tag cookies set by the real responding domain
-            # under the original domain, poisoning the shared cache for every
-            # future request to that original domain (see cookies.py's
-            # extract_captured_cookies on the browser tier, which reads the
-            # real domain via Playwright and doesn't have this problem).
+            # Use the post-redirect URL; a cross-domain chain would otherwise file cookies under the wrong domain.
             parsed_req_url = urlparse(str(resp.url))
             cookie_domain = parsed_req_url.netloc.split(":")[0].lstrip(".")
             for name, val in resp.cookies.items():

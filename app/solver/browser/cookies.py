@@ -8,9 +8,7 @@ logger = logging.getLogger("solverr.browser")
 
 
 def build_playwright_cookies(url: str, cookies: Optional[List[CookieModel]]) -> List[Dict[str, str]]:
-    """Convert incoming CookieModels into the dict shape Playwright's
-    context.add_cookies() expects, defaulting an unset cookie domain to the
-    target URL's host."""
+    """CookieModels to context.add_cookies() dicts; an unset domain defaults to the target host."""
     if not cookies:
         return []
     parsed_url = urlparse(url)
@@ -28,9 +26,7 @@ def build_playwright_cookies(url: str, cookies: Optional[List[CookieModel]]) -> 
 
 
 async def read_context_cookies(context: Any) -> List[Dict[str, Any]]:
-    """Read raw cookies back off a Playwright context/browser, tolerating
-    either a real BrowserContext (`.cookies()`) or a bare Browser object
-    that only exposes `.contexts` (the ephemeral-Camoufox path)."""
+    """Accepts a BrowserContext or a bare Browser that only exposes `.contexts`."""
     try:
         if hasattr(context, "cookies"):
             return await context.cookies()
@@ -42,9 +38,7 @@ async def read_context_cookies(context: Any) -> List[Dict[str, Any]]:
 
 
 def extract_captured_cookies(raw_cookies: List[Dict[str, Any]]) -> List[CookieModel]:
-    """Normalize Playwright's raw cookie dicts into CookieModel, tolerating
-    missing/malformed expires and size fields from different browser
-    versions."""
+    """Raw Playwright cookies to CookieModel, tolerating missing or malformed expires/size."""
     captured_cookies: List[CookieModel] = []
     for rc in raw_cookies:
         c_name = str(rc.get("name", "") or "")

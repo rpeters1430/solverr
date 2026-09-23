@@ -102,9 +102,7 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
                 self.engine.process_request(req_plain),
                 self.engine.process_request(req_screenshot),
             )
-            # A plain scrape and a screenshot request for the same URL must
-            # never share one in-flight answer - a caller that didn't ask
-            # for a screenshot could otherwise get one back, or vice versa.
+            # Screenshot and plain requests for one URL must not coalesce.
             self.assertEqual(browser_mock.call_count, 2)
 
     async def test_concurrent_requests_differing_only_by_max_timeout_are_not_coalesced(self):
@@ -148,10 +146,7 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
             # The shared failure must trigger exactly one retry, not one
             # independent retry per coalesced waiter (thundering herd).
             self.assertEqual(call_count["n"], 2)
-            # The single request whose attempt actually failed rightfully
-            # sees that failure (it isn't a "joiner"); every other coalesced
-            # waiter must observe the one retry's success rather than each
-            # kicking off (and racing on popping) its own separate retry.
+            # The request that failed sees its failure; every joiner shares a single retry.
             errors = [r for r in results if isinstance(r, Exception)]
             successes = [r for r in results if not isinstance(r, Exception)]
             self.assertEqual(len(errors), 1)
@@ -168,9 +163,7 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
             await self.engine.process_request(req)
             called_cookies = fast_mock.call_args.kwargs["cookies"]
             seen = {(c.domain, c.name, c.value) for c in called_cookies}
-            # Both must survive the merge - the cache's cookie for the
-            # actual target domain must not be dropped just because an
-            # unrelated domain's cookie happens to share its name.
+            # Same-name cookies on different domains must both survive the merge.
             self.assertIn(("other.example.com", "session", "input-value"), seen)
             self.assertIn(("example.com", "session", "cached-value"), seen)
 

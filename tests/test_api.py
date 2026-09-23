@@ -97,10 +97,7 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertEqual(path[-1], (400, 300))
 
     def test_human_cursor_bezier_path_overshoots_before_correcting(self):
-        # Forces the overshoot branch (random.random() < 0.55 always true)
-        # and checks the path actually passes the target before the final
-        # correction steps ease it back - not just that it lands on target,
-        # which the old dead-stop trajectory would also satisfy.
+        # Force the overshoot branch; landing on target alone wouldn't prove the path overshot.
         import random
         from unittest.mock import patch
         start = (0.0, 0.0)
@@ -111,10 +108,7 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertTrue(any(pt[0] > end[0] for pt in path[:-1]))
 
     def test_human_cursor_bezier_path_always_lands_on_target(self):
-        # Long moves have a chance to overshoot and correct back (see
-        # human_cursor.py) - whichever branch fires, the path must still end
-        # exactly on the requested target, since callers (human_click) rely
-        # on that for the final click coordinate.
+        # Overshoot or not, human_click relies on the path ending exactly on target.
         import random
         random.seed(42)
         for _ in range(200):
@@ -139,9 +133,7 @@ class TestAPIEndpoints(unittest.TestCase):
             res_bearer = self.client.get("/api/stats", headers={"authorization": "Bearer secret123"})
             self.assertEqual(res_bearer.status_code, 200)
 
-            # Query param api_key is intentionally rejected: it would leak the
-            # key into access logs, browser history, and outbound Referer
-            # headers. Header-only auth is required.
+            # A query-string key would leak into logs and Referer headers, so it's rejected.
             res_param = self.client.get("/api/stats?api_key=secret123")
             self.assertEqual(res_param.status_code, 401)
 

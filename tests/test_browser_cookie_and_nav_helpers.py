@@ -94,9 +94,7 @@ class FakeNavigationContext:
 
 class TestNavigateToTarget(unittest.IsolatedAsyncioTestCase):
     async def test_post_navigation_captures_response_status(self):
-        # Regression test for the bug Copilot flagged on PR #29:
-        # page.wait_for_load_state() always returns None, so the POST path
-        # never actually captured a status. expect_navigation() should.
+        # wait_for_load_state() returns None, so only expect_navigation() captures the POST status.
         fake_response = MagicMock(status=201)
         page = MagicMock()
         page.set_content = AsyncMock()
