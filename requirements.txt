@@ -1,5 +1,5 @@
 fastapi==0.141.1
-uvicorn[standard]==0.53.0
+uvicorn[standard]==0.54.0
 curl_cffi==0.16.3
 # Camoufox 0.5.6 requires playwright<1.63. Keep this pinned until Camoufox
 # publishes a release compatible with Playwright 1.63 or newer.
