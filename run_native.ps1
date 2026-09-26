@@ -18,10 +18,9 @@ Write-Host "[1/3] Checking Python dependencies..." -ForegroundColor Green
 python -m pip install --quiet --upgrade pip
 python -m pip install --quiet -r requirements.txt
 
-# Ensure Camoufox and Playwright browsers are installed
-Write-Host "[2/3] Verifying Camoufox Stealth Firefox & Playwright engines..." -ForegroundColor Green
+# Ensure Camoufox stealth browser is installed
+Write-Host "[2/3] Verifying Camoufox Stealth Firefox engine..." -ForegroundColor Green
 python -m camoufox fetch
-python -m playwright install chromium
 
 # Check if Port 8191 is in use
 $portConn = Get-NetTCPConnection -LocalPort 8191 -State Listen -ErrorAction SilentlyContinue

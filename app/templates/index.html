@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Solverr | Next-Gen Fast FlareSolverr &amp; Trawl Replacement</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,6 +11,24 @@
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>">
 </head>
 <body>
+    <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+    <header class="mobile-header">
+        <div class="mobile-brand">
+            <span class="brand-icon">⚡</span>
+            <span class="mobile-brand-title">SOLVERR</span>
+            <span class="version-tag mobile-version-tag" id="val-version-tag-mobile">v1.7.0-ultra</span>
+        </div>
+        <div class="mobile-header-right">
+            <div class="mobile-status-pill" title="Engine Ready">
+                <span class="dot"></span>
+                <span class="mobile-status-text">Ready</span>
+            </div>
+            <button class="mobile-menu-btn" id="btn-mobile-menu" aria-label="Toggle navigation menu" aria-expanded="false">
+                <svg width="22" height="22" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+            </button>
+        </div>
+    </header>
+
     <div class="app-container">
         <aside class="sidebar">
             <div class="brand">
@@ -19,6 +37,9 @@
                     <h1>SOLVERR</h1>
                     <span class="version-tag" id="val-version-tag">v1.7.0-ultra</span>
                 </div>
+                <button class="btn-sidebar-close" id="btn-sidebar-close" aria-label="Close navigation menu">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
             </div>
 
             <nav class="nav-menu">
@@ -113,26 +134,26 @@
                         <h3>4-Tier Adaptive Solver Pipeline</h3>
                         <p>Requests automatically escalate through lightweight tiers before spinning up full browser engines.</p>
                     </div>
-                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;">
-                        <div style="background: rgba(6, 182, 212, 0.08); border: 1px solid rgba(6, 182, 212, 0.2); border-radius: 8px; padding: 14px;">
-                            <div style="font-size: 0.8rem; color: var(--accent-cyan); font-weight: 600;">TIER 1 (FAST TLS)</div>
-                            <div style="font-size: 1.5rem; font-weight: 700; margin: 4px 0;" id="val-tier1-hits">0</div>
-                            <div style="font-size: 0.75rem; color: var(--text-muted);">curl_cffi JA3 impersonation (~50-150ms)</div>
+                    <div class="tier-grid">
+                        <div class="tier-card tier-1">
+                            <div class="tier-badge">TIER 1 (FAST TLS)</div>
+                            <div class="tier-val" id="val-tier1-hits">0</div>
+                            <div class="tier-desc">curl_cffi JA3 impersonation (~50-150ms)</div>
                         </div>
-                        <div style="background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.2); border-radius: 8px; padding: 14px;">
-                            <div style="font-size: 0.8rem; color: var(--accent-emerald); font-weight: 600;">TIER 2 (COOKIE CACHE)</div>
-                            <div style="font-size: 1.5rem; font-weight: 700; margin: 4px 0;" id="val-tier2-hits">0</div>
-                            <div style="font-size: 0.75rem; color: var(--text-muted);">Saved cf_clearance reuse (~30-80ms)</div>
+                        <div class="tier-card tier-2">
+                            <div class="tier-badge">TIER 2 (COOKIE CACHE)</div>
+                            <div class="tier-val" id="val-tier2-hits">0</div>
+                            <div class="tier-desc">Saved cf_clearance reuse (~30-80ms)</div>
                         </div>
-                        <div style="background: rgba(168, 85, 247, 0.08); border: 1px solid rgba(168, 85, 247, 0.2); border-radius: 8px; padding: 14px;">
-                            <div style="font-size: 0.8rem; color: var(--accent-purple); font-weight: 600;">TIER 3 (STEALTH BROWSER)</div>
-                            <div style="font-size: 1.5rem; font-weight: 700; margin: 4px 0;" id="val-tier3-hits">0</div>
-                            <div style="font-size: 0.75rem; color: var(--text-muted);">Camoufox / Playwright solver (~1.8-3s)</div>
+                        <div class="tier-card tier-3">
+                            <div class="tier-badge">TIER 3 (STEALTH BROWSER)</div>
+                            <div class="tier-val" id="val-tier3-hits">0</div>
+                            <div class="tier-desc">Camoufox / Playwright solver (~1.8-3s)</div>
                         </div>
-                        <div style="background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.2); border-radius: 8px; padding: 14px;">
-                            <div style="font-size: 0.8rem; color: var(--accent-amber); font-weight: 600;">TIER 4 (FALLBACK PROXY)</div>
-                            <div style="font-size: 1.5rem; font-weight: 700; margin: 4px 0;" id="val-tier4-hits">0</div>
-                            <div style="font-size: 0.75rem; color: var(--text-muted);">Residential / Fallback proxy routing</div>
+                        <div class="tier-card tier-4">
+                            <div class="tier-badge">TIER 4 (FALLBACK PROXY)</div>
+                            <div class="tier-val" id="val-tier4-hits">0</div>
+                            <div class="tier-desc">Residential / Fallback proxy routing</div>
                         </div>
                     </div>
                 </div>
@@ -142,26 +163,26 @@
                         <h3>Browser Pool &amp; Cache Health</h3>
                         <p>Warm Camoufox pool utilization and cookie cache effectiveness.</p>
                     </div>
-                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px;">
-                        <div style="background: rgba(168, 85, 247, 0.08); border: 1px solid rgba(168, 85, 247, 0.2); border-radius: 8px; padding: 14px;">
-                            <div style="font-size: 0.8rem; color: var(--accent-purple); font-weight: 600;">POOL UTILIZATION</div>
-                            <div style="font-size: 1.5rem; font-weight: 700; margin: 4px 0;"><span id="val-pool-busy">0</span>/<span id="val-pool-size">0</span></div>
-                            <div style="font-size: 0.75rem; color: var(--text-muted);"><span id="val-pool-idle">0</span> idle warm instance(s)</div>
+                    <div class="pool-grid">
+                        <div class="pool-card pool-purple">
+                            <div class="pool-badge">POOL UTILIZATION</div>
+                            <div class="pool-val"><span id="val-pool-busy">0</span>/<span id="val-pool-size">0</span></div>
+                            <div class="pool-desc"><span id="val-pool-idle">0</span> idle warm instance(s)</div>
                         </div>
-                        <div style="background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.2); border-radius: 8px; padding: 14px;">
-                            <div style="font-size: 0.8rem; color: var(--accent-emerald); font-weight: 600;">COOKIE CACHE HIT RATIO</div>
-                            <div style="font-size: 1.5rem; font-weight: 700; margin: 4px 0;" id="val-cache-hit-ratio">0%</div>
-                            <div style="font-size: 0.75rem; color: var(--text-muted);"><span id="val-cache-lookups">0</span> lookup(s)</div>
+                        <div class="pool-card pool-emerald">
+                            <div class="pool-badge">COOKIE CACHE HIT RATIO</div>
+                            <div class="pool-val" id="val-cache-hit-ratio">0%</div>
+                            <div class="pool-desc"><span id="val-cache-lookups">0</span> lookup(s)</div>
                         </div>
-                        <div style="background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.2); border-radius: 8px; padding: 14px;">
-                            <div style="font-size: 0.8rem; color: var(--accent-amber); font-weight: 600;">QUEUE WAIT (AVG)</div>
-                            <div style="font-size: 1.5rem; font-weight: 700; margin: 4px 0;"><span id="val-queue-wait">0</span><span class="unit">ms</span></div>
-                            <div style="font-size: 0.75rem; color: var(--text-muted);"><span id="val-pool-recycles">0</span> recycle(s)</div>
+                        <div class="pool-card pool-amber">
+                            <div class="pool-badge">QUEUE WAIT (AVG)</div>
+                            <div class="pool-val"><span id="val-queue-wait">0</span><span class="unit">ms</span></div>
+                            <div class="pool-desc"><span id="val-pool-recycles">0</span> recycle(s)</div>
                         </div>
-                        <div style="background: rgba(244, 63, 94, 0.08); border: 1px solid rgba(244, 63, 94, 0.2); border-radius: 8px; padding: 14px;">
-                            <div style="font-size: 0.8rem; color: var(--accent-rose); font-weight: 600;">BROWSER CRASHES</div>
-                            <div style="font-size: 1.5rem; font-weight: 700; margin: 4px 0;" id="val-browser-crashes">0</div>
-                            <div style="font-size: 0.75rem; color: var(--text-muted);"><span id="val-timeouts">0</span> timeout(s)</div>
+                        <div class="pool-card pool-rose">
+                            <div class="pool-badge">BROWSER CRASHES</div>
+                            <div class="pool-val" id="val-browser-crashes">0</div>
+                            <div class="pool-desc"><span id="val-timeouts">0</span> timeout(s)</div>
                         </div>
                     </div>
                 </div>
@@ -285,19 +306,21 @@
                         </div>
 
                         <div class="form-row options-row">
-                            <label class="checkbox-label">
-                                <input type="checkbox" id="test-force-browser">
-                                <span>Force Full Browser Solve (Skip Fast TLS)</span>
-                            </label>
-                            <label class="checkbox-label">
-                                <input type="checkbox" id="test-use-cache" checked>
-                                <span>Use Cookie &amp; Clearance Cache</span>
-                            </label>
-                            <label class="checkbox-label">
-                                <input type="checkbox" id="test-screenshot">
-                                <span>Capture Debug Screenshot</span>
-                            </label>
-                            <button type="submit" class="btn btn-primary" id="btn-run-test">
+                            <div class="checkboxes-group">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="test-force-browser">
+                                    <span>Force Full Browser Solve (Skip Fast TLS)</span>
+                                </label>
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="test-use-cache" checked>
+                                    <span>Use Cookie &amp; Clearance Cache</span>
+                                </label>
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="test-screenshot">
+                                    <span>Capture Debug Screenshot</span>
+                                </label>
+                            </div>
+                            <button type="submit" class="btn btn-primary btn-submit-test" id="btn-run-test">
                                 <span id="test-btn-text">Run Solver Test ⚡</span>
                                 <div class="spinner hidden" id="test-spinner"></div>
                             </button>
@@ -353,15 +376,15 @@
             <!-- Cookies tab -->
             <section id="tab-cookies" class="tab-page">
                 <div class="panel">
-                    <div class="panel-header">
+                    <div class="panel-header panel-header-actions">
                         <div>
                             <h3>Domain Cookie Cache</h3>
                             <p>Active <code>cf_clearance</code> tokens and session cookies saved for instant fast-path reuse.</p>
                         </div>
-                        <div style="display: flex; gap: 8px; align-items: center;">
+                        <div class="header-action-buttons">
                             <a href="/api/cookies/export?format=netscape" download="cookies.txt" class="btn btn-secondary" style="text-decoration: none; display: inline-flex; align-items: center; gap: 6px;">
                                 <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
-                                Export Netscape
+                                <span>Export Netscape</span>
                             </a>
                             <button class="btn btn-danger" id="btn-clear-cookies">Clear All Cache</button>
                         </div>
@@ -424,6 +447,25 @@
             </section>
         </main>
     </div>
+
+    <nav class="mobile-bottom-nav" aria-label="Mobile Navigation">
+        <button class="mobile-nav-item active" data-tab="overview">
+            <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+            <span>Overview</span>
+        </button>
+        <button class="mobile-nav-item" data-tab="tester">
+            <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+            <span>Tester</span>
+        </button>
+        <button class="mobile-nav-item" data-tab="cookies">
+            <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+            <span>Cookies</span>
+        </button>
+        <button class="mobile-nav-item" data-tab="setup">
+            <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+            <span>Setup</span>
+        </button>
+    </nav>
 
     <script src="/static/app.js?v=1.7.0"></script>
 </body>
