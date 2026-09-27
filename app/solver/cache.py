@@ -162,11 +162,10 @@ class CookieCache:
                         result.append(c_model)
                     except Exception:
                         pass
-        # Deduplicate by cookie name (last/most-specific wins)
-        deduped: Dict[str, CookieModel] = {}
-        for c in result:
-            deduped[c.name] = c
-        return list(deduped.values())
+        # Storage already deduplicates identical (domain, path, name) keys.
+        # Keep different paths and domains here: HTTP cookie selection needs
+        # that scope information, and Redis returns the same full cookie set.
+        return result
 
     def get_cookie_dict(self, url_or_domain: str) -> Dict[str, str]:
         cookies = self.get_cookies(url_or_domain)

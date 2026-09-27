@@ -42,7 +42,7 @@ what shipped and how it was verified.
   budgeting shipped separately in v1.7.0 (`RequestBudget` in
   `app/solver/engine.py`).
 
-## ⚠️ Finding from this pass: PUID/PGID + Camoufox can hang indefinitely
+## Historical finding: PUID/PGID + Camoufox launch hang
 
 Verified directly against a built image, 2026-08-23. Running the container
 with `-e PUID=1000 -e PGID=1000` (no other flags) and triggering a Tier 3
@@ -53,14 +53,7 @@ before it was manually killed. Root cause wasn't identified (not a
 capability issue — reproduces with zero hardening flags; not further
 narrowed down given remaining session budget).
 
-Impact today: `BrowserPool.solve()`'s two attempts are already wrapped in
-`asyncio.wait_for(timeout=tier_timeout)`, so a production solve request
-hitting this still times out and gets logged/escalates to Tier 4 rather
-than hanging the whole server. `BrowserPool.self_test()` had no such
-wrapper and has been fixed to add one. This is still worth a tracked
-GitHub issue and real investigation before recommending PUID/PGID
-alongside heavy Tier 3 usage in production — see CLAUDE.md's Docker
-section for the full repro notes.
+Current status (2026-09-26): Docker publish workflow run [#142](https://github.com/rpeters1430/solverr/actions/runs/36259533460) passed the real `/api/diagnostics/browser` smoke test with `PUID=1000` and `PGID=10`, the UGREEN NAS Compose identity. This validates the current image and configuration and supersedes the earlier recommendation to avoid `PUID`/`PGID`. Keep the test as a release gate and run the diagnostic on other deployments if their user/group configuration differs.
 
 ## Phase 0 — Correctness & Security Fixes (implemented 2026-08-23, earlier pass)
 
@@ -281,16 +274,7 @@ Not done (deliberately deferred):
 
 ## Recommended next session
 
-1. **Root-cause the PUID/PGID Camoufox hang.** Still the single
-   highest-value remaining item — it's a production correctness risk for
-   exactly the NAS/self-hosted audience this project targets, and it
-   wasn't understood, only worked around (timeout) for the one endpoint
-   that lacked protection. Decision made 2026-09-03: keep PUID/PGID
-   support as-is (it's fine for Fast-TLS-only/proxy-only deployments that
-   never touch Tier 3) rather than removing it, with CLAUDE.md's existing
-   root-required warning staying the guidance for Tier 3 browser solving.
-   Needs a real non-root container + strace/debug session to progress —
-   not reproducible in a sandbox without a Docker daemon.
+1. **Keep the UGREEN non-root browser smoke test green.** The former PUID/PGID hang passed the real browser self-test in Docker publish run #142; no separate root-cause investigation is needed unless the failure reappears on a supported deployment.
 2. ~~`browser.py` package split~~ — done 2026-09-03, see Phase 1 above.
 3. Load testing script + more browser-pool failure-mode tests.
 4. `CookieStore` interface extraction, if the dual-mode logic ever needs

@@ -105,11 +105,8 @@ async def test_solver(req: TestRequestModel):
         screenshot=req.screenshot
     )
     
-    if not req.useCache:
-        v1_req.cookies = []
-
     try:
-        sol = await solver_engine.process_request(v1_req)
+        sol = await solver_engine.process_request(v1_req, bypass_cookie_cache=not req.useCache)
         return {
             "status": "ok",
             "url": sol.url,
@@ -156,4 +153,3 @@ async def sse_event_stream():
             "X-Accel-Buffering": "no"
         }
     )
-
