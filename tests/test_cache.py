@@ -92,7 +92,7 @@ class TestCookieCache(unittest.TestCase):
             if os.path.exists(flat_file):
                 os.remove(flat_file)
 
-    def test_cookie_deduplication_by_name(self):
+    def test_duplicate_same_cookie_identity_keeps_latest_value(self):
         cookies = [
             CookieModel(name="cf_clearance", value="old_val", domain=".example.com"),
             CookieModel(name="cf_clearance", value="new_val", domain=".example.com"),
@@ -101,6 +101,18 @@ class TestCookieCache(unittest.TestCase):
         fetched = self.cache.get_cookies("https://example.com")
         self.assertEqual(len(fetched), 1)
         self.assertEqual(fetched[0].value, "new_val")
+
+    def test_same_name_cookies_on_different_paths_are_both_returned(self):
+        self.cache.set_cookies("https://example.com", [
+            CookieModel(name="token", value="root", domain="example.com", path="/"),
+            CookieModel(name="token", value="admin", domain="example.com", path="/admin"),
+        ])
+
+        fetched = self.cache.get_cookies("https://example.com")
+        self.assertEqual({(cookie.path, cookie.value) for cookie in fetched}, {
+            ("/", "root"),
+            ("/admin", "admin"),
+        })
 
     def test_redis_reconnects_after_initial_failure(self):
         # Redis being down at startup must not strand the cache on local disk.

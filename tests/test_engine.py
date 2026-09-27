@@ -16,6 +16,14 @@ def _cookie(name, value, domain, path="/"):
 class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.engine = HybridSolverEngine()
+        self.target_check = patch("app.solver.engine.check_target_url_async", new=AsyncMock())
+        self.target_check.start()
+        self.cache_lookup = patch("app.solver.engine.cookie_cache.get_cookies_async", new=AsyncMock(return_value=[]))
+        self.cache_lookup.start()
+
+    def tearDown(self):
+        self.cache_lookup.stop()
+        self.target_check.stop()
 
     async def test_fast_tls_success_skips_browser(self):
         with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(False, _sol(200)))) as fast_mock, \
@@ -194,6 +202,17 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
             self.assertIn(("other.example.com", "session", "input-value"), seen)
             self.assertIn(("example.com", "session", "cached-value"), seen)
 
+    async def test_bypass_cookie_cache_skips_lookup_but_keeps_request_cookies(self):
+        supplied_cookie = _cookie("session", "request-value", domain="example.com")
+        with patch("app.solver.engine.cookie_cache.get_cookies_async", new=AsyncMock()) as cache_mock, \
+             patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(False, _sol(200)))) as fast_mock, \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock()):
+            req = V1Request(cmd="request.get", url="https://example.com", cookies=[supplied_cookie])
+            await self.engine.process_request(req, bypass_cookie_cache=True)
+
+            cache_mock.assert_not_awaited()
+            self.assertEqual(fast_mock.call_args.kwargs["cookies"], [supplied_cookie])
+
     async def test_request_budget_propagates_remaining_timeout_to_browser(self):
         with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \
              patch("app.solver.engine.browser_pool.solve", new=AsyncMock(return_value=_sol(200))) as browser_mock:
@@ -216,6 +235,27 @@ class TestRequestBudget(unittest.TestCase):
         self.assertGreater(budget.remaining_ms, 4000)
         self.assertFalse(budget.is_expired)
         self.assertGreaterEqual(budget.elapsed_ms, 0.0)
+
+
+class TestResponseBodyCap(unittest.TestCase):
+    def test_multibyte_response_stays_within_byte_limit_including_marker(self):
+        from app.solver.engine import _cap_response_body
+
+        solution = _sol()
+        solution.response = "🙂" * 100
+        with patch.object(settings, "MAX_RESPONSE_BODY_MB", 128 / (1024 * 1024)):
+            _cap_response_body(solution)
+            self.assertLessEqual(len(solution.response.encode("utf-8")), 128)
+            self.assertTrue(solution.response.endswith("<!-- truncated: response exceeded MAX_RESPONSE_BODY_MB -->"))
+
+    def test_tiny_response_limit_takes_priority_over_truncation_marker(self):
+        from app.solver.engine import _cap_response_body
+
+        solution = _sol()
+        solution.response = "🙂" * 10
+        with patch.object(settings, "MAX_RESPONSE_BODY_MB", 10 / (1024 * 1024)):
+            _cap_response_body(solution)
+            self.assertLessEqual(len(solution.response.encode("utf-8")), 10)
 
 
 if __name__ == "__main__":

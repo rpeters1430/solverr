@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import AsyncMock, patch
 from app.solver.fast_tls import FastTLSEngine, FIREFOX_PROFILES, CHROME_PROFILES, _sec_ch_ua_for
 
 
@@ -113,6 +114,13 @@ class TestFastTLSCookieSelection(unittest.TestCase):
 
 
 class TestFastTLSChallengeDetection(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.target_check = patch("app.solver.fast_tls.check_target_url_async", new=AsyncMock())
+        self.target_check.start()
+
+    def tearDown(self):
+        self.target_check.stop()
+
     async def test_detects_challenge_on_status_200_with_cloudflare_title(self):
         from unittest.mock import AsyncMock, patch, MagicMock
         mock_resp = MagicMock()
@@ -194,6 +202,13 @@ class TestFastTLSChallengeDetection(unittest.IsolatedAsyncioTestCase):
 
 
 class TestFastTLSSessionPool(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.target_check = patch("app.solver.fast_tls.check_target_url_async", new=AsyncMock())
+        self.target_check.start()
+
+    def tearDown(self):
+        self.target_check.stop()
+
     async def test_session_reused_across_requests_for_same_domain(self):
         from unittest.mock import AsyncMock, patch, MagicMock
         mock_resp = MagicMock()

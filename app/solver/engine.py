@@ -156,23 +156,31 @@ class RequestBudget:
 
 
 def _cap_response_body(solution: SolutionModel) -> None:
-    max_bytes = settings.MAX_RESPONSE_BODY_MB * 1024 * 1024
+    max_bytes = int(settings.MAX_RESPONSE_BODY_MB * 1024 * 1024)
     if max_bytes <= 0 or not solution.response:
         return
-    body_bytes = len(solution.response.encode("utf-8", errors="ignore"))
+    response_bytes = solution.response.encode("utf-8", errors="ignore")
+    body_bytes = len(response_bytes)
     if body_bytes > max_bytes:
         logger.warning(
             f"[HybridEngine] Response body ({body_bytes / 1024 / 1024:.1f}MB) exceeds "
             f"MAX_RESPONSE_BODY_MB={settings.MAX_RESPONSE_BODY_MB}, truncating"
         )
-        truncated_chars = int(max_bytes)
-        solution.response = solution.response[:truncated_chars] + "\n<!-- truncated: response exceeded MAX_RESPONSE_BODY_MB -->"
+        marker = "\n<!-- truncated: response exceeded MAX_RESPONSE_BODY_MB -->"
+        marker_bytes = marker.encode("utf-8")
+        if len(marker_bytes) <= max_bytes:
+            content_budget = max_bytes - len(marker_bytes)
+            solution.response = response_bytes[:content_budget].decode("utf-8", errors="ignore") + marker
+        else:
+            # For very small limits, keep the strict byte cap even when the
+            # explanatory marker itself would exceed it.
+            solution.response = response_bytes[:max_bytes].decode("utf-8", errors="ignore")
 
 class HybridSolverEngine:
     def __init__(self):
         self._inflight: Dict[str, asyncio.Future] = {}
 
-    async def process_request(self, req: V1Request) -> SolutionModel:
+    async def process_request(self, req: V1Request, bypass_cookie_cache: bool = False) -> SolutionModel:
         budget = RequestBudget(req.maxTimeout or settings.BROWSER_TIMEOUT_MS)
         url = req.url
         method = req.cmd.split(".")[-1].upper() if "." in req.cmd else "GET"
@@ -199,6 +207,7 @@ class HybridSolverEngine:
             "wait_delay_ms": req.wait_delay_ms,
             "screenshot": bool(req.screenshot),
             "maxTimeout": req.maxTimeout,
+            "bypassCookieCache": bypass_cookie_cache,
         }
         inflight_key = hashlib.sha256(
             json.dumps(fingerprint, sort_keys=True, default=str).encode()
@@ -221,7 +230,7 @@ class HybridSolverEngine:
         self._inflight[inflight_key] = future
 
         try:
-            res = await self._do_process_request(req, budget, url, method)
+            res = await self._do_process_request(req, budget, url, method, bypass_cookie_cache)
             _cap_response_body(res)
             if not future.done():
                 future.set_result(res)
@@ -244,12 +253,16 @@ class HybridSolverEngine:
             if self._inflight.get(inflight_key) is future:
                 self._inflight.pop(inflight_key, None)
 
-    async def _do_process_request(self, req: V1Request, budget: RequestBudget, url: str, method: str) -> SolutionModel:
+    async def _do_process_request(
+        self, req: V1Request, budget: RequestBudget, url: str, method: str, bypass_cookie_cache: bool = False
+    ) -> SolutionModel:
         proxy_url = req.get_proxy_url()
 
         combined_cookies: List[CookieModel] = []
-        cached_cookies = await cookie_cache.get_cookies_async(url)
-        metrics.record_cookie_cache_lookup(hit=bool(cached_cookies))
+        cached_cookies = []
+        if not bypass_cookie_cache:
+            cached_cookies = await cookie_cache.get_cookies_async(url)
+            metrics.record_cookie_cache_lookup(hit=bool(cached_cookies))
 
         # Same identity as cookie_cache._cookie_key: same-name cookies on other paths are distinct.
         def _cookie_identity(c: CookieModel):
