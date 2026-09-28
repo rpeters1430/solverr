@@ -75,6 +75,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (tabName === 'cookies') {
             fetchCookies();
+        } else if (tabName === 'history') {
+            fetchHistory();
         }
 
         closeMobileMenu();
@@ -108,6 +110,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await res.json();
 
             document.getElementById('val-total-reqs').textContent = data.total_requests || 0;
+            document.getElementById('foot-failed').textContent = `${data.failed_requests || 0} failed`;
             document.getElementById('val-fast-rate').textContent = (data.fast_hit_rate_pct || 0) + '%';
             document.getElementById('val-fast-hits').textContent = (data.tier1_fast_tls_hits || 0) + (data.tier2_cache_hits || 0);
             document.getElementById('val-fast-ms').innerHTML = `${data.avg_fast_ms || 0}<span class="unit">ms</span>`;
@@ -190,16 +193,28 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('btn-refresh-stats').addEventListener('click', fetchStats);
 
+    let historyRequest = 0;
     async function fetchHistory() {
+        const requestId = ++historyRequest;
         const domain = document.getElementById('history-domain').value.trim();
         const outcome = document.getElementById('history-outcome').value;
-        const params = new URLSearchParams({limit: '100'});
+        const params = new URLSearchParams();
         if (domain) params.set('domain', domain);
         if (outcome) params.set('outcome', outcome);
+        const error = document.getElementById('history-error');
         try {
-            const res = await fetch(`/api/history?${params}`);
-            if (!res.ok) return;
+            const [res, summaryRes] = await Promise.all([
+                fetch(`/api/history?limit=100&${params}`),
+                fetch(`/api/history/summary?${params}`)
+            ]);
+            if (!res.ok || !summaryRes.ok) throw new Error(`History unavailable (HTTP ${res.ok ? summaryRes.status : res.status})`);
             const rows = (await res.json()).requests || [];
+            const summary = await summaryRes.json();
+            if (requestId !== historyRequest) return;
+            error.hidden = true;
+            document.getElementById('history-total').textContent = summary.total;
+            document.getElementById('history-failed').textContent = summary.failed;
+            document.getElementById('history-p95').textContent = summary.p95_ms === null ? '—' : `${summary.p95_ms} ms`;
             const body = document.getElementById('history-rows');
             body.replaceChildren();
             for (const row of rows) {
@@ -210,7 +225,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 for (const value of values) {
                     const td = document.createElement('td');
                     td.textContent = value;
-                    td.style.paddingRight = '12px';
                     tr.appendChild(td);
                 }
                 body.appendChild(tr);
@@ -218,26 +232,38 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!rows.length) body.innerHTML = '<tr><td colspan="6">No matching requests.</td></tr>';
             const trend = document.getElementById('history-trend');
             trend.replaceChildren();
-            const hours = Array(12).fill(0);
-            const current = Date.now() / 1000;
-            for (const row of rows) {
-                const age = Math.floor((current - row.timestamp) / 3600);
-                if (age >= 0 && age < 12) hours[11 - age]++;
-            }
-            const peak = Math.max(1, ...hours);
-            for (const [index, count] of hours.entries()) {
+            const hours = summary.hours || [];
+            const peak = Math.max(1, ...hours.map(hour => hour.success + hour.failed));
+            for (const hour of hours) {
                 const bar = document.createElement('div');
-                bar.style.cssText = `flex:1;height:${Math.max(2, count / peak * 48)}px;background:var(--accent-purple);border-radius:3px;`;
-                bar.title = `${11 - index} hours ago: ${count} request(s)`;
+                bar.className = 'history-bar';
+                const count = hour.success + hour.failed;
+                bar.title = `${new Date(hour.timestamp * 1000).toLocaleString()}: ${hour.success} success, ${hour.failed} failed`;
+                bar.setAttribute('aria-label', bar.title);
+                for (const [outcome, value] of [['success', hour.success], ['failed', hour.failed]]) {
+                    if (!value) continue;
+                    const segment = document.createElement('div');
+                    segment.className = `history-bar-${outcome}`;
+                    segment.style.height = `${value / peak * 100}%`;
+                    bar.appendChild(segment);
+                }
+                if (!count) bar.classList.add('history-bar-empty');
                 trend.appendChild(bar);
             }
-        } catch (e) { console.error('History poll error:', e); }
+        } catch (e) {
+            if (requestId !== historyRequest) return;
+            error.textContent = e.message || 'Unable to load request history.';
+            error.hidden = false;
+            console.error('History poll error:', e);
+        }
     }
     document.getElementById('history-refresh').addEventListener('click', fetchHistory);
     document.getElementById('history-domain').addEventListener('change', fetchHistory);
     document.getElementById('history-outcome').addEventListener('change', fetchHistory);
     fetchHistory();
-    setInterval(fetchHistory, 15000);
+    setInterval(() => {
+        if (document.getElementById('tab-history').classList.contains('active')) fetchHistory();
+    }, 15000);
 
     function initEventStream() {
         const feed = document.getElementById('live-activity-feed');

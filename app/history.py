@@ -62,5 +62,36 @@ class RequestHistory:
             conn.row_factory = sqlite3.Row
             return [dict(row) for row in conn.execute(sql, params)]
 
+    async def summary(self, domain: str | None = None, outcome: str | None = None):
+        async with self._lock:
+            return await asyncio.to_thread(self._summary, domain, outcome)
+
+    def _summary(self, domain, outcome):
+        now_hour = int(time.time() // 3600) * 3600
+        first_hour = now_hour - 23 * 3600
+        sql = "SELECT timestamp,outcome,duration_ms FROM requests WHERE timestamp >= ?"
+        params = [first_hour]
+        if domain:
+            sql += " AND domain = ?"
+            params.append(domain.lower())
+        if outcome:
+            sql += " AND outcome = ?"
+            params.append(outcome)
+        hours = [{"timestamp": first_hour + i * 3600, "success": 0, "failed": 0} for i in range(24)]
+        durations = []
+        with closing(self._connect()) as conn:
+            for timestamp, result, duration in conn.execute(sql, params):
+                index = int((timestamp - first_hour) // 3600)
+                if 0 <= index < 24:
+                    hours[index]["failed" if result == "failed" else "success"] += 1
+                    durations.append(duration)
+        durations.sort()
+        count = len(durations)
+        return {
+            "hours": hours, "total": count,
+            "failed": sum(hour["failed"] for hour in hours),
+            "p95_ms": round(durations[max(0, (95 * count + 99) // 100 - 1)], 1) if count else None,
+        }
+
 
 request_history = RequestHistory()

@@ -51,6 +51,10 @@
                     <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
                     <span>Live URL Tester</span>
                 </button>
+                <button class="nav-item" data-tab="history">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12a9 9 0 109-9M3 3v6h6m3-2v5l3 2"/></svg>
+                    <span>Request History</span>
+                </button>
                 <button class="nav-item" data-tab="cookies">
                     <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
                     <span>Cookie Store</span>
@@ -94,7 +98,7 @@
                 <div class="metrics-grid">
                     <div class="metric-card glow-cyan">
                         <div class="card-header">
-                            <span class="label">Total Solved Requests</span>
+                            <span class="label">Total Requests</span>
                             <span class="icon">🚀</span>
                         </div>
                         <div class="card-value" id="val-total-reqs">0</div>
@@ -188,25 +192,6 @@
                 </div>
 
                 <div class="panel" style="margin-bottom: 24px;">
-                    <div class="panel-header">
-                        <h3>Recent Requests</h3>
-                        <p>Stored across restarts. Only domains and limited diagnostic fields are saved.</p>
-                    </div>
-                    <div style="padding: 0 20px 20px;">
-                        <div style="display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;">
-                            <input id="history-domain" type="text" placeholder="Filter domain" aria-label="Filter request history by domain">
-                            <select id="history-outcome" aria-label="Filter request history by outcome"><option value="">All outcomes</option><option value="success">Success</option><option value="failed">Failed</option></select>
-                            <button class="btn btn-secondary" id="history-refresh">Refresh</button>
-                        </div>
-                        <div id="history-trend" style="display: flex; align-items: end; gap: 3px; height: 48px; margin-bottom: 12px;" aria-label="Request volume in recent hours"></div>
-                        <div style="overflow-x: auto;"><table style="width: 100%; text-align: left; border-spacing: 0 8px;">
-                            <thead><tr><th>Time</th><th>Domain</th><th>Tier</th><th>Result</th><th>Duration</th><th>Detail</th></tr></thead>
-                            <tbody id="history-rows"><tr><td colspan="6">No requests recorded yet.</td></tr></tbody>
-                        </table></div>
-                    </div>
-                </div>
-
-                <div class="panel" style="margin-bottom: 24px;">
                     <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center;">
                         <div>
                             <h3>Real-Time Live Event Stream</h3>
@@ -283,6 +268,35 @@
                                 <span class="badge badge-neutral" id="val-cached-domains">0 Domains</span>
                             </li>
                         </ul>
+                    </div>
+                </div>
+            </section>
+
+            <section id="tab-history" class="tab-page">
+                <div class="panel history-panel">
+                    <div class="panel-header">
+                        <h3>Request History</h3>
+                        <p>Retained across restarts. Domains and limited diagnostics are stored; URL paths, queries and credentials are excluded.</p>
+                    </div>
+                    <div class="history-content">
+                        <div class="history-filters">
+                            <label>Domain <input id="history-domain" type="text" placeholder="example.com" autocomplete="off"></label>
+                            <label>Outcome <select id="history-outcome"><option value="">All</option><option value="success">Success</option><option value="failed">Failed</option></select></label>
+                            <button class="btn btn-secondary" id="history-refresh">Refresh</button>
+                        </div>
+                        <div class="history-summary" aria-live="polite">
+                            <div><strong id="history-total">0</strong><span>Requests · 24 hours</span></div>
+                            <div><strong id="history-failed">0</strong><span>Failed</span></div>
+                            <div><strong id="history-p95">—</strong><span>P95 latency</span></div>
+                        </div>
+                        <div class="history-chart-header"><span>Request volume by hour</span><span class="history-chart-legend">■ Success &nbsp; <span>■ Failure</span></span></div>
+                        <div id="history-trend" class="history-trend" role="img" aria-label="Request volume over the past 24 hours"></div>
+                        <p class="history-note">Chart covers retained requests in the past 24 hours for these filters. Table shows the latest 100 matches.</p>
+                        <div class="history-table-wrap"><table class="history-table">
+                            <thead><tr><th>Time</th><th>Domain</th><th>Tier</th><th>Result</th><th>Duration</th><th>Detail</th></tr></thead>
+                            <tbody id="history-rows"><tr><td colspan="6">No requests recorded yet.</td></tr></tbody>
+                        </table></div>
+                        <p id="history-error" class="history-error" role="status" hidden></p>
                     </div>
                 </div>
             </section>
@@ -475,6 +489,10 @@
         <button class="mobile-nav-item" data-tab="tester">
             <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
             <span>Tester</span>
+        </button>
+        <button class="mobile-nav-item" data-tab="history">
+            <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12a9 9 0 109-9M3 3v6h6m3-2v5l3 2"/></svg>
+            <span>History</span>
         </button>
         <button class="mobile-nav-item" data-tab="cookies">
             <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>

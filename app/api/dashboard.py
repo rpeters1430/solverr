@@ -21,6 +21,10 @@ router = APIRouter()
 async def get_history(limit: int = 100, domain: Optional[str] = None, outcome: Optional[str] = None):
     return {"requests": await request_history.recent(limit, domain, outcome)}
 
+@router.get("/history/summary")
+async def get_history_summary(domain: Optional[str] = None, outcome: Optional[str] = None):
+    return await request_history.summary(domain, outcome)
+
 @router.get("/stats")
 async def get_stats():
     proc = psutil.Process(os.getpid())
