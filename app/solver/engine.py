@@ -280,8 +280,9 @@ class HybridSolverEngine:
 
         combined_cookies: List[CookieModel] = []
         cached_cookies = []
+        cached_ua: Optional[str] = None
         if not bypass_cookie_cache:
-            cached_cookies = await cookie_cache.get_cookies_async(url)
+            cached_cookies, cached_ua = await cookie_cache.get_cookies_with_user_agent_async(url)
             metrics.record_cookie_cache_lookup(hit=bool(cached_cookies))
 
         # Same identity as cookie_cache._cookie_key: same-name cookies on other paths are distinct.
@@ -303,6 +304,11 @@ class HybridSolverEngine:
         if cached_cookies:
             logger.info(f"[HybridEngine] Merged {len(cached_cookies)} cached cookie(s) for domain '{cookie_cache._normalize_domain(url)}'")
 
+        # Clearance cookies only validate with the UA that earned them, so Tier 2 replays with it.
+        fast_tls_ua = req.userAgent
+        if not fast_tls_ua and had_cache and fast_tls_engine.is_compatible_user_agent(cached_ua):
+            fast_tls_ua = cached_ua
+
         # Tiers 1 and 2
         if settings.ENABLE_FAST_TLS and not req.forceBrowser:
             tls_timeout = max(1, min(10, int(budget.remaining_s)))
@@ -316,7 +322,7 @@ class HybridSolverEngine:
                 headers=req.headers,
                 proxy=proxy_url,
                 timeout=tls_timeout,
-                user_agent=req.userAgent,
+                user_agent=fast_tls_ua,
                 session_id=req.session
             )
 
@@ -331,7 +337,7 @@ class HybridSolverEngine:
                 solution.tier = tier_name
 
                 if solution.cookies:
-                    await cookie_cache.set_cookies_async(url, solution.cookies)
+                    await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent)
                 event_broadcaster.emit("solve", {
                     "url": url,
                     "tier": tier_name,
@@ -348,7 +354,7 @@ class HybridSolverEngine:
                     logger.info("[HybridEngine] fastTlsOnly=True requested. Returning Fast TLS solution without browser escalation.")
                     solution.tier = "tier1_fast_tls"
                     if solution.cookies:
-                        await cookie_cache.set_cookies_async(url, solution.cookies)
+                        await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent)
                     event_broadcaster.emit("solve", {
                         "url": url,
                         "tier": "tier1_fast_tls",
@@ -400,7 +406,7 @@ class HybridSolverEngine:
             solution.tier = "tier3_stealth_browser"
 
             if solution.cookies:
-                await cookie_cache.set_cookies_async(url, solution.cookies)
+                await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent)
 
             event_broadcaster.emit("solve", {
                 "url": url,
@@ -443,7 +449,7 @@ class HybridSolverEngine:
                     logger.info(f"[HybridEngine] Tier 4 Fallback Proxy SUCCESS in {elapsed_ms:.1f}ms | Status: {solution.status}")
                     solution.tier = "tier4_fallback_proxy"
                     if solution.cookies:
-                        await cookie_cache.set_cookies_async(url, solution.cookies)
+                        await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent)
                     event_broadcaster.emit("solve", {
                         "url": url,
                         "tier": "tier4_fallback_proxy",

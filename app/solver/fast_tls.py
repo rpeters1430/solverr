@@ -58,6 +58,14 @@ class FastTLSEngine:
             domain = url.split("/")[0].split(":")[0].lower()
         return domain.lstrip(".")
 
+    def is_compatible_user_agent(self, user_agent: Optional[str]) -> bool:
+        """Whether a UA can ride this engine's TLS target; a Chrome UA on a Firefox handshake is itself a bot signal."""
+        if not user_agent:
+            return False
+        if self.impersonate_target.startswith("firefox"):
+            return "Firefox/" in user_agent
+        return "Chrome/" in user_agent and "Firefox/" not in user_agent
+
     def _select_cookies_for_url(self, cookies: Optional[List[CookieModel]], url: str) -> Dict[str, str]:
         """Collapse identity-distinct cookies (domain+path+name) to the flat
         name->value mapping curl_cffi's `cookies` kwarg accepts for a single

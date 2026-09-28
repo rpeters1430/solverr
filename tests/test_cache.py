@@ -73,6 +73,24 @@ class TestCookieCache(unittest.TestCase):
         self.assertEqual(len(fetched), 1)
         self.assertEqual(fetched[0].value, "val_persistent")
 
+    def test_user_agent_round_trips_through_disk(self):
+        cookies = [CookieModel(name="cf_clearance", value="v", domain=".example.com")]
+        self.cache.set_cookies("https://example.com", cookies, user_agent="solver-ua")
+        _, ua = CookieCache(cache_file=self.cache_file).get_cookies_with_user_agent("https://example.com")
+        self.assertEqual(ua, "solver-ua")
+
+    def test_clearance_cookie_ua_wins_over_newer_plain_cookie_ua(self):
+        self.cache.set_cookies("https://example.com", [CookieModel(name="cf_clearance", value="v", domain="example.com")], user_agent="browser-ua")
+        self.cache.set_cookies("https://example.com", [CookieModel(name="tracking", value="t", domain="example.com")], user_agent="other-ua")
+        _, ua = self.cache.get_cookies_with_user_agent("https://example.com")
+        self.assertEqual(ua, "browser-ua")
+
+    def test_entries_without_user_agent_report_none(self):
+        self.cache.set_cookies("https://example.com", [CookieModel(name="cf_clearance", value="v", domain="example.com")])
+        cookies, ua = self.cache.get_cookies_with_user_agent("https://example.com")
+        self.assertEqual(len(cookies), 1)
+        self.assertIsNone(ua)
+
     def test_clear_cache(self):
         cookies = [CookieModel(name="cf_clearance", value="val_clear", domain=".example.com")]
         self.cache.set_cookies("https://example.com", cookies)

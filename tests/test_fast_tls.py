@@ -83,6 +83,21 @@ class TestFastTLSProfileRotation(unittest.TestCase):
         self.assertIn("example.com", engine._domain_scores)
 
 
+class TestFastTLSUserAgentCompatibility(unittest.TestCase):
+    def test_firefox_target_accepts_only_firefox_uas(self):
+        engine = FastTLSEngine()
+        engine.impersonate_target = "firefox147"
+        self.assertTrue(engine.is_compatible_user_agent("Mozilla/5.0 (X11; Linux x86_64; rv:152.0) Gecko/20100101 Firefox/152.0"))
+        self.assertFalse(engine.is_compatible_user_agent(CHROME_PROFILES[0][1]))
+        self.assertFalse(engine.is_compatible_user_agent(None))
+
+    def test_chrome_target_accepts_only_chrome_uas(self):
+        engine = FastTLSEngine()
+        engine.impersonate_target = "chrome146"
+        self.assertTrue(engine.is_compatible_user_agent(CHROME_PROFILES[0][1]))
+        self.assertFalse(engine.is_compatible_user_agent(FIREFOX_PROFILES[0][1]))
+
+
 class TestFastTLSCookieSelection(unittest.TestCase):
     def _cookie(self, name, value, domain, path="/"):
         from app.models.flaresolverr import CookieModel
