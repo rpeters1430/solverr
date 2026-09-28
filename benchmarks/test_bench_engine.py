@@ -74,10 +74,14 @@ def test_process_request_dispatch(benchmark):
         tier="tier1_fast_tls",
     )
 
-    async def _stub(_req, _budget, _url, _method):
+    async def _stub(_req, _budget, _url, _method, _bypass_cookie_cache=False):
         return solution
 
+    async def _skip_history(*_args, **_kwargs):
+        pass
+
     engine._do_process_request = _stub
+    engine._record_history = _skip_history
 
     loop = asyncio.new_event_loop()
     try:

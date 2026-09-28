@@ -36,6 +36,9 @@ class V1Request(BaseModel):
     fastTlsOnly: Optional[bool] = False
     forceBrowser: Optional[bool] = False
     screenshot: Optional[bool] = False
+    screenshot_full_page: bool = False
+    screenshot_selector: Optional[str] = None
+    extract_records: Optional[Dict[str, Any]] = None
     wait_selector: Optional[str] = None
     wait_delay_ms: Optional[int] = None
 
@@ -108,6 +111,9 @@ class ScrapeRequest(BaseModel):
     wait_delay_ms: Optional[int] = None
     extract_rules: Optional[Dict[str, str]] = None
     screenshot: Optional[bool] = False
+    screenshot_full_page: bool = False
+    screenshot_selector: Optional[str] = None
+    extract_records: Optional[Dict[str, Any]] = None
     maxTimeout: Optional[int] = 60000
     userAgent: Optional[str] = None
 
@@ -124,9 +130,12 @@ class ScrapeRequest(BaseModel):
             session=self.session,
             maxTimeout=self.maxTimeout,
             userAgent=self.userAgent,
-            forceBrowser=force_browser,
+            forceBrowser=force_browser or bool(self.screenshot or self.extract_records or self.screenshot_full_page or self.screenshot_selector),
             fastTlsOnly=fast_tls_only,
             screenshot=self.screenshot,
+            screenshot_full_page=self.screenshot_full_page,
+            screenshot_selector=self.screenshot_selector,
+            extract_records=self.extract_records,
             wait_selector=self.wait_selector,
             wait_delay_ms=self.wait_delay_ms
         )

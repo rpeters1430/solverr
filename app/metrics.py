@@ -111,6 +111,18 @@ def generate_prometheus_metrics(cached_domains_count: int | None = None, active_
         "# HELP solverr_browser_queue_wait_seconds Average time a request waited for a free browser worker slot",
         "# TYPE solverr_browser_queue_wait_seconds gauge",
         f'solverr_browser_queue_wait_seconds {pool_stats["avg_queue_wait_seconds"]}',
+        "",
+        "# HELP solverr_browser_queue_depth Current requests waiting for a browser worker",
+        "# TYPE solverr_browser_queue_depth gauge",
+        f'solverr_browser_queue_depth {pool_stats["queue_depth"]}',
+        "",
+        "# HELP solverr_browser_oldest_queue_wait_seconds Oldest current wait for a browser worker",
+        "# TYPE solverr_browser_oldest_queue_wait_seconds gauge",
+        f'solverr_browser_oldest_queue_wait_seconds {pool_stats["oldest_queue_wait_seconds"]}',
+        "",
+        "# HELP solverr_browser_oldest_checkout_seconds Longest current pooled browser checkout",
+        "# TYPE solverr_browser_oldest_checkout_seconds gauge",
+        f'solverr_browser_oldest_checkout_seconds {pool_stats["oldest_checkout_seconds"]}',
     ]
 
     lines += [

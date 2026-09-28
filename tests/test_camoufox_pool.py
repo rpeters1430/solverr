@@ -171,6 +171,36 @@ class TestEphemeralCamoufoxGeoip(unittest.IsolatedAsyncioTestCase):
 
 
 class TestBrowserPoolCancellation(unittest.IsolatedAsyncioTestCase):
+    async def test_disconnect_after_setup_recycles_browser(self):
+        pool = BrowserPool()
+        fake = FakeCamoufoxPoolWithBrowser(1)
+        pool.camoufox_pool = fake
+
+        async def disconnect(*args, **kwargs):
+            raise RuntimeError("Target page, context or browser has been closed")
+
+        with patch.object(pool, "_execute_solve_flow", side_effect=disconnect):
+            with self.assertRaises(RuntimeError):
+                await pool._solve_with_pooled_camoufox(
+                    url="https://example.com", method="GET", post_data=None, cookies=None,
+                    timeout_ms=5000, headers=None, start_time=time.time(),
+                    wait_selector=None, wait_delay_ms=None, capture_screenshot=False,
+                )
+        self.assertEqual(fake.close_count, 1)
+        self.assertEqual(fake.launch_count, 2)
+        self.assertEqual(pool.pool_stats()["oldest_checkout_seconds"], 0)
+
+    async def test_queue_depth_tracks_waiter(self):
+        pool = BrowserPool()
+        pool.semaphore = asyncio.Semaphore(0)
+        task = asyncio.create_task(pool.solve("https://example.com"))
+        await asyncio.sleep(0)
+        self.assertEqual(pool.pool_stats()["queue_depth"], 1)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(pool.pool_stats()["queue_depth"], 0)
+
     async def test_pooled_instance_is_released_when_solve_flow_raises(self):
         """A crash (or cancellation) mid-solve must still close the page/
         context and check the warm instance back into the pool - otherwise

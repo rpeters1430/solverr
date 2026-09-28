@@ -51,6 +51,10 @@
                     <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
                     <span>Live URL Tester</span>
                 </button>
+                <button class="nav-item" data-tab="history">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12a9 9 0 109-9M3 3v6h6m3-2v5l3 2"/></svg>
+                    <span>Request History</span>
+                </button>
                 <button class="nav-item" data-tab="cookies">
                     <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
                     <span>Cookie Store</span>
@@ -94,7 +98,7 @@
                 <div class="metrics-grid">
                     <div class="metric-card glow-cyan">
                         <div class="card-header">
-                            <span class="label">Total Solved Requests</span>
+                            <span class="label">Total Requests</span>
                             <span class="icon">🚀</span>
                         </div>
                         <div class="card-value" id="val-total-reqs">0</div>
@@ -177,7 +181,7 @@
                         <div class="pool-card pool-amber">
                             <div class="pool-badge">QUEUE WAIT (AVG)</div>
                             <div class="pool-val"><span id="val-queue-wait">0</span><span class="unit">ms</span></div>
-                            <div class="pool-desc"><span id="val-pool-recycles">0</span> recycle(s)</div>
+                            <div class="pool-desc"><span id="val-queue-depth">0</span> queued · oldest <span id="val-queue-oldest">0</span>s · checkout <span id="val-checkout-oldest">0</span>s · <span id="val-pool-recycles">0</span> recycle(s)</div>
                         </div>
                         <div class="pool-card pool-rose">
                             <div class="pool-badge">BROWSER CRASHES</div>
@@ -264,6 +268,38 @@
                                 <span class="badge badge-neutral" id="val-cached-domains">0 Domains</span>
                             </li>
                         </ul>
+                    </div>
+                </div>
+            </section>
+
+            <section id="tab-history" class="tab-page">
+                <div class="panel history-panel">
+                    <div class="panel-header">
+                        <h3>Request History</h3>
+                        <p>Retained across restarts. Domains and limited diagnostics are stored; URL paths, queries and credentials are excluded.</p>
+                    </div>
+                    <div class="history-content">
+                        <div class="history-filters">
+                            <label>Domain <input id="history-domain" type="text" placeholder="example.com" autocomplete="off"></label>
+                            <label>Outcome <select id="history-outcome"><option value="">All</option><option value="success">Success</option><option value="failed">Failed</option></select></label>
+                            <label>Tier <select id="history-tier"><option value="">All</option><option value="tier1_fast_tls">Fast TLS</option><option value="tier2_cache">Cookie cache</option><option value="tier3_stealth_browser">Browser</option><option value="tier4_fallback_proxy">Proxy</option><option value="failed">Failed before tier</option></select></label>
+                            <label>Period <select id="history-hours"><option value="1">1 hour</option><option value="24" selected>24 hours</option><option value="168">7 days</option></select></label>
+                            <button class="btn btn-secondary" id="history-refresh">Refresh</button>
+                        </div>
+                        <div class="history-summary" aria-live="polite">
+                            <div><strong id="history-total">0</strong><span id="history-period-label">Requests · 24 hours</span></div>
+                            <div><strong id="history-failed">0</strong><span>Failed</span></div>
+                            <div><strong id="history-p95">—</strong><span>P95 latency</span></div>
+                        </div>
+                        <div class="history-chart-header"><span>Request volume by hour</span><span class="history-chart-legend">■ Success &nbsp; <span>■ Failure</span></span></div>
+                        <div id="history-trend" class="history-trend" role="img" aria-label="Request volume over the past 24 hours"></div>
+                        <p class="history-note">Chart covers retained requests in the selected period. Table shows the latest 100 matches.</p>
+                        <div class="history-breakdown"><div><h4>Requests by tier</h4><div id="history-tier-counts">No requests yet.</div></div><div><h4>Domains with failures</h4><div id="history-failed-domains">No failures.</div></div></div>
+                        <div class="history-table-wrap"><table class="history-table">
+                            <thead><tr><th>Time</th><th>Domain</th><th>Tier</th><th>Result</th><th>Duration</th><th>Detail</th></tr></thead>
+                            <tbody id="history-rows"><tr><td colspan="6">No requests recorded yet.</td></tr></tbody>
+                        </table></div>
+                        <p id="history-error" class="history-error" role="status" hidden></p>
                     </div>
                 </div>
             </section>
@@ -456,6 +492,10 @@
         <button class="mobile-nav-item" data-tab="tester">
             <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
             <span>Tester</span>
+        </button>
+        <button class="mobile-nav-item" data-tab="history">
+            <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12a9 9 0 109-9M3 3v6h6m3-2v5l3 2"/></svg>
+            <span>History</span>
         </button>
         <button class="mobile-nav-item" data-tab="cookies">
             <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>

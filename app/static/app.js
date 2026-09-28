@@ -75,6 +75,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (tabName === 'cookies') {
             fetchCookies();
+        } else if (tabName === 'history') {
+            fetchHistory();
         }
 
         closeMobileMenu();
@@ -108,6 +110,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await res.json();
 
             document.getElementById('val-total-reqs').textContent = data.total_requests || 0;
+            document.getElementById('foot-failed').textContent = `${data.failed_requests || 0} failed`;
             document.getElementById('val-fast-rate').textContent = (data.fast_hit_rate_pct || 0) + '%';
             document.getElementById('val-fast-hits').textContent = (data.tier1_fast_tls_hits || 0) + (data.tier2_cache_hits || 0);
             document.getElementById('val-fast-ms').innerHTML = `${data.avg_fast_ms || 0}<span class="unit">ms</span>`;
@@ -135,6 +138,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (document.getElementById('val-pool-recycles')) document.getElementById('val-pool-recycles').textContent = pool.recycles_total || 0;
             if (document.getElementById('val-browser-crashes')) document.getElementById('val-browser-crashes').textContent = pool.crashes_total || 0;
             if (document.getElementById('val-queue-wait')) document.getElementById('val-queue-wait').textContent = Math.round((pool.avg_queue_wait_seconds || 0) * 1000);
+            document.getElementById('val-queue-depth').textContent = pool.queue_depth || 0;
+            document.getElementById('val-queue-oldest').textContent = pool.oldest_queue_wait_seconds || 0;
+            document.getElementById('val-checkout-oldest').textContent = pool.oldest_checkout_seconds || 0;
             if (document.getElementById('val-cache-hit-ratio')) document.getElementById('val-cache-hit-ratio').textContent = (data.cache_hit_ratio_pct || 0) + '%';
             if (document.getElementById('val-cache-lookups')) {
                 const lookups = (data.cookie_cache_lookup_hits || 0) + (data.cookie_cache_lookup_misses || 0);
@@ -186,6 +192,102 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(fetchStats, 3000);
 
     document.getElementById('btn-refresh-stats').addEventListener('click', fetchStats);
+
+    let historyRequest = 0;
+    async function fetchHistory() {
+        const requestId = ++historyRequest;
+        const domain = document.getElementById('history-domain').value.trim();
+        const outcome = document.getElementById('history-outcome').value;
+        const tier = document.getElementById('history-tier').value;
+        const hours = document.getElementById('history-hours').value;
+        const params = new URLSearchParams();
+        if (domain) params.set('domain', domain);
+        if (outcome) params.set('outcome', outcome);
+        if (tier) params.set('tier', tier);
+        params.set('hours', hours);
+        const error = document.getElementById('history-error');
+        try {
+            const [res, summaryRes] = await Promise.all([
+                fetch(`/api/history?limit=100&${params}`),
+                fetch(`/api/history/summary?${params}`)
+            ]);
+            if (!res.ok || !summaryRes.ok) throw new Error(`History unavailable (HTTP ${res.ok ? summaryRes.status : res.status})`);
+            const rows = (await res.json()).requests || [];
+            const summary = await summaryRes.json();
+            if (requestId !== historyRequest) return;
+            error.hidden = true;
+            document.getElementById('history-total').textContent = summary.total;
+            document.getElementById('history-period-label').textContent = `Requests · ${hours === '168' ? '7 days' : `${hours} hour${hours === '1' ? '' : 's'}`}`;
+            document.getElementById('history-failed').textContent = summary.failed;
+            document.getElementById('history-p95').textContent = summary.p95_ms === null ? '—' : `${summary.p95_ms} ms`;
+            const body = document.getElementById('history-rows');
+            body.replaceChildren();
+            for (const row of rows) {
+                const tr = document.createElement('tr');
+                const values = [new Date(row.timestamp * 1000).toLocaleString(), row.domain, row.tier,
+                    row.http_status ? `${row.outcome} (${row.http_status})` : row.outcome,
+                    `${row.duration_ms} ms`, row.failure_type || row.challenge || '—'];
+                for (const value of values) {
+                    const td = document.createElement('td');
+                    td.textContent = value;
+                    tr.appendChild(td);
+                }
+                body.appendChild(tr);
+            }
+            if (!rows.length) body.innerHTML = '<tr><td colspan="6">No matching requests.</td></tr>';
+            const trend = document.getElementById('history-trend');
+            trend.replaceChildren();
+            const timeBuckets = summary.hours || [];
+            const peak = Math.max(1, ...timeBuckets.map(hour => hour.success + hour.failed));
+            for (const hour of timeBuckets) {
+                const bar = document.createElement('div');
+                bar.className = 'history-bar';
+                const count = hour.success + hour.failed;
+                bar.title = `${new Date(hour.timestamp * 1000).toLocaleString()}: ${hour.success} success, ${hour.failed} failed`;
+                bar.setAttribute('aria-label', bar.title);
+                for (const [outcome, value] of [['success', hour.success], ['failed', hour.failed]]) {
+                    if (!value) continue;
+                    const segment = document.createElement('div');
+                    segment.className = `history-bar-${outcome}`;
+                    segment.style.height = `${value / peak * 100}%`;
+                    bar.appendChild(segment);
+                }
+                if (!count) bar.classList.add('history-bar-empty');
+                trend.appendChild(bar);
+            }
+            trend.setAttribute('aria-label', `Request volume over the past ${summary.window_hours} hours: ${summary.total} requests, ${summary.failed} failed`);
+            const renderBreakdown = (elementId, entries, fallback) => {
+                const container = document.getElementById(elementId);
+                container.replaceChildren();
+                if (!entries.length) { container.textContent = fallback; return; }
+                for (const [label, count] of entries) {
+                    const line = document.createElement('p');
+                    const name = document.createElement('span');
+                    const total = document.createElement('strong');
+                    name.textContent = label;
+                    total.textContent = count;
+                    line.append(name, total);
+                    container.appendChild(line);
+                }
+            };
+            renderBreakdown('history-tier-counts', Object.entries(summary.tier_counts || {}).sort((a, b) => b[1] - a[1]), 'No requests yet.');
+            renderBreakdown('history-failed-domains', summary.top_failed_domains || [], 'No failures.');
+        } catch (e) {
+            if (requestId !== historyRequest) return;
+            error.textContent = e.message || 'Unable to load request history.';
+            error.hidden = false;
+            console.error('History poll error:', e);
+        }
+    }
+    document.getElementById('history-refresh').addEventListener('click', fetchHistory);
+    document.getElementById('history-domain').addEventListener('change', fetchHistory);
+    document.getElementById('history-outcome').addEventListener('change', fetchHistory);
+    document.getElementById('history-tier').addEventListener('change', fetchHistory);
+    document.getElementById('history-hours').addEventListener('change', fetchHistory);
+    fetchHistory();
+    setInterval(() => {
+        if (document.getElementById('tab-history').classList.contains('active')) fetchHistory();
+    }, 15000);
 
     function initEventStream() {
         const feed = document.getElementById('live-activity-feed');

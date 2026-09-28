@@ -38,6 +38,48 @@ def _describe_solve_error(e: BaseException, tier_timeout: float, tier_label: str
     return e
 
 
+def _browser_is_connected(browser: Any) -> bool:
+    """Playwright exposes is_connected(); keep compatibility with test doubles."""
+    try:
+        probe = getattr(browser, "is_connected", None)
+        return bool(probe()) if callable(probe) else True
+    except Exception:
+        return False
+
+
+def _is_browser_disconnected(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in (
+        "browser has been closed", "browser closed", "browser disconnected",
+        "target page, context or browser has been closed", "connection closed",
+        "connection is closed", "connection lost",
+    ))
+
+
+async def extract_rendered_records(page: Page, spec: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract a bounded set of repeated DOM records from the rendered page."""
+    container = spec.get("container")
+    fields = spec.get("fields")
+    if not isinstance(container, str) or not container or len(container) > 300:
+        raise ValueError("extract_records requires a short container CSS selector")
+    if not isinstance(fields, dict) or not 1 <= len(fields) <= 12 or any(
+        not isinstance(k, str) or not isinstance(v, str) or len(k) > 60 or len(v) > 300
+        for k, v in fields.items()
+    ):
+        raise ValueError("extract_records requires 1-12 short CSS field selectors")
+    return {"records": await page.evaluate("""({container, fields}) => {
+        const nodes = [...document.querySelectorAll(container)].slice(0, 50);
+        return nodes.map(root => Object.fromEntries(Object.entries(fields).map(([name, rule]) => {
+            const at = rule.lastIndexOf('@');
+            const selector = at < 0 ? rule : rule.slice(0, at);
+            const attribute = at < 0 ? null : rule.slice(at + 1);
+            const element = selector === ':scope' ? root : root.querySelector(selector);
+            const value = element ? (attribute ? element.getAttribute(attribute) : element.textContent) : null;
+            return [name, value == null ? null : value.trim().slice(0, 500)];
+        })));
+    }""", {"container": container, "fields": fields})}
+
+
 class BrowserPool:
     def __init__(self):
         self.semaphore = asyncio.Semaphore(settings.MAX_BROWSER_WORKERS)
@@ -50,6 +92,8 @@ class BrowserPool:
         self._queue_wait_total_s: float = 0.0
         self._queue_wait_count: int = 0
         self._crashes_total: int = 0
+        self._queued_at: set[float] = set()
+        self._checkout_at: dict[int, float] = {}
 
     async def close(self):
         if self.camoufox_pool:
@@ -73,6 +117,9 @@ class BrowserPool:
             "crashes_total": self._crashes_total,
             "avg_queue_wait_seconds": round(avg_wait, 3),
             "queue_wait_samples": self._queue_wait_count,
+            "queue_depth": len(self._queued_at),
+            "oldest_queue_wait_seconds": round(max(0.0, time.monotonic() - min(self._queued_at)), 3) if self._queued_at else 0.0,
+            "oldest_checkout_seconds": round(max(0.0, time.monotonic() - min(self._checkout_at.values())), 3) if self._checkout_at else 0.0,
         }
 
     async def self_test(self) -> Dict[str, Any]:
@@ -132,10 +179,18 @@ class BrowserPool:
         headers: Optional[Dict[str, str]] = None,
         wait_selector: Optional[str] = None,
         wait_delay_ms: Optional[int] = None,
-        capture_screenshot: bool = False
+        capture_screenshot: bool = False,
+        screenshot_full_page: bool = False,
+        screenshot_selector: Optional[str] = None,
+        extract_records: Optional[Dict[str, Any]] = None,
     ) -> SolutionModel:
         wait_start = time.monotonic()
-        async with self.semaphore:
+        self._queued_at.add(wait_start)
+        try:
+            await self.semaphore.acquire()
+        finally:
+            self._queued_at.discard(wait_start)
+        try:
             self._queue_wait_total_s += time.monotonic() - wait_start
             self._queue_wait_count += 1
             start_time = time.monotonic()
@@ -163,7 +218,9 @@ class BrowserPool:
                         self._solve_with_pooled_camoufox(
                             url=url, method=method, post_data=post_data, cookies=cookies, timeout_ms=timeout_ms,
                             headers=headers, start_time=start_time, wait_selector=wait_selector,
-                            wait_delay_ms=wait_delay_ms, capture_screenshot=capture_screenshot
+                            wait_delay_ms=wait_delay_ms, capture_screenshot=capture_screenshot,
+                            screenshot_full_page=screenshot_full_page, screenshot_selector=screenshot_selector,
+                            extract_records=extract_records,
                         ),
                         timeout=tier_timeout
                     )
@@ -182,7 +239,8 @@ class BrowserPool:
                         url=url, method=method, post_data=post_data, cookies=cookies, pw_proxy=pw_proxy,
                         user_agent=user_agent, timeout_ms=timeout_ms, active_ua=active_ua, headers=headers,
                         start_time=start_time, wait_selector=wait_selector, wait_delay_ms=wait_delay_ms,
-                        capture_screenshot=capture_screenshot
+                        capture_screenshot=capture_screenshot, screenshot_full_page=screenshot_full_page,
+                        screenshot_selector=screenshot_selector, extract_records=extract_records,
                     ),
                     timeout=tier_timeout
                 )
@@ -196,6 +254,8 @@ class BrowserPool:
 
             self._crashes_total += 1
             raise last_error or RuntimeError(f"Camoufox solve failed for {url}")
+        finally:
+            self.semaphore.release()
 
     async def _solve_with_pooled_camoufox(
         self,
@@ -208,12 +268,17 @@ class BrowserPool:
         start_time: float,
         wait_selector: Optional[str],
         wait_delay_ms: Optional[int],
-        capture_screenshot: bool
+        capture_screenshot: bool,
+        screenshot_full_page: bool = False,
+        screenshot_selector: Optional[str] = None,
+        extract_records: Optional[Dict[str, Any]] = None,
     ) -> SolutionModel:
         inst = await self.camoufox_pool.acquire()
+        self._checkout_at[id(inst)] = time.monotonic()
         context = None
         page = None
         setup_ok = False
+        disconnected = False
         try:
             logger.info(f"[CamoufoxPool] Checked out warm instance (use #{inst.uses}) for {url}...")
             if hasattr(inst.browser, "new_context"):
@@ -239,8 +304,12 @@ class BrowserPool:
                 start_time=start_time,
                 wait_selector=wait_selector,
                 wait_delay_ms=wait_delay_ms,
-                capture_screenshot=capture_screenshot
+                capture_screenshot=capture_screenshot, screenshot_full_page=screenshot_full_page,
+                screenshot_selector=screenshot_selector, extract_records=extract_records,
             )
+        except BaseException as exc:
+            disconnected = _is_browser_disconnected(exc)
+            raise
         finally:
             if page:
                 try:
@@ -253,7 +322,12 @@ class BrowserPool:
                 except Exception:
                     pass
             # A failure before setup_ok means the process may be wedged, so recycle it now.
-            await self.camoufox_pool.release(inst, force_recycle=not setup_ok)
+            try:
+                await self.camoufox_pool.release(
+                    inst, force_recycle=not setup_ok or disconnected or not _browser_is_connected(inst.browser)
+                )
+            finally:
+                self._checkout_at.pop(id(inst), None)
 
     async def _solve_with_ephemeral_camoufox(
         self,
@@ -269,7 +343,10 @@ class BrowserPool:
         start_time: float,
         wait_selector: Optional[str],
         wait_delay_ms: Optional[int],
-        capture_screenshot: bool
+        capture_screenshot: bool,
+        screenshot_full_page: bool = False,
+        screenshot_selector: Optional[str] = None,
+        extract_records: Optional[Dict[str, Any]] = None,
     ) -> SolutionModel:
         """Non-pooled launch for requests with their own proxy or user_agent, both fixed at launch."""
         use_geoip = bool(pw_proxy) and settings.CAMOUFOX_GEOIP_ON_PROXY
@@ -304,7 +381,8 @@ class BrowserPool:
                 start_time=start_time,
                 wait_selector=wait_selector,
                 wait_delay_ms=wait_delay_ms,
-                capture_screenshot=capture_screenshot
+                capture_screenshot=capture_screenshot, screenshot_full_page=screenshot_full_page,
+                screenshot_selector=screenshot_selector, extract_records=extract_records,
             )
 
     async def _execute_solve_flow(
@@ -321,7 +399,10 @@ class BrowserPool:
         start_time: float,
         wait_selector: Optional[str] = None,
         wait_delay_ms: Optional[int] = None,
-        capture_screenshot: bool = False
+        capture_screenshot: bool = False,
+        screenshot_full_page: bool = False,
+        screenshot_selector: Optional[str] = None,
+        extract_records: Optional[Dict[str, Any]] = None,
     ) -> SolutionModel:
         pw_cookies = build_playwright_cookies(url, cookies)
         if pw_cookies:
@@ -492,10 +573,22 @@ class BrowserPool:
         else:
             await asyncio.sleep(0.3)
 
+        rendered_records = await extract_rendered_records(page, extract_records) if extract_records else None
         screenshot_b64 = None
         if capture_screenshot:
             try:
-                img_bytes = await page.screenshot(type="jpeg", quality=60)
+                if screenshot_selector:
+                    locator = page.locator(screenshot_selector).first
+                    bounds = await locator.bounding_box(timeout=3000)
+                    if not bounds or bounds["height"] > settings.MAX_SCREENSHOT_HEIGHT_PX:
+                        raise ValueError("Screenshot element is missing or exceeds height limit")
+                    img_bytes = await locator.screenshot(type="jpeg", quality=60, timeout=5000)
+                else:
+                    if screenshot_full_page:
+                        height = await page.evaluate("() => document.documentElement.scrollHeight")
+                        if height > settings.MAX_SCREENSHOT_HEIGHT_PX:
+                            raise ValueError("Full-page screenshot exceeds height limit")
+                    img_bytes = await page.screenshot(type="jpeg", quality=60, full_page=screenshot_full_page, timeout=5000)
                 max_bytes = settings.MAX_SCREENSHOT_MB * 1024 * 1024
                 if max_bytes > 0 and len(img_bytes) > max_bytes:
                     logger.warning(
@@ -558,6 +651,8 @@ class BrowserPool:
 
         if screenshot_b64:
             solution.screenshot = screenshot_b64
+        if rendered_records is not None:
+            solution.extracted = rendered_records
 
         return solution
 
