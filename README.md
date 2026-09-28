@@ -48,6 +48,11 @@
 
 ## 🟢 Quick Deployment: UGREEN NASync DXP4800 Pro (UGOS Pro)
 
+The image uses the Debian 13 (Trixie) Python 3.14 slim base. CI checks the
+distribution and launches Camoufox under the NAS runtime identity
+(`PUID=1000`, `PGID=10`) before publishing. The image runs on the NAS host's
+kernel; changing the container base does not change UGOS or its kernel.
+
 The included `compose.ugreen.yml` is tuned for the DXP4800 Pro while it is
 also running Jellyfin and the Arr stack. It fixes Solverr at two browser
 workers, two CPU cores, 3GB RAM, 1GB shared memory, bounded caches, rotated
