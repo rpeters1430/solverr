@@ -2,7 +2,7 @@
 # Solverr - Ultra-fast & Lightweight FlareSolverr Alternative
 # Optimized for high-efficiency container deployments (UGREEN NASync / Linux / Docker)
 
-FROM python:3.14-slim-bookworm@sha256:82bc3c539b8813ada9d68c63b40158fa002f7f33de9bf3312a3dfdc0620dff56 AS base
+FROM python:3.14-slim-trixie@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d AS base
 ENV PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -61,20 +61,20 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
       tini curl ca-certificates gosu \
-      libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 \
+      libatk1.0-0t64 libatk-bridge2.0-0t64 libatspi2.0-0t64 \
       libcairo2 libcairo-gobject2 \
       libdbus-1-3 libdbus-glib-1-2 \
       libfontconfig1 \
       libgdk-pixbuf-2.0-0 \
-      libglib2.0-0 \
-      libgtk-3-0 \
+      libglib2.0-0t64 \
+      libgtk-3-0t64 \
       libnspr4 libnss3 \
       libpango-1.0-0 libpangocairo-1.0-0 \
       libx11-6 libx11-xcb1 libxcb1 libxcb-shm0 \
       libxcomposite1 libxcursor1 libxdamage1 \
       libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 libxss1 libxtst6 \
       libdrm2 libgbm1 \
-      libasound2 \
+      libasound2t64 \
       fonts-liberation \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
