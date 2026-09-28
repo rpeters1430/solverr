@@ -29,6 +29,8 @@ logger = logging.getLogger("solverr.browser")
 
 # Outer wall-clock cap per tier, for Playwright calls that ignore their own timeout= and would pin a pool slot.
 SOLVE_WALLCLOCK_GRACE_SECONDS = 15
+# Below this, a fresh-browser retry can't launch and clear a challenge, so fail fast instead.
+MIN_RETRY_TIMEOUT_MS = 5000
 
 
 def _describe_solve_error(e: BaseException, tier_timeout: float, tier_label: str) -> BaseException:
@@ -233,11 +235,19 @@ class BrowserPool:
                     logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve notice/fallback: {last_error}. Retrying with a fresh ephemeral Camoufox instance...")
 
             # Fresh fingerprint: the pooled path's retry, or the only attempt for proxy/custom-UA requests.
+            # A retry gets only what's left of the caller's budget, not a second full timeout.
+            ephemeral_timeout_ms = timeout_ms
+            if use_pool:
+                ephemeral_timeout_ms = int(timeout_ms - (time.monotonic() - start_time) * 1000)
+                if ephemeral_timeout_ms < MIN_RETRY_TIMEOUT_MS:
+                    self._crashes_total += 1
+                    raise last_error or RuntimeError(f"Camoufox solve failed for {url}")
+                tier_timeout = (ephemeral_timeout_ms / 1000.0) + SOLVE_WALLCLOCK_GRACE_SECONDS
             try:
                 sol = await asyncio.wait_for(
                     self._solve_with_ephemeral_camoufox(
                         url=url, method=method, post_data=post_data, cookies=cookies, pw_proxy=pw_proxy,
-                        user_agent=user_agent, timeout_ms=timeout_ms, active_ua=active_ua, headers=headers,
+                        user_agent=user_agent, timeout_ms=ephemeral_timeout_ms, active_ua=active_ua, headers=headers,
                         start_time=start_time, wait_selector=wait_selector, wait_delay_ms=wait_delay_ms,
                         capture_screenshot=capture_screenshot, screenshot_full_page=screenshot_full_page,
                         screenshot_selector=screenshot_selector, extract_records=extract_records,
@@ -362,12 +372,20 @@ class BrowserPool:
             i_know_what_im_doing=True
         ) as browser_instance:
             if hasattr(browser_instance, "new_context"):
-                context = await browser_instance.new_context(service_workers="block")
+                context_opts: Dict[str, Any] = {"service_workers": "block"}
+                if user_agent:
+                    context_opts["user_agent"] = user_agent
+                context = await browser_instance.new_context(**context_opts)
             elif hasattr(browser_instance, "contexts") and browser_instance.contexts:
                 context = browser_instance.contexts[0]
             else:
                 context = browser_instance
             page = await context.new_page()
+            # Report the UA the page really sent: Camoufox generates its own, and cf_clearance is bound to it.
+            try:
+                active_ua = await page.evaluate("() => navigator.userAgent") or active_ua
+            except Exception:
+                pass
             return await self._execute_solve_flow(
                 context=context,
                 page=page,

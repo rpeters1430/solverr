@@ -105,8 +105,10 @@ class FakeContext:
 
 class FakeBrowser:
     contexts = []
+    context_kwargs: list = []
 
     async def new_context(self, **kwargs):
+        FakeBrowser.context_kwargs.append(kwargs)
         return FakeContext()
 
 
@@ -168,6 +170,83 @@ class TestEphemeralCamoufoxGeoip(unittest.IsolatedAsyncioTestCase):
         with patch.object(settings, "CAMOUFOX_GEOIP_ON_PROXY", False):
             await self._solve(pw_proxy={"server": "http://proxy.example.com:8080"})
         self.assertFalse(FakeAsyncCamoufoxCtx.captured_kwargs[-1]["geoip"])
+
+
+class TestEphemeralCamoufoxUserAgent(unittest.IsolatedAsyncioTestCase):
+    """cf_clearance is bound to the UA that earned it, so the solution must
+    report the UA the page actually sent - not DEFAULT_USER_AGENT, which
+    Camoufox never uses - or callers replay the cookie with the wrong UA."""
+
+    def setUp(self):
+        FakeBrowser.context_kwargs = []
+        patcher = patch("app.solver.browser.browser.AsyncCamoufox", FakeAsyncCamoufoxCtx)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def _solve(self, user_agent):
+        pool = BrowserPool()
+        captured = {}
+
+        async def fake_flow(**kwargs):
+            captured.update(kwargs)
+            return "ok"
+
+        with patch.object(pool, "_execute_solve_flow", side_effect=fake_flow):
+            await pool._solve_with_ephemeral_camoufox(
+                url="https://example.com", method="GET", post_data=None, cookies=None,
+                pw_proxy=None, user_agent=user_agent, timeout_ms=5000, active_ua="default-ua",
+                headers=None, start_time=time.time(), wait_selector=None,
+                wait_delay_ms=None, capture_screenshot=False
+            )
+        return captured
+
+    async def test_reports_real_navigator_user_agent(self):
+        captured = await self._solve(user_agent=None)
+        self.assertEqual(captured["active_ua"], "fake-ua")
+        self.assertNotIn("user_agent", FakeBrowser.context_kwargs[-1])
+
+    async def test_custom_user_agent_is_applied_to_context(self):
+        await self._solve(user_agent="custom-ua")
+        self.assertEqual(FakeBrowser.context_kwargs[-1]["user_agent"], "custom-ua")
+
+
+class TestEphemeralRetryBudget(unittest.IsolatedAsyncioTestCase):
+    """The ephemeral retry after a failed pooled attempt must get only the
+    remaining budget, not a second full timeout (which doubled worst-case
+    latency past the caller's maxTimeout)."""
+
+    async def test_retry_gets_remaining_budget(self):
+        pool = BrowserPool()
+        pool.camoufox_pool = FakeCamoufoxPoolWithBrowser(1)
+        retry_timeouts = []
+
+        async def slow_pooled(**kwargs):
+            await asyncio.sleep(0.2)
+            raise RuntimeError("challenge never cleared")
+
+        async def ephemeral(**kwargs):
+            retry_timeouts.append(kwargs["timeout_ms"])
+            return type("Sol", (), {"status": 200})()
+
+        with patch.object(pool, "_solve_with_pooled_camoufox", side_effect=slow_pooled), \
+             patch.object(pool, "_solve_with_ephemeral_camoufox", side_effect=ephemeral):
+            await pool.solve("https://example.com", timeout_ms=10000)
+        self.assertEqual(len(retry_timeouts), 1)
+        self.assertLessEqual(retry_timeouts[0], 9800)
+
+    async def test_retry_skipped_when_budget_exhausted(self):
+        pool = BrowserPool()
+        pool.camoufox_pool = FakeCamoufoxPoolWithBrowser(1)
+
+        async def slow_pooled(**kwargs):
+            await asyncio.sleep(0.1)
+            raise RuntimeError("challenge never cleared")
+
+        with patch.object(pool, "_solve_with_pooled_camoufox", side_effect=slow_pooled), \
+             patch.object(pool, "_solve_with_ephemeral_camoufox") as ephemeral:
+            with self.assertRaises(RuntimeError):
+                await pool.solve("https://example.com", timeout_ms=3000)
+        ephemeral.assert_not_called()
 
 
 class TestBrowserPoolCancellation(unittest.IsolatedAsyncioTestCase):
