@@ -183,7 +183,7 @@ body.sidebar-open {
 }
 .history-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 24px; }
 .history-summary > div { padding: 16px; background: var(--bg-dark); border: 1px solid var(--border-color-light); border-radius: var(--radius-sm); }
-.history-summary strong { display: block; font-size: 24px; font-variant-numeric: tabular-nums; }
+.history-summary strong { display: block; font-size: 24px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .history-summary span { display: block; color: var(--text-muted); font-size: 12px; margin-top: 4px; }
 .history-chart-header { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; font-weight: 600; margin-bottom: 10px; }
 .history-chart-legend { color: var(--accent-emerald); font-size: 11px; white-space: nowrap; }
@@ -205,7 +205,8 @@ body.sidebar-open {
 .history-table th, .history-table td { padding: 11px 12px; }
 .history-table tbody tr { border-bottom: 1px solid var(--border-color); }
 .history-table tbody tr:hover { background: var(--bg-card-hover); }
-.history-table td:nth-child(2) { overflow-wrap: anywhere; }
+.history-table td:nth-child(2) { overflow-wrap: break-word; }
+.history-table td:nth-child(1), .history-table td:nth-child(3), .history-table td:nth-child(5) { white-space: nowrap; }
 .history-error { margin-top: 16px; color: var(--accent-rose); }
 @media (max-width: 600px) {
     .history-breakdown { grid-template-columns: 1fr; }
