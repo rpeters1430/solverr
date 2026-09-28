@@ -43,54 +43,71 @@ class RequestHistory:
                 conn.execute("DELETE FROM requests WHERE id <= (SELECT MAX(id) - ? FROM requests)", (self.limit,))
 
     async def recent(self, limit: int = 100, domain: str | None = None,
-                     outcome: str | None = None):
+                     outcome: str | None = None, tier: str | None = None,
+                     hours: int = 24):
         async with self._lock:
-            return await asyncio.to_thread(self._recent, min(max(limit, 1), 500), domain, outcome)
+            return await asyncio.to_thread(self._recent, min(max(limit, 1), 500), domain, outcome, tier, hours)
 
-    def _recent(self, limit, domain, outcome):
-        sql = "SELECT timestamp,domain,tier,outcome,http_status,duration_ms,challenge,failure_type FROM requests WHERE 1=1"
-        params = []
+    def _recent(self, limit, domain, outcome, tier, hours):
+        sql = "SELECT timestamp,domain,tier,outcome,http_status,duration_ms,challenge,failure_type FROM requests WHERE timestamp >= ?"
+        params = [time.time() - min(max(hours, 1), 168) * 3600]
         if domain:
             sql += " AND domain = ?"
             params.append(domain.lower())
         if outcome:
             sql += " AND outcome = ?"
             params.append(outcome)
+        if tier:
+            sql += " AND tier = ?"
+            params.append(tier)
         sql += " ORDER BY id DESC LIMIT ?"
         params.append(limit)
         with closing(self._connect()) as conn:
             conn.row_factory = sqlite3.Row
             return [dict(row) for row in conn.execute(sql, params)]
 
-    async def summary(self, domain: str | None = None, outcome: str | None = None):
+    async def summary(self, domain: str | None = None, outcome: str | None = None,
+                      tier: str | None = None, hours: int = 24):
         async with self._lock:
-            return await asyncio.to_thread(self._summary, domain, outcome)
+            return await asyncio.to_thread(self._summary, domain, outcome, tier, hours)
 
-    def _summary(self, domain, outcome):
-        now_hour = int(time.time() // 3600) * 3600
-        first_hour = now_hour - 23 * 3600
-        sql = "SELECT timestamp,outcome,duration_ms FROM requests WHERE timestamp >= ?"
-        params = [first_hour]
+    def _summary(self, domain, outcome, tier, window_hours):
+        window_hours = min(max(window_hours, 1), 168)
+        bucket_count = min(24, window_hours)
+        bucket_seconds = window_hours * 3600 / bucket_count
+        start = time.time() - window_hours * 3600
+        sql = "SELECT timestamp,outcome,duration_ms,tier,domain FROM requests WHERE timestamp >= ?"
+        params = [start]
         if domain:
             sql += " AND domain = ?"
             params.append(domain.lower())
         if outcome:
             sql += " AND outcome = ?"
             params.append(outcome)
-        hours = [{"timestamp": first_hour + i * 3600, "success": 0, "failed": 0} for i in range(24)]
+        if tier:
+            sql += " AND tier = ?"
+            params.append(tier)
+        buckets = [{"timestamp": start + i * bucket_seconds, "success": 0, "failed": 0} for i in range(bucket_count)]
         durations = []
+        tier_counts = {}
+        failed_domains = {}
         with closing(self._connect()) as conn:
-            for timestamp, result, duration in conn.execute(sql, params):
-                index = int((timestamp - first_hour) // 3600)
-                if 0 <= index < 24:
-                    hours[index]["failed" if result == "failed" else "success"] += 1
+            for timestamp, result, duration, request_tier, request_domain in conn.execute(sql, params):
+                index = min(bucket_count - 1, int((timestamp - start) // bucket_seconds))
+                if 0 <= index < bucket_count:
+                    buckets[index]["failed" if result == "failed" else "success"] += 1
                     durations.append(duration)
+                    tier_counts[request_tier] = tier_counts.get(request_tier, 0) + 1
+                    if result == "failed":
+                        failed_domains[request_domain] = failed_domains.get(request_domain, 0) + 1
         durations.sort()
         count = len(durations)
         return {
-            "hours": hours, "total": count,
-            "failed": sum(hour["failed"] for hour in hours),
+            "hours": buckets, "window_hours": window_hours, "total": count,
+            "failed": sum(bucket["failed"] for bucket in buckets),
             "p95_ms": round(durations[max(0, (95 * count + 99) // 100 - 1)], 1) if count else None,
+            "tier_counts": tier_counts,
+            "top_failed_domains": sorted(failed_domains.items(), key=lambda item: (-item[1], item[0]))[:5],
         }
 
 

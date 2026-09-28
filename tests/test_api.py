@@ -81,6 +81,8 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertEqual(res_sessions.status_code, 200)
 
         res_history = self.client.get("/api/history/summary")
+        self.assertEqual(self.client.get("/api/history/summary?hours=169").status_code, 422)
+        self.assertEqual(self.client.get("/api/history?hours=0").status_code, 422)
         self.assertEqual(res_history.status_code, 200)
         self.assertEqual(len(res_history.json()["hours"]), 24)
 

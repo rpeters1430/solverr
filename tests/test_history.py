@@ -22,6 +22,11 @@ class TestRequestHistory(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(summary["total"], 2)
             self.assertEqual(summary["failed"], 1)
             self.assertEqual(sum(hour["success"] + hour["failed"] for hour in summary["hours"]), 2)
+            self.assertEqual(summary["top_failed_domains"], [("example.net", 1)])
+            self.assertEqual(summary["tier_counts"]["tier2_cache"], 1)
+            self.assertEqual((await reopened.summary(tier="tier2_cache"))["total"], 1)
+            self.assertEqual(len((await reopened.summary(hours=168))["hours"]), 24)
+            self.assertEqual(len(await reopened.recent(tier="tier2_cache", hours=1)), 1)
             with open(path, "rb") as db:
                 contents = db.read()
             self.assertNotIn(b"sensitive", contents)

@@ -198,9 +198,13 @@ document.addEventListener('DOMContentLoaded', () => {
         const requestId = ++historyRequest;
         const domain = document.getElementById('history-domain').value.trim();
         const outcome = document.getElementById('history-outcome').value;
+        const tier = document.getElementById('history-tier').value;
+        const hours = document.getElementById('history-hours').value;
         const params = new URLSearchParams();
         if (domain) params.set('domain', domain);
         if (outcome) params.set('outcome', outcome);
+        if (tier) params.set('tier', tier);
+        params.set('hours', hours);
         const error = document.getElementById('history-error');
         try {
             const [res, summaryRes] = await Promise.all([
@@ -213,6 +217,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (requestId !== historyRequest) return;
             error.hidden = true;
             document.getElementById('history-total').textContent = summary.total;
+            document.getElementById('history-period-label').textContent = `Requests · ${hours === '168' ? '7 days' : `${hours} hour${hours === '1' ? '' : 's'}`}`;
             document.getElementById('history-failed').textContent = summary.failed;
             document.getElementById('history-p95').textContent = summary.p95_ms === null ? '—' : `${summary.p95_ms} ms`;
             const body = document.getElementById('history-rows');
@@ -232,9 +237,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!rows.length) body.innerHTML = '<tr><td colspan="6">No matching requests.</td></tr>';
             const trend = document.getElementById('history-trend');
             trend.replaceChildren();
-            const hours = summary.hours || [];
-            const peak = Math.max(1, ...hours.map(hour => hour.success + hour.failed));
-            for (const hour of hours) {
+            const timeBuckets = summary.hours || [];
+            const peak = Math.max(1, ...timeBuckets.map(hour => hour.success + hour.failed));
+            for (const hour of timeBuckets) {
                 const bar = document.createElement('div');
                 bar.className = 'history-bar';
                 const count = hour.success + hour.failed;
@@ -250,6 +255,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (!count) bar.classList.add('history-bar-empty');
                 trend.appendChild(bar);
             }
+            trend.setAttribute('aria-label', `Request volume over the past ${summary.window_hours} hours: ${summary.total} requests, ${summary.failed} failed`);
+            const renderBreakdown = (elementId, entries, fallback) => {
+                const container = document.getElementById(elementId);
+                container.replaceChildren();
+                if (!entries.length) { container.textContent = fallback; return; }
+                for (const [label, count] of entries) {
+                    const line = document.createElement('p');
+                    const name = document.createElement('span');
+                    const total = document.createElement('strong');
+                    name.textContent = label;
+                    total.textContent = count;
+                    line.append(name, total);
+                    container.appendChild(line);
+                }
+            };
+            renderBreakdown('history-tier-counts', Object.entries(summary.tier_counts || {}).sort((a, b) => b[1] - a[1]), 'No requests yet.');
+            renderBreakdown('history-failed-domains', summary.top_failed_domains || [], 'No failures.');
         } catch (e) {
             if (requestId !== historyRequest) return;
             error.textContent = e.message || 'Unable to load request history.';
@@ -260,6 +282,8 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('history-refresh').addEventListener('click', fetchHistory);
     document.getElementById('history-domain').addEventListener('change', fetchHistory);
     document.getElementById('history-outcome').addEventListener('change', fetchHistory);
+    document.getElementById('history-tier').addEventListener('change', fetchHistory);
+    document.getElementById('history-hours').addEventListener('change', fetchHistory);
     fetchHistory();
     setInterval(() => {
         if (document.getElementById('tab-history').classList.contains('active')) fetchHistory();

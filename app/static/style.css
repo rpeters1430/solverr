@@ -194,6 +194,11 @@ body.sidebar-open {
 .history-bar-failed { background: var(--accent-rose); min-height: 2px; }
 .history-bar-empty::after { content: ''; height: 2px; background: var(--border-color-light); margin-top: auto; }
 .history-note { margin: 10px 0 16px; color: var(--text-muted); font-size: 12px; }
+.history-breakdown { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
+.history-breakdown > div { padding: 12px; background: var(--bg-dark); border: 1px solid var(--border-color-light); border-radius: var(--radius-sm); }
+.history-breakdown h4 { margin: 0 0 8px; font-size: 13px; }
+.history-breakdown p { display: flex; justify-content: space-between; gap: 12px; margin: 5px 0; color: var(--text-muted); font-size: 12px; }
+.history-breakdown p span:first-child { overflow-wrap: anywhere; }
 .history-table-wrap { overflow-x: auto; }
 .history-table { width: 100%; min-width: 650px; border-collapse: collapse; text-align: left; font-size: 13px; }
 .history-table th { color: var(--text-muted); font-weight: 600; border-bottom: 1px solid var(--border-color-light); }
@@ -203,6 +208,7 @@ body.sidebar-open {
 .history-table td:nth-child(2) { overflow-wrap: anywhere; }
 .history-error { margin-top: 16px; color: var(--accent-rose); }
 @media (max-width: 600px) {
+    .history-breakdown { grid-template-columns: 1fr; }
     .history-content { padding: 0 14px 18px; }
     .history-summary { gap: 6px; }
     .history-summary > div { padding: 10px; }

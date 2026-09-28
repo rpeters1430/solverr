@@ -3,7 +3,7 @@ import os
 import psutil
 import logging
 from typing import Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import PlainTextResponse, JSONResponse
 from app.models.flaresolverr import TestRequestModel, V1Request
 from app.solver.engine import metrics, solver_engine
@@ -18,12 +18,15 @@ logger = logging.getLogger("solverr.api.dashboard")
 router = APIRouter()
 
 @router.get("/history")
-async def get_history(limit: int = 100, domain: Optional[str] = None, outcome: Optional[str] = None):
-    return {"requests": await request_history.recent(limit, domain, outcome)}
+async def get_history(limit: int = Query(100, ge=1, le=500), domain: Optional[str] = None,
+                      outcome: Optional[str] = None, tier: Optional[str] = None,
+                      hours: int = Query(24, ge=1, le=168)):
+    return {"requests": await request_history.recent(limit, domain, outcome, tier, hours)}
 
 @router.get("/history/summary")
-async def get_history_summary(domain: Optional[str] = None, outcome: Optional[str] = None):
-    return await request_history.summary(domain, outcome)
+async def get_history_summary(domain: Optional[str] = None, outcome: Optional[str] = None,
+                              tier: Optional[str] = None, hours: int = Query(24, ge=1, le=168)):
+    return await request_history.summary(domain, outcome, tier, hours)
 
 @router.get("/stats")
 async def get_stats():
