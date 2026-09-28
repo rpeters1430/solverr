@@ -135,6 +135,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (document.getElementById('val-pool-recycles')) document.getElementById('val-pool-recycles').textContent = pool.recycles_total || 0;
             if (document.getElementById('val-browser-crashes')) document.getElementById('val-browser-crashes').textContent = pool.crashes_total || 0;
             if (document.getElementById('val-queue-wait')) document.getElementById('val-queue-wait').textContent = Math.round((pool.avg_queue_wait_seconds || 0) * 1000);
+            document.getElementById('val-queue-depth').textContent = pool.queue_depth || 0;
+            document.getElementById('val-queue-oldest').textContent = pool.oldest_queue_wait_seconds || 0;
+            document.getElementById('val-checkout-oldest').textContent = pool.oldest_checkout_seconds || 0;
             if (document.getElementById('val-cache-hit-ratio')) document.getElementById('val-cache-hit-ratio').textContent = (data.cache_hit_ratio_pct || 0) + '%';
             if (document.getElementById('val-cache-lookups')) {
                 const lookups = (data.cookie_cache_lookup_hits || 0) + (data.cookie_cache_lookup_misses || 0);
@@ -186,6 +189,55 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(fetchStats, 3000);
 
     document.getElementById('btn-refresh-stats').addEventListener('click', fetchStats);
+
+    async function fetchHistory() {
+        const domain = document.getElementById('history-domain').value.trim();
+        const outcome = document.getElementById('history-outcome').value;
+        const params = new URLSearchParams({limit: '100'});
+        if (domain) params.set('domain', domain);
+        if (outcome) params.set('outcome', outcome);
+        try {
+            const res = await fetch(`/api/history?${params}`);
+            if (!res.ok) return;
+            const rows = (await res.json()).requests || [];
+            const body = document.getElementById('history-rows');
+            body.replaceChildren();
+            for (const row of rows) {
+                const tr = document.createElement('tr');
+                const values = [new Date(row.timestamp * 1000).toLocaleString(), row.domain, row.tier,
+                    row.http_status ? `${row.outcome} (${row.http_status})` : row.outcome,
+                    `${row.duration_ms} ms`, row.failure_type || row.challenge || '—'];
+                for (const value of values) {
+                    const td = document.createElement('td');
+                    td.textContent = value;
+                    td.style.paddingRight = '12px';
+                    tr.appendChild(td);
+                }
+                body.appendChild(tr);
+            }
+            if (!rows.length) body.innerHTML = '<tr><td colspan="6">No matching requests.</td></tr>';
+            const trend = document.getElementById('history-trend');
+            trend.replaceChildren();
+            const hours = Array(12).fill(0);
+            const current = Date.now() / 1000;
+            for (const row of rows) {
+                const age = Math.floor((current - row.timestamp) / 3600);
+                if (age >= 0 && age < 12) hours[11 - age]++;
+            }
+            const peak = Math.max(1, ...hours);
+            for (const [index, count] of hours.entries()) {
+                const bar = document.createElement('div');
+                bar.style.cssText = `flex:1;height:${Math.max(2, count / peak * 48)}px;background:var(--accent-purple);border-radius:3px;`;
+                bar.title = `${11 - index} hours ago: ${count} request(s)`;
+                trend.appendChild(bar);
+            }
+        } catch (e) { console.error('History poll error:', e); }
+    }
+    document.getElementById('history-refresh').addEventListener('click', fetchHistory);
+    document.getElementById('history-domain').addEventListener('change', fetchHistory);
+    document.getElementById('history-outcome').addEventListener('change', fetchHistory);
+    fetchHistory();
+    setInterval(fetchHistory, 15000);
 
     function initEventStream() {
         const feed = document.getElementById('live-activity-feed');

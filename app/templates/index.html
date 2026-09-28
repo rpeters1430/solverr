@@ -177,13 +177,32 @@
                         <div class="pool-card pool-amber">
                             <div class="pool-badge">QUEUE WAIT (AVG)</div>
                             <div class="pool-val"><span id="val-queue-wait">0</span><span class="unit">ms</span></div>
-                            <div class="pool-desc"><span id="val-pool-recycles">0</span> recycle(s)</div>
+                            <div class="pool-desc"><span id="val-queue-depth">0</span> queued · oldest <span id="val-queue-oldest">0</span>s · checkout <span id="val-checkout-oldest">0</span>s · <span id="val-pool-recycles">0</span> recycle(s)</div>
                         </div>
                         <div class="pool-card pool-rose">
                             <div class="pool-badge">BROWSER CRASHES</div>
                             <div class="pool-val" id="val-browser-crashes">0</div>
                             <div class="pool-desc"><span id="val-timeouts">0</span> timeout(s)</div>
                         </div>
+                    </div>
+                </div>
+
+                <div class="panel" style="margin-bottom: 24px;">
+                    <div class="panel-header">
+                        <h3>Recent Requests</h3>
+                        <p>Stored across restarts. Only domains and limited diagnostic fields are saved.</p>
+                    </div>
+                    <div style="padding: 0 20px 20px;">
+                        <div style="display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;">
+                            <input id="history-domain" type="text" placeholder="Filter domain" aria-label="Filter request history by domain">
+                            <select id="history-outcome" aria-label="Filter request history by outcome"><option value="">All outcomes</option><option value="success">Success</option><option value="failed">Failed</option></select>
+                            <button class="btn btn-secondary" id="history-refresh">Refresh</button>
+                        </div>
+                        <div id="history-trend" style="display: flex; align-items: end; gap: 3px; height: 48px; margin-bottom: 12px;" aria-label="Request volume in recent hours"></div>
+                        <div style="overflow-x: auto;"><table style="width: 100%; text-align: left; border-spacing: 0 8px;">
+                            <thead><tr><th>Time</th><th>Domain</th><th>Tier</th><th>Result</th><th>Duration</th><th>Detail</th></tr></thead>
+                            <tbody id="history-rows"><tr><td colspan="6">No requests recorded yet.</td></tr></tbody>
+                        </table></div>
                     </div>
                 </div>
 

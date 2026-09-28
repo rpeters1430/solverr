@@ -10,6 +10,7 @@ from app.solver.fast_tls import fast_tls_engine
 from app.solver.browser import browser_pool
 from app.config import settings
 from app.events import event_broadcaster
+from app.history import request_history
 from app.security import check_target_url_async
 
 logger = logging.getLogger("solverr.engine")
@@ -180,6 +181,19 @@ class HybridSolverEngine:
     def __init__(self):
         self._inflight: Dict[str, asyncio.Future] = {}
 
+    async def _record_history(self, url: str, budget: RequestBudget, solution: SolutionModel | None = None,
+                              failure: BaseException | None = None):
+        try:
+            await request_history.record(
+                url, solution.tier if solution else "failed",
+                "success" if solution and (solution.status < 400 or solution.status == 404) else "failed",
+                budget.elapsed_ms, solution.status if solution else None,
+                solution.challengeType if solution else None,
+                type(failure).__name__ if failure else None,
+            )
+        except Exception:
+            logger.warning("Request history could not be persisted", exc_info=True)
+
     async def process_request(self, req: V1Request, bypass_cookie_cache: bool = False) -> SolutionModel:
         budget = RequestBudget(req.maxTimeout or settings.BROWSER_TIMEOUT_MS)
         url = req.url
@@ -206,6 +220,9 @@ class HybridSolverEngine:
             "wait_selector": req.wait_selector,
             "wait_delay_ms": req.wait_delay_ms,
             "screenshot": bool(req.screenshot),
+            "screenshot_full_page": req.screenshot_full_page,
+            "screenshot_selector": req.screenshot_selector,
+            "extract_records": req.extract_records,
             "maxTimeout": req.maxTimeout,
             "bypassCookieCache": bypass_cookie_cache,
         }
@@ -232,10 +249,12 @@ class HybridSolverEngine:
         try:
             res = await self._do_process_request(req, budget, url, method, bypass_cookie_cache)
             _cap_response_body(res)
+            await self._record_history(url, budget, solution=res)
             if not future.done():
                 future.set_result(res)
             return res
         except asyncio.CancelledError:
+            await self._record_history(url, budget, failure=asyncio.CancelledError())
             # A cancelled owner task must still release any waiters shielded
             # onto this future via asyncio.shield(existing) above - otherwise
             # they block forever on a future nothing will ever resolve.
@@ -243,6 +262,7 @@ class HybridSolverEngine:
                 future.cancel()
             raise
         except Exception as e:
+            await self._record_history(url, budget, failure=e)
             if not future.done():
                 future.set_exception(e)
                 # Mark retrieved so asyncio doesn't warn when no waiter awaited it.
@@ -368,7 +388,10 @@ class HybridSolverEngine:
                 headers=req.headers,
                 wait_selector=req.wait_selector,
                 wait_delay_ms=req.wait_delay_ms,
-                capture_screenshot=bool(req.screenshot)
+                capture_screenshot=bool(req.screenshot or req.screenshot_selector or req.screenshot_full_page),
+                screenshot_full_page=req.screenshot_full_page,
+                screenshot_selector=req.screenshot_selector,
+                extract_records=req.extract_records,
             )
             
             elapsed_ms = budget.elapsed_ms
@@ -410,7 +433,10 @@ class HybridSolverEngine:
                         headers=req.headers,
                         wait_selector=req.wait_selector,
                         wait_delay_ms=req.wait_delay_ms,
-                        capture_screenshot=bool(req.screenshot)
+                        capture_screenshot=bool(req.screenshot or req.screenshot_selector or req.screenshot_full_page),
+                        screenshot_full_page=req.screenshot_full_page,
+                        screenshot_selector=req.screenshot_selector,
+                        extract_records=req.extract_records,
                     )
                     elapsed_ms = budget.elapsed_ms
                     metrics.record_fallback_proxy(elapsed_ms)

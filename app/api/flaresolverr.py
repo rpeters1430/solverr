@@ -191,7 +191,9 @@ async def native_scrape_api(req: ScrapeRequest):
         tier_used = solution.tier or "tier1_fast_tls"
 
         extracted = None
-        if req.extract_rules and solution.response:
+        if solution.extracted is not None:
+            extracted = solution.extracted
+        elif req.extract_rules and solution.response:
             extracted = _extract_data(solution.response, req.extract_rules)
 
         return ScrapeResponse(

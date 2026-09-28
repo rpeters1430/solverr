@@ -53,3 +53,5 @@ Thumbs.db
 .worktrees/
 *.swp
 *.swo
+data/*.sqlite
+data/*.sqlite-*

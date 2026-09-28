@@ -12,9 +12,14 @@ from app.solver.sessions import session_manager
 from app.solver.fast_tls import fast_tls_engine
 from app.config import settings
 from app.logging_config import get_request_id
+from app.history import request_history
 
 logger = logging.getLogger("solverr.api.dashboard")
 router = APIRouter()
+
+@router.get("/history")
+async def get_history(limit: int = 100, domain: Optional[str] = None, outcome: Optional[str] = None):
+    return {"requests": await request_history.recent(limit, domain, outcome)}
 
 @router.get("/stats")
 async def get_stats():
