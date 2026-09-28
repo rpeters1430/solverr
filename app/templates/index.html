@@ -120,7 +120,7 @@
                             <span class="icon">⏱️</span>
                         </div>
                         <div class="card-value" id="val-fast-ms">0<span class="unit">ms</span></div>
-                        <div class="card-foot">Vs Browser: <span id="val-browser-ms">0</span>ms</div>
+                        <div class="card-foot">Vs Browser: <span id="val-browser-ms">—</span></div>
                     </div>
 
                     <div class="metric-card glow-amber">
@@ -152,7 +152,7 @@
                         <div class="tier-card tier-3">
                             <div class="tier-badge">TIER 3 (STEALTH BROWSER)</div>
                             <div class="tier-val" id="val-tier3-hits">0</div>
-                            <div class="tier-desc">Camoufox / Playwright solver (~1.8-3s)</div>
+                            <div class="tier-desc">Camoufox stealth browser · avg <span id="val-tier3-avg">—</span></div>
                         </div>
                         <div class="tier-card tier-4">
                             <div class="tier-badge">TIER 4 (FALLBACK PROXY)</div>
@@ -176,12 +176,12 @@
                         <div class="pool-card pool-emerald">
                             <div class="pool-badge">COOKIE CACHE HIT RATIO</div>
                             <div class="pool-val" id="val-cache-hit-ratio">0%</div>
-                            <div class="pool-desc"><span id="val-cache-lookups">0</span> lookup(s)</div>
+                            <div class="pool-desc"><span id="val-cache-lookups">0</span> lookup(s) · <span id="val-cache-served">0</span> served by Tier 2</div>
                         </div>
                         <div class="pool-card pool-amber">
                             <div class="pool-badge">QUEUE WAIT (AVG)</div>
                             <div class="pool-val"><span id="val-queue-wait">0</span><span class="unit">ms</span></div>
-                            <div class="pool-desc"><span id="val-queue-depth">0</span> queued · oldest <span id="val-queue-oldest">0</span>s · checkout <span id="val-checkout-oldest">0</span>s · <span id="val-pool-recycles">0</span> recycle(s)</div>
+                            <div class="pool-desc"><span id="val-queue-depth">0</span> queued · oldest <span id="val-queue-oldest">0 ms</span> · longest checkout <span id="val-checkout-oldest">0 ms</span> · <span id="val-pool-recycles">0</span> recycle(s)</div>
                         </div>
                         <div class="pool-card pool-rose">
                             <div class="pool-badge">BROWSER CRASHES</div>
@@ -220,9 +220,9 @@
                                 </div>
                             </div>
                             <div class="comp-item">
-                                <div class="comp-label">Solverr - Level 3 (Stealth Browser Fallback)</div>
+                                <div class="comp-label">Solverr - Level 3 (Stealth Browser Fallback) · measured here: <span id="val-browser-measured">—</span> avg</div>
                                 <div class="bar-bg">
-                                    <div class="bar-fill browser-level" style="width: 35%;">1.8s / ~120MB RAM</div>
+                                    <div class="bar-fill browser-level" style="width: 35%;">~2s / ~120MB RAM</div>
                                 </div>
                             </div>
                             <div class="comp-item">

@@ -18,7 +18,7 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
         self.engine = HybridSolverEngine()
         self.target_check = patch("app.solver.engine.check_target_url_async", new=AsyncMock())
         self.target_check.start()
-        self.cache_lookup = patch("app.solver.engine.cookie_cache.get_cookies_async", new=AsyncMock(return_value=[]))
+        self.cache_lookup = patch("app.solver.engine.cookie_cache.get_cookies_with_user_agent_async", new=AsyncMock(return_value=([], None)))
         self.cache_lookup.start()
 
     def tearDown(self):
@@ -191,7 +191,7 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
     async def test_cookie_merge_keys_by_domain_path_name_not_name_alone(self):
         input_cookie = _cookie("session", "input-value", domain="other.example.com")
         cached_cookie = _cookie("session", "cached-value", domain="example.com")
-        with patch("app.solver.engine.cookie_cache.get_cookies_async", new=AsyncMock(return_value=[cached_cookie])), \
+        with patch("app.solver.engine.cookie_cache.get_cookies_with_user_agent_async", new=AsyncMock(return_value=([cached_cookie], None))), \
              patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(False, _sol(200)))) as fast_mock, \
              patch("app.solver.engine.browser_pool.solve", new=AsyncMock()):
             req = V1Request(cmd="request.get", url="https://example.com", cookies=[input_cookie])
@@ -204,7 +204,7 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
 
     async def test_bypass_cookie_cache_skips_lookup_but_keeps_request_cookies(self):
         supplied_cookie = _cookie("session", "request-value", domain="example.com")
-        with patch("app.solver.engine.cookie_cache.get_cookies_async", new=AsyncMock()) as cache_mock, \
+        with patch("app.solver.engine.cookie_cache.get_cookies_with_user_agent_async", new=AsyncMock()) as cache_mock, \
              patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(False, _sol(200)))) as fast_mock, \
              patch("app.solver.engine.browser_pool.solve", new=AsyncMock()):
             req = V1Request(cmd="request.get", url="https://example.com", cookies=[supplied_cookie])
@@ -212,6 +212,43 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
 
             cache_mock.assert_not_awaited()
             self.assertEqual(fast_mock.call_args.kwargs["cookies"], [supplied_cookie])
+
+    async def test_cached_clearance_replays_with_the_ua_that_earned_it(self):
+        clearance = _cookie("cf_clearance", "token", domain="example.com")
+        solving_ua = "Mozilla/5.0 (X11; Linux x86_64; rv:152.0) Gecko/20100101 Firefox/152.0"
+        with patch("app.solver.engine.cookie_cache.get_cookies_with_user_agent_async", new=AsyncMock(return_value=([clearance], solving_ua))), \
+             patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(False, _sol(200)))) as fast_mock, \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock()):
+            await self.engine.process_request(V1Request(cmd="request.get", url="https://example.com"))
+            self.assertEqual(fast_mock.call_args.kwargs["user_agent"], solving_ua)
+
+    async def test_caller_user_agent_beats_cached_one(self):
+        clearance = _cookie("cf_clearance", "token", domain="example.com")
+        with patch("app.solver.engine.cookie_cache.get_cookies_with_user_agent_async", new=AsyncMock(return_value=([clearance], "Mozilla/5.0 Firefox/152.0"))), \
+             patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(False, _sol(200)))) as fast_mock, \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock()):
+            await self.engine.process_request(V1Request(cmd="request.get", url="https://example.com", userAgent="caller-ua Firefox/1"))
+            self.assertEqual(fast_mock.call_args.kwargs["user_agent"], "caller-ua Firefox/1")
+
+    async def test_incompatible_cached_ua_is_not_replayed(self):
+        clearance = _cookie("cf_clearance", "token", domain="example.com")
+        chrome_ua = "Mozilla/5.0 AppleWebKit/537.36 Chrome/146.0.0.0 Safari/537.36"
+        with patch("app.solver.engine.cookie_cache.get_cookies_with_user_agent_async", new=AsyncMock(return_value=([clearance], chrome_ua))), \
+             patch("app.solver.engine.fast_tls_engine.impersonate_target", "firefox147"), \
+             patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(False, _sol(200)))) as fast_mock, \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock()):
+            await self.engine.process_request(V1Request(cmd="request.get", url="https://example.com"))
+            self.assertIsNone(fast_mock.call_args.kwargs["user_agent"])
+
+    async def test_browser_solution_ua_is_stored_with_cookies(self):
+        solved = _sol(200)
+        solved.cookies = [_cookie("cf_clearance", "token", domain="example.com")]
+        solved.userAgent = "Mozilla/5.0 (X11; Linux x86_64; rv:152.0) Gecko/20100101 Firefox/152.0"
+        with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock(return_value=solved)), \
+             patch("app.solver.engine.cookie_cache.set_cookies_async", new=AsyncMock()) as store_mock:
+            await self.engine.process_request(V1Request(cmd="request.get", url="https://example.com"))
+            self.assertEqual(store_mock.call_args.kwargs["user_agent"], solved.userAgent)
 
     async def test_request_budget_propagates_remaining_timeout_to_browser(self):
         with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \

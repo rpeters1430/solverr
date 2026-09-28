@@ -6,7 +6,7 @@ import zlib
 from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
-from curl_cffi.requests import AsyncSession
+from curl_cffi.requests import AsyncSession, BrowserType
 from app.models.flaresolverr import CookieModel, SolutionModel
 from app.solver.browser import detect_challenge, is_challenge_title
 from app.config import settings
@@ -28,6 +28,13 @@ CHROME_PROFILES = [
     ("chrome145", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"),
     ("chrome142", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"),
 ]
+
+SUPPORTED_TARGETS = {b.value for b in BrowserType}
+_UA_VERSION_RE = {
+    "firefox": re.compile(r"Firefox/(\d+)"),
+    "chrome": re.compile(r"Chrome/(\d+)"),
+}
+
 
 def _sec_ch_ua_for(target: str) -> Optional[str]:
     if not target.startswith("chrome"):
@@ -57,6 +64,28 @@ class FastTLSEngine:
         else:
             domain = url.split("/")[0].split(":")[0].lower()
         return domain.lstrip(".")
+
+    def is_compatible_user_agent(self, user_agent: Optional[str]) -> bool:
+        """Whether a UA can ride this engine's TLS target; a Chrome UA on a Firefox handshake is itself a bot signal."""
+        if not user_agent:
+            return False
+        if self.impersonate_target.startswith("firefox"):
+            return "Firefox/" in user_agent
+        return "Chrome/" in user_agent and "Firefox/" not in user_agent
+
+    def target_for_user_agent(self, user_agent: str) -> str:
+        """The impersonation target matching the UA's browser version: exact when curl_cffi
+        supports it, else the newest supported one not newer than the UA, else the default."""
+        family = "firefox" if self.impersonate_target.startswith("firefox") else "chrome"
+        match = _UA_VERSION_RE[family].search(user_agent or "")
+        if not match:
+            return self.impersonate_target
+        ua_version = int(match.group(1))
+        candidates = [
+            int(t[len(family):]) for t in SUPPORTED_TARGETS
+            if t.startswith(family) and t[len(family):].isdigit() and int(t[len(family):]) <= ua_version
+        ]
+        return f"{family}{max(candidates)}" if candidates else self.impersonate_target
 
     def _select_cookies_for_url(self, cookies: Optional[List[CookieModel]], url: str) -> Dict[str, str]:
         """Collapse identity-distinct cookies (domain+path+name) to the flat
@@ -170,10 +199,10 @@ class FastTLSEngine:
         user_agent: Optional[str] = None,
         session_id: Optional[str] = None
     ) -> Tuple[bool, Optional[SolutionModel]]:
-        # A caller-pinned UA keeps the default target instead of rotating.
+        # A pinned UA gets the TLS target closest to its own browser version, not a rotated one.
         if user_agent:
             active_ua = user_agent
-            impersonate_target = self.impersonate_target
+            impersonate_target = self.target_for_user_agent(user_agent)
         else:
             impersonate_target, active_ua = self._profile_for_domain(url)
 
