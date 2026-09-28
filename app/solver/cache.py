@@ -128,13 +128,30 @@ class CookieCache:
         return self.get_cookies_with_user_agent(url_or_domain)[0]
 
     @staticmethod
-    def _pick_user_agent(entries: List[dict]) -> Optional[str]:
-        """UA that earned the freshest clearance cookie (cf_clearance is bound to it), else the freshest UA seen."""
+    def _pick_user_agent(entries: List[dict], url_or_domain: str) -> Optional[str]:
+        """UA bound to the clearance cookie that will be sent for this URL, else the freshest UA seen.
+
+        Mirrors FastTLSEngine._select_cookies_for_url: among path-applicable cookies the most
+        specific path wins, so a fresher cf_clearance on another path can't lend its UA."""
         with_ua = [e for e in entries if e.get("user_agent")]
         if not with_ua:
             return None
-        clearance = [e for e in with_ua if e["cookie"].get("name") in CLEARANCE_COOKIE_NAMES]
-        return max(clearance or with_ua, key=lambda e: e.get("timestamp", 0))["user_agent"]
+        target_path = (urlparse(url_or_domain).path if "://" in url_or_domain else "") or "/"
+
+        def applies(entry: dict) -> bool:
+            path = entry["cookie"].get("path") or "/"
+            return target_path == path or path == "/" or target_path.startswith(path.rstrip("/") + "/")
+
+        clearance = [
+            e for e in with_ua
+            if e["cookie"].get("name") in CLEARANCE_COOKIE_NAMES and applies(e)
+        ]
+        if clearance:
+            return max(
+                clearance,
+                key=lambda e: (len(e["cookie"].get("path") or "/"), e.get("timestamp", 0)),
+            )["user_agent"]
+        return max(with_ua, key=lambda e: e.get("timestamp", 0))["user_agent"]
 
     def get_cookies_with_user_agent(self, url_or_domain: str) -> Tuple[List[CookieModel], Optional[str]]:
         """Cached cookies for the domain, plus the User-Agent they must be replayed with (if recorded)."""
@@ -162,7 +179,7 @@ class CookieCache:
                             continue
                         result.append(c_model)
                         entries.append(data)
-                return result, self._pick_user_agent(entries)
+                return result, self._pick_user_agent(entries, url_or_domain)
             except Exception as e:
                 logger.debug(f"[CookieCache] Redis read error: {e}")
                 self._invalidate_redis()
@@ -184,7 +201,7 @@ class CookieCache:
         # Storage already deduplicates identical (domain, path, name) keys.
         # Keep different paths and domains here: HTTP cookie selection needs
         # that scope information, and Redis returns the same full cookie set.
-        return result, self._pick_user_agent(entries)
+        return result, self._pick_user_agent(entries, url_or_domain)
 
     def get_cookie_dict(self, url_or_domain: str) -> Dict[str, str]:
         cookies = self.get_cookies(url_or_domain)

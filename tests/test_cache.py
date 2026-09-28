@@ -85,6 +85,14 @@ class TestCookieCache(unittest.TestCase):
         _, ua = self.cache.get_cookies_with_user_agent("https://example.com")
         self.assertEqual(ua, "browser-ua")
 
+    def test_ua_comes_from_the_clearance_cookie_sent_for_the_path(self):
+        self.cache.set_cookies("https://example.com", [CookieModel(name="cf_clearance", value="root", domain="example.com", path="/")], user_agent="root-ua")
+        self.cache.set_cookies("https://example.com", [CookieModel(name="cf_clearance", value="admin", domain="example.com", path="/admin")], user_agent="admin-ua")
+        _, ua = self.cache.get_cookies_with_user_agent("https://example.com/")
+        self.assertEqual(ua, "root-ua")
+        _, ua = self.cache.get_cookies_with_user_agent("https://example.com/admin/page")
+        self.assertEqual(ua, "admin-ua")
+
     def test_entries_without_user_agent_report_none(self):
         self.cache.set_cookies("https://example.com", [CookieModel(name="cf_clearance", value="v", domain="example.com")])
         cookies, ua = self.cache.get_cookies_with_user_agent("https://example.com")

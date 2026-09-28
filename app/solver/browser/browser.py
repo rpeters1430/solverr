@@ -382,10 +382,12 @@ class BrowserPool:
                 context = browser_instance
             page = await context.new_page()
             # Report the UA the page really sent: Camoufox generates its own, and cf_clearance is bound to it.
+            # If it can't be read, report only a caller-pinned UA - never DEFAULT_USER_AGENT, which
+            # Camoufox didn't send and would get cached as a false clearance binding.
             try:
-                active_ua = await page.evaluate("() => navigator.userAgent") or active_ua
+                active_ua = await page.evaluate("() => navigator.userAgent") or (user_agent or "")
             except Exception:
-                pass
+                active_ua = user_agent or ""
             return await self._execute_solve_flow(
                 context=context,
                 page=page,

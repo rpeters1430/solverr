@@ -205,6 +205,22 @@ class TestEphemeralCamoufoxUserAgent(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["active_ua"], "fake-ua")
         self.assertNotIn("user_agent", FakeBrowser.context_kwargs[-1])
 
+    async def test_unreadable_ua_is_not_reported_as_the_default(self):
+        async def failing_evaluate(self, script):
+            raise RuntimeError("page crashed")
+
+        with patch.object(FakePage, "evaluate", failing_evaluate):
+            captured = await self._solve(user_agent=None)
+        self.assertEqual(captured["active_ua"], "")
+
+    async def test_unreadable_ua_keeps_the_pinned_one(self):
+        async def failing_evaluate(self, script):
+            raise RuntimeError("page crashed")
+
+        with patch.object(FakePage, "evaluate", failing_evaluate):
+            captured = await self._solve(user_agent="custom-ua")
+        self.assertEqual(captured["active_ua"], "custom-ua")
+
     async def test_custom_user_agent_is_applied_to_context(self):
         await self._solve(user_agent="custom-ua")
         self.assertEqual(FakeBrowser.context_kwargs[-1]["user_agent"], "custom-ua")

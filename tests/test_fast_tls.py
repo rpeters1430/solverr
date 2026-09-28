@@ -91,6 +91,24 @@ class TestFastTLSUserAgentCompatibility(unittest.TestCase):
         self.assertFalse(engine.is_compatible_user_agent(CHROME_PROFILES[0][1]))
         self.assertFalse(engine.is_compatible_user_agent(None))
 
+    def test_target_matches_ua_version_when_supported(self):
+        engine = FastTLSEngine()
+        engine.impersonate_target = "firefox147"
+        self.assertEqual(engine.target_for_user_agent(FIREFOX_PROFILES[1][1]), "firefox144")
+
+    def test_target_falls_back_to_newest_not_newer_than_ua(self):
+        engine = FastTLSEngine()
+        engine.impersonate_target = "firefox133"
+        target = engine.target_for_user_agent("Mozilla/5.0 (X11; Linux x86_64; rv:999.0) Gecko/20100101 Firefox/999.0")
+        self.assertTrue(target.startswith("firefox"))
+        self.assertLessEqual(int(target[len("firefox"):]), 999)
+        self.assertNotEqual(target, "firefox133")
+
+    def test_target_defaults_when_ua_has_no_version(self):
+        engine = FastTLSEngine()
+        engine.impersonate_target = "firefox147"
+        self.assertEqual(engine.target_for_user_agent("custom-agent"), "firefox147")
+
     def test_chrome_target_accepts_only_chrome_uas(self):
         engine = FastTLSEngine()
         engine.impersonate_target = "chrome146"
