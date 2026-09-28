@@ -74,7 +74,7 @@ def test_process_request_dispatch(benchmark):
         tier="tier1_fast_tls",
     )
 
-    async def _stub(_req, _budget, _url, _method):
+    async def _stub(_req, _budget, _url, _method, _bypass_cookie_cache=False):
         return solution
 
     engine._do_process_request = _stub
