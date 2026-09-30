@@ -16,7 +16,7 @@
   - **Tier 4 (Fallback Proxy)**: Automatic residential / fallback proxy escalation for rate-limited indexers.
 - **🛡️ Multi-WAF & CAPTCHA Solver Suite**: Automated solving for **Cloudflare Turnstile**, **Cloudflare 5s Interstitial**, **Google reCAPTCHA v2 / Enterprise**, **hCaptcha**, **GeeTest**, **Imperva / Incapsula**, **DataDome**, **Akamai**, and **AWS WAF**.
 - **🌐 Deep Shadow DOM & Web Component Traversal**: In-page recursive DOM walker locates Turnstile and CAPTCHA checkboxes nested inside `#shadow-root` nodes across custom web components.
-- **📈 Adaptive TLS Profile Learning**: Fast TLS automatically learns which browser TLS fingerprints (`firefox147`, `firefox144`, `firefox133`, `chrome146`, etc.) succeed per domain, penalizing failing fingerprints and picking optimal JA3 profiles.
+- **📈 Adaptive TLS Profile Learning**: Fast TLS automatically learns which browser TLS fingerprints (`firefox147`, `firefox144`, `firefox133`, `chrome150`, etc.) succeed per domain, penalizing failing fingerprints and picking optimal JA3 profiles.
 - **🖱️ Isolated Humanized Bézier Curve Movement**: Emulates organic human mouse trajectories with micro-jitters, variable velocities, and natural pauses — fully isolated per page using weakref cursor tracking for multi-worker concurrency.
 - **🍪 Netscape & JSON Cookie Export (`/api/cookies/export`)**: Single-click export of cached cookies in Netscape format (`curl -b cookies.txt`, `yt-dlp`, `wget`) or standard JSON.
 - **📡 Real-time Live Event Streaming (SSE)**: Server-Sent Events stream (`/api/events`) broadcasts real-time solve feeds, tier transitions, and telemetry directly to the interactive dashboard.

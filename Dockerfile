@@ -19,8 +19,9 @@ ENV PYTHONUNBUFFERED=1 \
 FROM base AS deps
 WORKDIR /app
 
-# Pinned here so an engine bump invalidates the fetch layer. 152.0.4-beta.30 pairs with pythonlib 0.5.6.
-ARG CAMOUFOX_BROWSER_VERSION=152.0.4-beta.30
+# Pinned here so an engine bump invalidates the fetch layer. Must match the browser
+# pythonlib pairs with (camoufox/browser-pin.json): 0.5.7b2 pairs with 156.0.1-beta.33.
+ARG CAMOUFOX_BROWSER_VERSION=156.0.1-beta.33
 
 # Installed before the venv exists so uv never ships in the runtime image.
 # Cache mounts live under /app/.cache because XDG_CACHE_HOME points there.
@@ -35,8 +36,11 @@ RUN --mount=type=cache,target=/app/.cache/uv \
     uv pip install --python /opt/venv/bin/python -r requirements.txt
 
 # Every launch pins os="linux", so the macOS/Windows font sets (~890MB) are never used.
-RUN python -m camoufox fetch "official/stable/${CAMOUFOX_BROWSER_VERSION}" \
-    && python -m camoufox set "official/stable/${CAMOUFOX_BROWSER_VERSION}" \
+# A bare `fetch` installs pythonlib's paired browser (no prerelease prompt) and seeds the
+# pinned fpgen model; it exits 0 on failure, so assert the pinned build actually landed.
+RUN python -m camoufox fetch \
+    && python -m camoufox set "official/prerelease/${CAMOUFOX_BROWSER_VERSION}" \
+    && ls -d /app/.cache/camoufox/browsers/official/${CAMOUFOX_BROWSER_VERSION}* \
     && python -m camoufox version \
     && rm -rf /app/.cache/camoufox/browsers/official/*/fonts/macos \
               /app/.cache/camoufox/browsers/official/*/fonts/windows
@@ -53,6 +57,9 @@ WORKDIR /app
 
 COPY --from=deps /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
+# fpgen's model lives in the root-owned venv and is refetched once its mtime is five weeks
+# old, which a PUID/PGID user can't do. Re-stamp it as root; a no-op when COPY kept mtimes.
+RUN python -c "from camoufox.fpgen_model import ensure_fpgen_model; ensure_fpgen_model()"
 
 # Curated libs for headless Firefox; `playwright install-deps` pulls in far more (Xvfb, fonts).
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
