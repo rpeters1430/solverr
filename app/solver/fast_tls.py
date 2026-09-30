@@ -24,6 +24,7 @@ FIREFOX_PROFILES = [
     ("firefox133", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0"),
 ]
 CHROME_PROFILES = [
+    ("chrome150", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"),
     ("chrome146", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"),
     ("chrome145", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"),
     ("chrome142", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"),
@@ -36,11 +37,23 @@ _UA_VERSION_RE = {
 }
 
 
-def _sec_ch_ua_for(target: str) -> Optional[str]:
+def _platform_hint_for(target: str, user_agent: str) -> Optional[str]:
+    """sec-ch-ua-platform matching the UA's OS; curl_cffi's Chrome targets default to "macOS"
+    while our profile UAs are Windows. Firefox sends no client hints at all."""
     if not target.startswith("chrome"):
         return None
-    version = "".join(ch for ch in target if ch.isdigit()) or "146"
-    return f'"Chromium";v="{version}", "Not?A_Brand";v="24", "Google Chrome";v="{version}"'
+    if "Windows" in user_agent:
+        return '"Windows"'
+    if "Android" in user_agent:
+        return '"Android"'
+    if "Macintosh" in user_agent:
+        return '"macOS"'
+    if "CrOS" in user_agent:
+        return '"Chrome OS"'
+    if "Linux" in user_agent or "X11" in user_agent:
+        return '"Linux"'
+    return None
+
 
 class FastTLSEngine:
     def __init__(self):
@@ -218,21 +231,13 @@ class FastTLSEngine:
 
         cookie_dict = self._select_cookies_for_url(cookies, url)
 
-        req_headers = {
-            "User-Agent": active_ua,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "Sec-Ch-Ua-Platform": '"Windows"',
-        }
-        sec_ch_ua = _sec_ch_ua_for(impersonate_target)
-        if sec_ch_ua:
-            req_headers["Sec-Ch-Ua"] = sec_ch_ua
-            req_headers["Sec-Ch-Ua-Mobile"] = "?0"
+        # curl_cffi sends each target's real browser headers (Accept, Sec-Fetch-*, sec-ch-ua
+        # with its per-version GREASE brand) in the browser's own order; overriding a name
+        # keeps its position, so only override what must follow our UA.
+        req_headers = {"User-Agent": active_ua}
+        platform_hint = _platform_hint_for(impersonate_target, active_ua)
+        if platform_hint:
+            req_headers["sec-ch-ua-platform"] = platform_hint
         if headers:
             # Case-insensitively merge caller headers over defaults
             lower_to_key = {k.lower(): k for k in req_headers}

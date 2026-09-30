@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import AsyncMock, patch
-from app.solver.fast_tls import FastTLSEngine, FIREFOX_PROFILES, CHROME_PROFILES, _sec_ch_ua_for
+from app.solver.fast_tls import FastTLSEngine, FIREFOX_PROFILES, CHROME_PROFILES, _platform_hint_for
 
 
 class TestFastTLSProfileRotation(unittest.TestCase):
@@ -29,11 +29,16 @@ class TestFastTLSProfileRotation(unittest.TestCase):
         for domain in ["a.com", "b.com", "c.com"]:
             self.assertEqual(engine._profile_for_domain(f"https://{domain}"), FIREFOX_PROFILES[0])
 
-    def test_sec_ch_ua_only_generated_for_chrome_targets(self):
-        self.assertIsNone(_sec_ch_ua_for("firefox147"))
-        header = _sec_ch_ua_for("chrome146")
-        self.assertIn("146", header)
-        self.assertIn("Chromium", header)
+    def test_platform_hint_only_for_chrome_targets_and_follows_ua(self):
+        self.assertIsNone(_platform_hint_for("firefox147", FIREFOX_PROFILES[0][1]))
+        self.assertEqual(_platform_hint_for("chrome150", CHROME_PROFILES[0][1]), '"Windows"')
+        mac_ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+        self.assertEqual(_platform_hint_for("chrome150", mac_ua), '"macOS"')
+
+    def test_profile_targets_are_supported_by_curl_cffi(self):
+        from app.solver.fast_tls import SUPPORTED_TARGETS
+        for target, _ in FIREFOX_PROFILES + CHROME_PROFILES:
+            self.assertIn(target, SUPPORTED_TARGETS)
 
     def test_adaptive_profile_scoring_favors_successful_profile(self):
         engine = FastTLSEngine()
