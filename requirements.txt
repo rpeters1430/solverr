@@ -1,11 +1,11 @@
-fastapi==0.142.1
+fastapi==0.142.2
 uvicorn[standard]==0.54.0
 curl_cffi==0.16.3
 # Camoufox 0.5.7b2 requires playwright<1.63. Keep this pinned until Camoufox
 # publishes a release compatible with Playwright 1.63 or newer.
 playwright==1.62.0
 # Prerelease, paired with browser 156.0.1-beta.33 (CAMOUFOX_BROWSER_VERSION in the Dockerfile).
-camoufox==0.5.7b2
+camoufox==0.5.7b4
 pydantic==2.13.5
 psutil==7.2.2
 httpx==0.28.1
