@@ -41,9 +41,28 @@ RUN --mount=type=cache,target=/app/.cache/uv \
 RUN python -m camoufox fetch \
     && python -m camoufox set "official/prerelease/${CAMOUFOX_BROWSER_VERSION}" \
     && ls -d /app/.cache/camoufox/browsers/official/${CAMOUFOX_BROWSER_VERSION}* \
-    && python -m camoufox version \
-    && rm -rf /app/.cache/camoufox/browsers/official/*/fonts/macos \
-              /app/.cache/camoufox/browsers/official/*/fonts/windows
+    && python -m camoufox version
+# Newer bundles store each font once under an OS-set group (L, LM, LMW, ..., per
+# fonts/groups.json); older ones ship fonts/<os>/. Keep only what Linux reads, and fail on
+# an unrecognised layout so a future change can't silently ship the other OSes' fonts again.
+RUN python <<'EOF'
+import json, pathlib, shutil
+dirs = list(pathlib.Path("/app/.cache/camoufox/browsers").glob("*/*/fonts"))
+assert dirs, "no Camoufox fonts directory found"
+for fonts in dirs:
+    groups = fonts / "groups.json"
+    if groups.exists():
+        meta = json.loads(groups.read_text())
+        drop = set(meta["groups"]) - set(meta["readBy"]["lin"])
+    elif (fonts / "linux").is_dir():
+        drop = {"macos", "windows"}
+    else:
+        raise SystemExit(f"unrecognised Camoufox font layout in {fonts}")
+    for name in sorted(drop):
+        if (fonts / name).is_dir():
+            shutil.rmtree(fonts / name)
+            print("pruned", fonts / name)
+EOF
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update \
