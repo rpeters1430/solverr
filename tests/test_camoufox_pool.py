@@ -3,7 +3,9 @@ import time
 import unittest
 from unittest.mock import patch
 from app.solver.browser import BrowserPool, CamoufoxPool, _PooledCamoufox
+from app.solver.browser import browser as browser_module
 from app.config import settings
+from app.models.flaresolverr import SolutionModel
 
 
 class FakeCamoufoxPool(CamoufoxPool):
@@ -317,6 +319,111 @@ class TestBrowserPoolCancellation(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(fake_camoufox_pool._idle.qsize(), 1)
         self.assertEqual(fake_camoufox_pool._created, 1)
+
+    async def test_second_cancel_during_cleanup_does_not_leak_slot(self):
+        """A client disconnect cancels the request, then the tier's wait_for fires
+        while page.close() is still running: that second cancel used to skip
+        release() and leave the slot counted as created forever, so every later
+        pooled solve waited on an empty queue until its timeout."""
+        pool = BrowserPool()
+        fake = FakeCamoufoxPool(1)
+        close_started = asyncio.Event()
+
+        class SlowClosePage(FakePage):
+            async def close(self):
+                close_started.set()
+                await asyncio.sleep(0.2)
+
+        class SlowCloseContext(FakeContext):
+            async def new_page(self):
+                return SlowClosePage()
+
+        class SlowCloseBrowser(FakeBrowser):
+            async def new_context(self, **kwargs):
+                return SlowCloseContext()
+
+        async def launch():
+            fake.launch_count += 1
+            return _PooledCamoufox(cm=object(), browser=SlowCloseBrowser(), created_at=time.time())
+
+        fake._launch_instance = launch
+        pool.camoufox_pool = fake
+
+        async def hang(*args, **kwargs):
+            await asyncio.sleep(10)
+
+        with patch.object(pool, "_execute_solve_flow", side_effect=hang):
+            task = asyncio.create_task(pool._solve_with_pooled_camoufox(
+                url="https://example.com", method="GET", post_data=None, cookies=None,
+                timeout_ms=5000, headers=None, start_time=time.time(),
+                wait_selector=None, wait_delay_ms=None, capture_screenshot=False,
+            ))
+            await asyncio.sleep(0.05)
+            task.cancel()  # client disconnect
+            await close_started.wait()
+            task.cancel()  # tier timeout fires mid-cleanup
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0.4)
+
+        self.assertEqual(fake._created, 1)
+        self.assertEqual(fake._idle.qsize(), 1)
+        self.assertEqual(pool.pool_stats()["busy"], 0)
+        self.assertEqual(pool.pool_stats()["oldest_checkout_seconds"], 0)
+
+    async def test_exhausted_pool_fails_fast_so_ephemeral_retry_gets_budget(self):
+        pool = BrowserPool()
+        fake = FakeCamoufoxPoolWithBrowser(1)
+        await fake.acquire()  # the only slot stays checked out
+        pool.camoufox_pool = fake
+
+        start = time.monotonic()
+        with patch.object(browser_module, "POOL_ACQUIRE_TIMEOUT_SECONDS", 0.1):
+            with self.assertRaises(TimeoutError) as ctx:
+                await pool._solve_with_pooled_camoufox(
+                    url="https://example.com", method="GET", post_data=None, cookies=None,
+                    timeout_ms=5000, headers=None, start_time=time.time(),
+                    wait_selector=None, wait_delay_ms=None, capture_screenshot=False,
+                )
+        self.assertLess(time.monotonic() - start, 1.0)
+        self.assertIn("No warm Camoufox instance", str(ctx.exception))
+
+    async def test_exhausted_pool_leaves_short_budget_for_ephemeral_retry(self):
+        """A request whose budget is below POOL_ACQUIRE_TIMEOUT_SECONDS must still
+        reach the ephemeral retry instead of spending it all waiting on the pool."""
+        pool = BrowserPool()
+        fake = FakeCamoufoxPoolWithBrowser(1)
+        await fake.acquire()  # the only slot stays checked out
+        pool.camoufox_pool = fake
+        ok = SolutionModel(url="https://example.com", status=200, cookies=[], userAgent="ua")
+
+        with patch.object(pool, "_solve_with_ephemeral_camoufox", return_value=ok) as ephemeral:
+            sol = await pool.solve("https://example.com", timeout_ms=7000)
+        self.assertIs(sol, ok)
+        self.assertGreaterEqual(ephemeral.call_args.kwargs["timeout_ms"], browser_module.MIN_RETRY_TIMEOUT_MS)
+
+    async def test_close_waits_for_orphaned_cleanups(self):
+        pool = BrowserPool()
+        fake = FakeCamoufoxPool(1)
+        pool.camoufox_pool = fake
+        order = []
+
+        async def cleanup():
+            await asyncio.sleep(0.1)
+            order.append("cleanup")
+
+        task = asyncio.ensure_future(cleanup())
+        pool._background_cleanups.add(task)
+        task.add_done_callback(pool._background_cleanups.discard)
+        original_close = fake.close
+
+        async def close():
+            order.append("pool_close")
+            await original_close()
+
+        fake.close = close
+        await pool.close()
+        self.assertEqual(order, ["cleanup", "pool_close"])
 
 
 if __name__ == "__main__":
