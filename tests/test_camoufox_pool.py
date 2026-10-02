@@ -5,6 +5,7 @@ from unittest.mock import patch
 from app.solver.browser import BrowserPool, CamoufoxPool, _PooledCamoufox
 from app.solver.browser import browser as browser_module
 from app.config import settings
+from app.models.flaresolverr import SolutionModel
 
 
 class FakeCamoufoxPool(CamoufoxPool):
@@ -386,6 +387,43 @@ class TestBrowserPoolCancellation(unittest.IsolatedAsyncioTestCase):
                 )
         self.assertLess(time.monotonic() - start, 1.0)
         self.assertIn("No warm Camoufox instance", str(ctx.exception))
+
+    async def test_exhausted_pool_leaves_short_budget_for_ephemeral_retry(self):
+        """A request whose budget is below POOL_ACQUIRE_TIMEOUT_SECONDS must still
+        reach the ephemeral retry instead of spending it all waiting on the pool."""
+        pool = BrowserPool()
+        fake = FakeCamoufoxPoolWithBrowser(1)
+        await fake.acquire()  # the only slot stays checked out
+        pool.camoufox_pool = fake
+        ok = SolutionModel(url="https://example.com", status=200, cookies=[], userAgent="ua")
+
+        with patch.object(pool, "_solve_with_ephemeral_camoufox", return_value=ok) as ephemeral:
+            sol = await pool.solve("https://example.com", timeout_ms=7000)
+        self.assertIs(sol, ok)
+        self.assertGreaterEqual(ephemeral.call_args.kwargs["timeout_ms"], browser_module.MIN_RETRY_TIMEOUT_MS)
+
+    async def test_close_waits_for_orphaned_cleanups(self):
+        pool = BrowserPool()
+        fake = FakeCamoufoxPool(1)
+        pool.camoufox_pool = fake
+        order = []
+
+        async def cleanup():
+            await asyncio.sleep(0.1)
+            order.append("cleanup")
+
+        task = asyncio.ensure_future(cleanup())
+        pool._background_cleanups.add(task)
+        task.add_done_callback(pool._background_cleanups.discard)
+        original_close = fake.close
+
+        async def close():
+            order.append("pool_close")
+            await original_close()
+
+        fake.close = close
+        await pool.close()
+        self.assertEqual(order, ["cleanup", "pool_close"])
 
 
 if __name__ == "__main__":

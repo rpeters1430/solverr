@@ -34,7 +34,8 @@ class CamoufoxPool:
         self._lock = asyncio.Lock()
         self.recycles_total = 0
 
-    async def acquire(self) -> _PooledCamoufox:
+    async def acquire(self, wait_timeout: Optional[float] = None) -> _PooledCamoufox:
+        """`wait_timeout` bounds only the at-capacity wait for a peer's instance, never a launch."""
         try:
             inst = self._idle.get_nowait()
             inst.uses += 1
@@ -51,7 +52,10 @@ class CamoufoxPool:
                 return inst
 
         # At capacity - wait for a peer to finish and check its instance back in.
-        inst = await self._idle.get()
+        if wait_timeout is None:
+            inst = await self._idle.get()
+        else:
+            inst = await asyncio.wait_for(self._idle.get(), timeout=wait_timeout)
         inst.uses += 1
         return inst
 

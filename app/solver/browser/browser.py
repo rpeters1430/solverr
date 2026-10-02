@@ -105,6 +105,10 @@ class BrowserPool:
         self._background_cleanups: set[asyncio.Future] = set()
 
     async def close(self):
+        # Let cleanups orphaned by cancelled solves finish first, or they could requeue or
+        # relaunch an instance into the pool after close() has shut it down.
+        if self._background_cleanups:
+            await asyncio.wait(set(self._background_cleanups), timeout=POOLED_CLEANUP_TIMEOUT_SECONDS * 2 + 10)
         if self.camoufox_pool:
             try:
                 await self.camoufox_pool.close()
@@ -290,11 +294,14 @@ class BrowserPool:
         screenshot_selector: Optional[str] = None,
         extract_records: Optional[Dict[str, Any]] = None,
     ) -> SolutionModel:
+        # Leave the ephemeral retry its minimum window (plus launch slack) out of the caller's budget.
+        remaining_s = timeout_ms / 1000.0 - (time.monotonic() - start_time)
+        wait_timeout = min(POOL_ACQUIRE_TIMEOUT_SECONDS, max(1.0, remaining_s - MIN_RETRY_TIMEOUT_MS / 1000.0 - 1.0))
         try:
-            inst = await asyncio.wait_for(self.camoufox_pool.acquire(), timeout=POOL_ACQUIRE_TIMEOUT_SECONDS)
+            inst = await self.camoufox_pool.acquire(wait_timeout=wait_timeout)
         except asyncio.TimeoutError as e:
             raise TimeoutError(
-                f"No warm Camoufox instance became available within {POOL_ACQUIRE_TIMEOUT_SECONDS}s"
+                f"No warm Camoufox instance became available within {wait_timeout:.0f}s"
             ) from e
         self._checkout_at[id(inst)] = time.monotonic()
         context = None
