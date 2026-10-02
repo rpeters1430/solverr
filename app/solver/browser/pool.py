@@ -16,6 +16,8 @@ logger = logging.getLogger("solverr.browser")
 
 # A hung launch (e.g. under PUID/PGID) would otherwise hold _lock and serialize every acquire().
 CAMOUFOX_LAUNCH_TIMEOUT_SECONDS = 30
+# A wedged Firefox can hang its shutdown handshake forever; don't let that pin a release().
+CAMOUFOX_CLOSE_TIMEOUT_SECONDS = 10
 
 
 class CamoufoxPool:
@@ -103,20 +105,23 @@ class CamoufoxPool:
         )
         try:
             browser = await asyncio.wait_for(cm.__aenter__(), timeout=CAMOUFOX_LAUNCH_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError as e:
+        except BaseException as e:
+            # Also on cancellation, or the half-launched Firefox process is orphaned.
             try:
-                await cm.__aexit__(None, None, None)
-            except Exception:
+                await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=CAMOUFOX_CLOSE_TIMEOUT_SECONDS)
+            except BaseException:
                 pass
-            raise TimeoutError(
-                f"Camoufox launch did not complete within {CAMOUFOX_LAUNCH_TIMEOUT_SECONDS}s"
-            ) from e
+            if isinstance(e, asyncio.TimeoutError):
+                raise TimeoutError(
+                    f"Camoufox launch did not complete within {CAMOUFOX_LAUNCH_TIMEOUT_SECONDS}s"
+                ) from e
+            raise
         logger.info(f"[CamoufoxPool] Warmed stealth browser instance ({self._created + 1}/{self.size})")
         return _PooledCamoufox(cm=cm, browser=browser, created_at=time.monotonic())
 
     async def _close_instance(self, inst: _PooledCamoufox):
         try:
-            await inst.cm.__aexit__(None, None, None)
+            await asyncio.wait_for(inst.cm.__aexit__(None, None, None), timeout=CAMOUFOX_CLOSE_TIMEOUT_SECONDS)
         except Exception as e:
             logger.debug(f"[CamoufoxPool] Instance close notice: {e}")
 

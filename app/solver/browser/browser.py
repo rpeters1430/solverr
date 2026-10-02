@@ -31,6 +31,11 @@ logger = logging.getLogger("solverr.browser")
 SOLVE_WALLCLOCK_GRACE_SECONDS = 15
 # Below this, a fresh-browser retry can't launch and clear a challenge, so fail fast instead.
 MIN_RETRY_TIMEOUT_MS = 5000
+# The worker semaphore already caps concurrency at pool size, so a longer wait means a peer is
+# relaunching a recycled instance (or the pool is wedged) - fall back to an ephemeral browser instead.
+POOL_ACQUIRE_TIMEOUT_SECONDS = 20
+# Page/context close on a wedged browser can hang; past this the instance is treated as broken and recycled.
+POOLED_CLEANUP_TIMEOUT_SECONDS = 5
 
 
 def _describe_solve_error(e: BaseException, tier_timeout: float, tier_label: str) -> BaseException:
@@ -96,6 +101,8 @@ class BrowserPool:
         self._crashes_total: int = 0
         self._queued_at: set[float] = set()
         self._checkout_at: dict[int, float] = {}
+        # Strong refs to shielded cleanups that outlive a cancelled solve, so they aren't GC'd mid-run.
+        self._background_cleanups: set[asyncio.Future] = set()
 
     async def close(self):
         if self.camoufox_pool:
@@ -283,7 +290,12 @@ class BrowserPool:
         screenshot_selector: Optional[str] = None,
         extract_records: Optional[Dict[str, Any]] = None,
     ) -> SolutionModel:
-        inst = await self.camoufox_pool.acquire()
+        try:
+            inst = await asyncio.wait_for(self.camoufox_pool.acquire(), timeout=POOL_ACQUIRE_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as e:
+            raise TimeoutError(
+                f"No warm Camoufox instance became available within {POOL_ACQUIRE_TIMEOUT_SECONDS}s"
+            ) from e
         self._checkout_at[id(inst)] = time.monotonic()
         context = None
         page = None
@@ -321,23 +333,37 @@ class BrowserPool:
             disconnected = _is_browser_disconnected(exc)
             raise
         finally:
+            # Shielded: a client disconnect followed by the tier timeout cancels this task twice,
+            # and a cancel landing mid-cleanup used to skip release() and leak the pool slot for good.
+            cleanup = asyncio.ensure_future(self._release_pooled(inst, context, page, setup_ok, disconnected))
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                if not cleanup.done():
+                    self._background_cleanups.add(cleanup)
+                    cleanup.add_done_callback(self._background_cleanups.discard)
+                raise
+
+    async def _release_pooled(self, inst: Any, context: Any, page: Any, setup_ok: bool, disconnected: bool):
+        try:
             if page:
                 try:
-                    await page.close()
+                    await asyncio.wait_for(page.close(), timeout=POOLED_CLEANUP_TIMEOUT_SECONDS)
                 except Exception:
-                    pass
+                    disconnected = True
             if context and context is not inst.browser:
                 try:
-                    await context.close()
+                    await asyncio.wait_for(context.close(), timeout=POOLED_CLEANUP_TIMEOUT_SECONDS)
                 except Exception:
-                    pass
-            # A failure before setup_ok means the process may be wedged, so recycle it now.
-            try:
-                await self.camoufox_pool.release(
-                    inst, force_recycle=not setup_ok or disconnected or not _browser_is_connected(inst.browser)
-                )
-            finally:
-                self._checkout_at.pop(id(inst), None)
+                    disconnected = True
+            # A failure before setup_ok (or a close that hung) means the process may be wedged, so recycle it.
+            await self.camoufox_pool.release(
+                inst, force_recycle=not setup_ok or disconnected or not _browser_is_connected(inst.browser)
+            )
+        except Exception as e:
+            logger.warning(f"[CamoufoxPool] Release of pooled instance failed: {e}")
+        finally:
+            self._checkout_at.pop(id(inst), None)
 
     async def _solve_with_ephemeral_camoufox(
         self,
