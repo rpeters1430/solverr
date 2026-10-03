@@ -266,6 +266,78 @@ class TestEphemeralRetryBudget(unittest.IsolatedAsyncioTestCase):
                 await pool.solve("https://example.com", timeout_ms=3000)
         ephemeral.assert_not_called()
 
+    async def test_pooled_attempt_leaves_reserve_for_ephemeral_retry(self):
+        """A pooled attempt that never clears must not spend the whole budget, or
+        the fresh-fingerprint retry is always skipped."""
+        pool = BrowserPool()
+        pool.camoufox_pool = FakeCamoufoxPoolWithBrowser(1)
+        seen = {}
+
+        async def pooled(**kwargs):
+            seen["pooled"] = kwargs["timeout_ms"]
+            return SolutionModel(url="https://example.com", status=403, cookies=[], userAgent="ua")
+
+        async def ephemeral(**kwargs):
+            seen["ephemeral"] = kwargs["timeout_ms"]
+            return SolutionModel(url="https://example.com", status=200, cookies=[], userAgent="ua")
+
+        with patch.object(pool, "_solve_with_pooled_camoufox", side_effect=pooled), \
+             patch.object(pool, "_solve_with_ephemeral_camoufox", side_effect=ephemeral):
+            sol = await pool.solve("https://example.com", timeout_ms=50000)
+        self.assertEqual(sol.status, 200)
+        self.assertEqual(seen["pooled"], 30000)
+        self.assertGreaterEqual(seen["ephemeral"], 49000)
+
+    def test_pooled_budget_split(self):
+        self.assertEqual(browser_module._pooled_attempt_budget_ms(60000), 40000)
+        self.assertEqual(browser_module._pooled_attempt_budget_ms(50000), 30000)
+        # Too small to split usefully: the pooled attempt keeps everything.
+        self.assertEqual(browser_module._pooled_attempt_budget_ms(10000), 10000)
+
+
+class TestSolveFlowDeadline(unittest.IsolatedAsyncioTestCase):
+    """The challenge loop shares the attempt's deadline with navigation instead of
+    getting a fresh full timeout after it."""
+
+    async def test_loop_stops_at_attempt_deadline(self):
+        pool = BrowserPool()
+
+        class ChallengePage(FakePage):
+            url = "https://example.com"
+            main_frame = object()
+            frames = []
+
+            def on(self, *args):
+                pass
+
+            async def title(self):
+                return "Just a moment..."
+
+            async def content(self):
+                return "<html><body>cf-turnstile" + "x" * 400 + "</body></html>"
+
+        class Ctx(FakeContext):
+            async def cookies(self, *args, **kwargs):
+                return []
+
+        async def slow_nav(*args, **kwargs):
+            await asyncio.sleep(0.5)
+            return None, 403
+
+        start = time.monotonic()
+        with patch.object(browser_module, "navigate_to_target", side_effect=slow_nav), \
+             patch.object(browser_module, "install_media_blocking", return_value=None), \
+             patch.object(browser_module, "dispatch_challenge_click", return_value=(False, False)), \
+             patch.object(browser_module, "SOLVE_FINALIZE_RESERVE_SECONDS", 0.2):
+            sol = await pool._execute_solve_flow(
+                context=Ctx(), page=ChallengePage(), url="https://example.com", method="GET",
+                post_data=None, cookies=None, timeout_ms=1500, active_ua="ua",
+                headers=None, start_time=start, deadline=start + 1.5,
+            )
+        # Old behaviour: 0.5s navigation + a fresh 1.5s loop + finalisation.
+        self.assertLess(time.monotonic() - start, 2.0)
+        self.assertEqual(sol.status, 503)
+
 
 class TestBrowserPoolCancellation(unittest.IsolatedAsyncioTestCase):
     async def test_disconnect_after_setup_recycles_browser(self):

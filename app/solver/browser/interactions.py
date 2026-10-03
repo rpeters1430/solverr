@@ -165,3 +165,27 @@ async def dispatch_challenge_click(
             logger.debug(f"[AgeGate] Notice: {age_err}")
 
     return clicked, age_gate_clicked
+
+
+async def describe_challenge_frames(page: Page) -> str:
+    """One-line summary of the page's frames and iframes, for diagnosing a widget no selector matched."""
+    try:
+        frames = [f.url[:100] for f in page.frames[1:6]]
+    except Exception:
+        frames = []
+    try:
+        iframes = await page.evaluate("""() => {
+            const out = [];
+            const walk = (root) => {
+                for (const el of root.querySelectorAll('iframe')) {
+                    const r = el.getBoundingClientRect();
+                    out.push(`${(el.src || '').slice(0, 80) || '(no src)'} ${Math.round(r.width)}x${Math.round(r.height)}`);
+                }
+                for (const el of root.querySelectorAll('*')) if (el.shadowRoot) walk(el.shadowRoot);
+            };
+            walk(document);
+            return out.slice(0, 5);
+        }""")
+    except Exception:
+        iframes = []
+    return f"Child frames: {frames or 'none'} | iframes in DOM: {iframes or 'none'}"
