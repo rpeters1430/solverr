@@ -36,6 +36,7 @@ MIN_RETRY_TIMEOUT_MS = 5000
 POOL_ACQUIRE_TIMEOUT_SECONDS = 20
 # Page/context close on a wedged browser can hang; past this the instance is treated as broken and recycled.
 POOLED_CLEANUP_TIMEOUT_SECONDS = 5
+EPHEMERAL_CLOSE_TIMEOUT_SECONDS = 30
 # Held back from the pooled attempt so a stuck fingerprint still leaves the fresh-fingerprint retry
 # a real window: the smaller of this and RETRY_RESERVE_FRACTION of the budget.
 EPHEMERAL_RETRY_RESERVE_MS = 20000
@@ -61,6 +62,13 @@ def _pooled_attempt_budget_ms(timeout_ms: int) -> int:
     if reserve_ms < MIN_RETRY_TIMEOUT_MS:
         return timeout_ms
     return timeout_ms - reserve_ms
+
+
+async def _close_ephemeral(cm: Any) -> None:
+    try:
+        await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=EPHEMERAL_CLOSE_TIMEOUT_SECONDS)
+    except Exception as e:
+        logger.warning(f"[CamoufoxEngine] Ephemeral Camoufox close notice: {e!r}")
 
 
 def _browser_is_connected(browser: Any) -> bool:
@@ -122,11 +130,16 @@ class BrowserPool:
         # Strong refs to shielded cleanups that outlive a cancelled solve, so they aren't GC'd mid-run.
         self._background_cleanups: set[asyncio.Future] = set()
 
+    def _track_background(self, task: asyncio.Future) -> None:
+        """Hold a strong ref until done so the task isn't GC'd mid-run; close() waits on these."""
+        self._background_cleanups.add(task)
+        task.add_done_callback(self._background_cleanups.discard)
+
     async def close(self):
         # Let cleanups orphaned by cancelled solves finish first, or they could requeue or
         # relaunch an instance into the pool after close() has shut it down.
         if self._background_cleanups:
-            await asyncio.wait(set(self._background_cleanups), timeout=POOLED_CLEANUP_TIMEOUT_SECONDS * 2 + 10)
+            await asyncio.wait(set(self._background_cleanups), timeout=EPHEMERAL_CLOSE_TIMEOUT_SECONDS + 10)
         if self.camoufox_pool:
             try:
                 await self.camoufox_pool.close()
@@ -369,8 +382,7 @@ class BrowserPool:
                 await asyncio.shield(cleanup)
             except asyncio.CancelledError:
                 if not cleanup.done():
-                    self._background_cleanups.add(cleanup)
-                    cleanup.add_done_callback(self._background_cleanups.discard)
+                    self._track_background(cleanup)
                 raise
 
     async def _release_pooled(self, inst: Any, context: Any, page: Any, setup_ok: bool, disconnected: bool):
@@ -418,7 +430,7 @@ class BrowserPool:
         deadline = time.monotonic() + timeout_ms / 1000.0
         use_geoip = bool(pw_proxy) and settings.CAMOUFOX_GEOIP_ON_PROXY
         logger.info(f"[CamoufoxEngine] Spawning ephemeral Camoufox stealth Firefox solve for {url} (proxy={'yes' if pw_proxy else 'no'}, custom_ua={'yes' if user_agent else 'no'}, geoip={'yes' if use_geoip else 'no'})...")
-        async with AsyncCamoufox(
+        cm = AsyncCamoufox(
             headless=settings.HEADLESS,
             proxy=pw_proxy,
             geoip=use_geoip,
@@ -427,7 +439,9 @@ class BrowserPool:
             os="linux",
             config={'forceScopeAccess': True},
             i_know_what_im_doing=True
-        ) as browser_instance:
+        )
+        browser_instance = await cm.__aenter__()
+        try:
             if hasattr(browser_instance, "new_context"):
                 context_opts: Dict[str, Any] = {"service_workers": "block"}
                 if user_agent:
@@ -462,6 +476,10 @@ class BrowserPool:
                 capture_screenshot=capture_screenshot, screenshot_full_page=screenshot_full_page,
                 screenshot_selector=screenshot_selector, extract_records=extract_records,
             )
+        finally:
+            # Closing Camoufox can take several seconds; do it off the response path so it
+            # doesn't push the caller past its maxTimeout after the result is already known.
+            self._track_background(asyncio.ensure_future(_close_ephemeral(cm)))
 
     async def _execute_solve_flow(
         self,

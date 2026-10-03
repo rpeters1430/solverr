@@ -169,10 +169,19 @@ async def dispatch_challenge_click(
 
 async def describe_challenge_frames(page: Page) -> str:
     """One-line summary of the page's frames and iframes, for diagnosing a widget no selector matched."""
+    frames = []
     try:
-        frames = [f.url[:100] for f in page.frames[1:6]]
+        for f in page.frames[1:6]:
+            size = "?"
+            try:
+                # Works even when the iframe sits in a closed shadow root the DOM walk below can't see.
+                box = await (await f.frame_element()).bounding_box()
+                size = f"{round(box['width'])}x{round(box['height'])}" if box else "hidden"
+            except Exception:
+                pass
+            frames.append(f"{f.url[:90]} {size}")
     except Exception:
-        frames = []
+        pass
     try:
         iframes = await page.evaluate("""() => {
             const out = [];

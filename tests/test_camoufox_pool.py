@@ -137,6 +137,35 @@ class FakeAsyncCamoufoxCtx:
         return False
 
 
+class TestEphemeralCamoufoxClose(unittest.IsolatedAsyncioTestCase):
+    """A slow Camoufox shutdown must not delay the response past the caller's budget."""
+
+    async def test_result_returns_before_slow_close_finishes(self):
+        closed = asyncio.Event()
+
+        class SlowCloseCtx(FakeAsyncCamoufoxCtx):
+            async def __aexit__(self, exc_type, exc, tb):
+                await asyncio.sleep(0.3)
+                closed.set()
+                return False
+
+        pool = BrowserPool()
+        with patch("app.solver.browser.browser.AsyncCamoufox", SlowCloseCtx), \
+             patch.object(pool, "_execute_solve_flow", return_value="ok"):
+            start = time.monotonic()
+            result = await pool._solve_with_ephemeral_camoufox(
+                url="https://example.com", method="GET", post_data=None, cookies=None,
+                pw_proxy=None, user_agent=None, timeout_ms=5000, active_ua="fake-ua",
+                headers=None, start_time=time.time(), wait_selector=None,
+                wait_delay_ms=None, capture_screenshot=False,
+            )
+            self.assertEqual(result, "ok")
+            self.assertLess(time.monotonic() - start, 0.2)
+            self.assertFalse(closed.is_set())
+            await pool.close()  # close() drains background shutdowns
+        self.assertTrue(closed.is_set())
+
+
 class TestEphemeralCamoufoxGeoip(unittest.IsolatedAsyncioTestCase):
     """A request carrying its own proxy (including Tier 4 fallback-proxy
     escalation, which re-enters this same path) should have Camoufox derive
