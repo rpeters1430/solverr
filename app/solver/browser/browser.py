@@ -20,7 +20,7 @@ from app.solver.browser.challenges import (
 from app.solver.browser.captcha import CAPTCHA_SOLVER_WIDGETS, try_captcha_solver_escalation
 from app.solver.browser.cookies import build_playwright_cookies, read_context_cookies, extract_captured_cookies
 from app.solver.browser.navigation import install_media_blocking, navigate_to_target
-from app.solver.browser.interactions import dispatch_challenge_click
+from app.solver.browser.interactions import dispatch_challenge_click, describe_challenge_frames
 
 if CAMOUFOX_AVAILABLE:
     from camoufox.async_api import AsyncCamoufox
@@ -45,6 +45,7 @@ SOLVE_FINALIZE_RESERVE_SECONDS = 3.0
 # After clicking a widget, let it verify before clicking again; re-clicking mid-verification resets Turnstile.
 CHALLENGE_CLICK_COOLDOWN_SECONDS = 4.0
 CHALLENGE_CLICK_RETRY_SECONDS = 1.2
+WIDGET_REPORT_INTERVAL_SECONDS = 10.0
 
 
 def _describe_solve_error(e: BaseException, tier_timeout: float, tier_label: str) -> BaseException:
@@ -257,10 +258,10 @@ class BrowserPool:
                     if sol and sol.status < 400:
                         return sol
                     last_error = RuntimeError(f"Pooled Camoufox solve incomplete (status {sol.status if sol else 'N/A'})")
-                    logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve incomplete (Status {sol.status if sol else 'N/A'}). Retrying with a fresh ephemeral Camoufox instance...")
+                    logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve incomplete (Status {sol.status if sol else 'N/A'}).")
                 except Exception as e:
                     last_error = _describe_solve_error(e, tier_timeout, "Pooled Camoufox solve")
-                    logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve notice/fallback: {last_error}. Retrying with a fresh ephemeral Camoufox instance...")
+                    logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve notice/fallback: {last_error}.")
 
             # Fresh fingerprint: the pooled path's retry, or the only attempt for proxy/custom-UA requests.
             # A retry gets only what's left of the caller's budget, not a second full timeout.
@@ -269,8 +270,10 @@ class BrowserPool:
             if use_pool:
                 ephemeral_timeout_ms = int(timeout_ms - (time.monotonic() - start_time) * 1000)
                 if ephemeral_timeout_ms < MIN_RETRY_TIMEOUT_MS:
+                    logger.warning(f"[CamoufoxEngine] Skipping fresh ephemeral Camoufox retry: only {max(0, ephemeral_timeout_ms)}ms of budget left.")
                     self._crashes_total += 1
                     raise last_error or RuntimeError(f"Camoufox solve failed for {url}")
+                logger.info(f"[CamoufoxEngine] Retrying with a fresh ephemeral Camoufox instance ({ephemeral_timeout_ms}ms of budget left)...")
                 tier_timeout = (ephemeral_timeout_ms / 1000.0) + SOLVE_WALLCLOCK_GRACE_SECONDS
             try:
                 sol = await asyncio.wait_for(
@@ -524,6 +527,7 @@ class BrowserPool:
         iteration = 0
         content_check_every = 4
         next_click_at = 0.0
+        last_widget_report = 0.0
         last_logged_step = 0.0
         age_gate_clicked = False
         last_detected_challenge: Optional[str] = None
@@ -624,6 +628,10 @@ class BrowserPool:
             if now_ts >= next_click_at and (now_ts - loop_start) > 0.6:
                 clicked, age_gate_clicked = await dispatch_challenge_click(page, active_challenge, title, age_gate_clicked)
                 next_click_at = time.monotonic() + (CHALLENGE_CLICK_COOLDOWN_SECONDS if clicked else CHALLENGE_CLICK_RETRY_SECONDS)
+                if not clicked and active_challenge and (now_ts - last_widget_report) >= WIDGET_REPORT_INTERVAL_SECONDS:
+                    # Nothing clickable on a live challenge: log what the page has so the selectors can be fixed.
+                    last_widget_report = now_ts
+                    logger.info(f"[BrowserPool] No clickable {active_challenge} widget found. {await describe_challenge_frames(page)}")
 
             await asyncio.sleep(step)
 
