@@ -36,6 +36,15 @@ MIN_RETRY_TIMEOUT_MS = 5000
 POOL_ACQUIRE_TIMEOUT_SECONDS = 20
 # Page/context close on a wedged browser can hang; past this the instance is treated as broken and recycled.
 POOLED_CLEANUP_TIMEOUT_SECONDS = 5
+# Held back from the pooled attempt so a stuck fingerprint still leaves the fresh-fingerprint retry
+# a real window: the smaller of this and RETRY_RESERVE_FRACTION of the budget.
+EPHEMERAL_RETRY_RESERVE_MS = 20000
+RETRY_RESERVE_FRACTION = 0.4
+# The challenge loop stops this early so reading content/cookies afterward fits inside the attempt's budget.
+SOLVE_FINALIZE_RESERVE_SECONDS = 3.0
+# After clicking a widget, let it verify before clicking again; re-clicking mid-verification resets Turnstile.
+CHALLENGE_CLICK_COOLDOWN_SECONDS = 4.0
+CHALLENGE_CLICK_RETRY_SECONDS = 1.2
 
 
 def _describe_solve_error(e: BaseException, tier_timeout: float, tier_label: str) -> BaseException:
@@ -43,6 +52,14 @@ def _describe_solve_error(e: BaseException, tier_timeout: float, tier_label: str
     if isinstance(e, (asyncio.TimeoutError, TimeoutError)) and not str(e):
         return TimeoutError(f"{tier_label} timed out after {tier_timeout:.0f}s")
     return e
+
+
+def _pooled_attempt_budget_ms(timeout_ms: int) -> int:
+    """The pooled attempt's share of the budget, leaving the ephemeral retry a usable window when it can."""
+    reserve_ms = min(EPHEMERAL_RETRY_RESERVE_MS, int(timeout_ms * RETRY_RESERVE_FRACTION))
+    if reserve_ms < MIN_RETRY_TIMEOUT_MS:
+        return timeout_ms
+    return timeout_ms - reserve_ms
 
 
 def _browser_is_connected(browser: Any) -> bool:
@@ -219,17 +236,17 @@ class BrowserPool:
                     "no browser engine can service this request."
                 )
 
-            tier_timeout = (timeout_ms / 1000.0) + SOLVE_WALLCLOCK_GRACE_SECONDS
-
             # A warm process's UA and proxy are fixed at launch, so custom-UA/proxy requests skip the pool.
             use_pool = self.camoufox_pool is not None and not pw_proxy and not user_agent
             last_error: Optional[BaseException] = None
 
             if use_pool:
+                pooled_timeout_ms = _pooled_attempt_budget_ms(timeout_ms)
+                tier_timeout = (pooled_timeout_ms / 1000.0) + SOLVE_WALLCLOCK_GRACE_SECONDS
                 try:
                     sol = await asyncio.wait_for(
                         self._solve_with_pooled_camoufox(
-                            url=url, method=method, post_data=post_data, cookies=cookies, timeout_ms=timeout_ms,
+                            url=url, method=method, post_data=post_data, cookies=cookies, timeout_ms=pooled_timeout_ms,
                             headers=headers, start_time=start_time, wait_selector=wait_selector,
                             wait_delay_ms=wait_delay_ms, capture_screenshot=capture_screenshot,
                             screenshot_full_page=screenshot_full_page, screenshot_selector=screenshot_selector,
@@ -248,6 +265,7 @@ class BrowserPool:
             # Fresh fingerprint: the pooled path's retry, or the only attempt for proxy/custom-UA requests.
             # A retry gets only what's left of the caller's budget, not a second full timeout.
             ephemeral_timeout_ms = timeout_ms
+            tier_timeout = (timeout_ms / 1000.0) + SOLVE_WALLCLOCK_GRACE_SECONDS
             if use_pool:
                 ephemeral_timeout_ms = int(timeout_ms - (time.monotonic() - start_time) * 1000)
                 if ephemeral_timeout_ms < MIN_RETRY_TIMEOUT_MS:
@@ -328,6 +346,7 @@ class BrowserPool:
                 post_data=post_data,
                 cookies=cookies,
                 timeout_ms=timeout_ms,
+                deadline=start_time + timeout_ms / 1000.0,
                 active_ua=active_ua or settings.DEFAULT_USER_AGENT,
                 headers=headers,
                 start_time=start_time,
@@ -392,6 +411,8 @@ class BrowserPool:
         extract_records: Optional[Dict[str, Any]] = None,
     ) -> SolutionModel:
         """Non-pooled launch for requests with their own proxy or user_agent, both fixed at launch."""
+        # timeout_ms is what's left when this attempt starts, so its clock starts here (launch included).
+        deadline = time.monotonic() + timeout_ms / 1000.0
         use_geoip = bool(pw_proxy) and settings.CAMOUFOX_GEOIP_ON_PROXY
         logger.info(f"[CamoufoxEngine] Spawning ephemeral Camoufox stealth Firefox solve for {url} (proxy={'yes' if pw_proxy else 'no'}, custom_ua={'yes' if user_agent else 'no'}, geoip={'yes' if use_geoip else 'no'})...")
         async with AsyncCamoufox(
@@ -429,6 +450,7 @@ class BrowserPool:
                 post_data=post_data,
                 cookies=cookies,
                 timeout_ms=timeout_ms,
+                deadline=deadline,
                 active_ua=active_ua,
                 headers=headers,
                 start_time=start_time,
@@ -456,7 +478,12 @@ class BrowserPool:
         screenshot_full_page: bool = False,
         screenshot_selector: Optional[str] = None,
         extract_records: Optional[Dict[str, Any]] = None,
+        deadline: Optional[float] = None,
     ) -> SolutionModel:
+        # Navigation and the challenge loop share one deadline; the loop used to get a fresh full
+        # timeout_ms after navigation, overrunning the tier's wait_for and starving the ephemeral retry.
+        if deadline is None:
+            deadline = time.monotonic() + timeout_ms / 1000.0
         pw_cookies = build_playwright_cookies(url, cookies)
         if pw_cookies:
             try:
@@ -480,7 +507,8 @@ class BrowserPool:
 
         page.on("response", _on_response)
 
-        response, initial_status = await navigate_to_target(page, url, method, post_data, timeout_ms)
+        nav_timeout_ms = max(1000, int((deadline - time.monotonic()) * 1000))
+        response, initial_status = await navigate_to_target(page, url, method, post_data, nav_timeout_ms)
 
         initial_title = ""
         try:
@@ -490,18 +518,18 @@ class BrowserPool:
 
         logger.info(f"[BrowserPool] Initial page load complete (HTTP Status: {initial_status}, Title: '{initial_title}')")
 
-        max_wait = timeout_ms / 1000.0
         step = 0.2
         loop_start = time.monotonic()
+        loop_deadline = deadline - SOLVE_FINALIZE_RESERVE_SECONDS
         iteration = 0
         content_check_every = 4
-        last_click_ts = 0.0
+        next_click_at = 0.0
         last_logged_step = 0.0
         age_gate_clicked = False
         last_detected_challenge: Optional[str] = None
         cleared = False
 
-        while (time.monotonic() - loop_start) < max_wait:
+        while time.monotonic() < loop_deadline:
             check_content = (iteration % content_check_every) == 0
             iteration += 1
 
@@ -593,9 +621,9 @@ class BrowserPool:
                 logger.info(f"[BrowserPool] Anti-bot / gate active ({state_label}, {elapsed:.1f}s elapsed) | Current Title: '{title}'")
                 last_logged_step = now_ts
 
-            if (now_ts - last_click_ts) >= 1.2 and (now_ts - loop_start) > 0.6:
-                last_click_ts = now_ts
-                _clicked, age_gate_clicked = await dispatch_challenge_click(page, active_challenge, title, age_gate_clicked)
+            if now_ts >= next_click_at and (now_ts - loop_start) > 0.6:
+                clicked, age_gate_clicked = await dispatch_challenge_click(page, active_challenge, title, age_gate_clicked)
+                next_click_at = time.monotonic() + (CHALLENGE_CLICK_COOLDOWN_SECONDS if clicked else CHALLENGE_CLICK_RETRY_SECONDS)
 
             await asyncio.sleep(step)
 

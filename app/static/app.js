@@ -19,7 +19,7 @@ const TIER_LABELS = {
     tier2_cache: 'Cookie cache',
     tier3_stealth_browser: 'Browser',
     tier4_fallback_proxy: 'Proxy',
-    failed: 'Failed before tier'
+    failed: 'Failed'
 };
 
 function tierLabel(tier) {
