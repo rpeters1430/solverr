@@ -8,6 +8,7 @@ import traceback
 import contextlib
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
 
@@ -67,6 +68,29 @@ app = FastAPI(
     version=settings.VERSION,
     lifespan=lifespan
 )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    path = request.url.path.rstrip("/")
+    if path in ("/v1", "/v2"):
+        now_ms = int(time.time() * 1000)
+        first_err = exc.errors()[0] if exc.errors() else {}
+        loc = " -> ".join(str(l) for l in first_err.get("loc", []))
+        msg = f"Validation error: {first_err.get('msg', 'Invalid request')} ({loc})"
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "error",
+                "message": msg,
+                "startTimestamp": now_ms,
+                "endTimestamp": now_ms,
+                "version": settings.VERSION
+            }
+        )
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()}
+    )
 
 # Health checks stay open so the container HEALTHCHECK works with API_KEY set.
 _ALWAYS_UNAUTHENTICATED_PATHS = {"/health", "/health/live", "/health/ready"}
@@ -141,8 +165,12 @@ app.include_router(dashboard_router, prefix="/api")
 if mcp_asgi_app is not None:
     app.mount("/mcp", mcp_asgi_app)
 
-@app.get("/", response_class=HTMLResponse)
-async def dashboard_index():
+_cached_dashboard_html: str | None = None
+
+def _get_dashboard_html() -> str:
+    global _cached_dashboard_html
+    if _cached_dashboard_html is not None:
+        return _cached_dashboard_html
     search_paths = [
         os.path.join(BASE_DIR, "templates", "index.html"),
         os.path.join(os.path.dirname(BASE_DIR), "templates", "index.html"),
@@ -151,9 +179,18 @@ async def dashboard_index():
     ]
     for path in search_paths:
         if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                return HTMLResponse(f.read())
-    return HTMLResponse("<h1>⚡ Solverr Engine Active</h1><p>API Endpoint active at <code>/v1</code></p>")
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    _cached_dashboard_html = f.read()
+                    return _cached_dashboard_html
+            except Exception:
+                pass
+    _cached_dashboard_html = "<h1>⚡ Solverr Engine Active</h1><p>API Endpoint active at <code>/v1</code></p>"
+    return _cached_dashboard_html
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard_index():
+    return HTMLResponse(_get_dashboard_html())
 
 def _readiness_body() -> dict:
     # An unused lazy pool is healthy; only a failed Camoufox import leaves Tier 3 with no engine.

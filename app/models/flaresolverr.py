@@ -1,5 +1,5 @@
 from typing import List, Dict, Any, Optional, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 import time
 
 class CookieModel(BaseModel):
@@ -7,12 +7,37 @@ class CookieModel(BaseModel):
     value: str
     domain: Optional[str] = None
     path: Optional[str] = "/"
-    expires: Union[float, int] = -1
-    size: int = 0
-    httpOnly: bool = False
-    secure: bool = False
-    session: bool = False
-    sameSite: str = "Lax"
+    expires: Optional[Union[float, int]] = -1
+    size: Optional[int] = 0
+    httpOnly: Optional[bool] = False
+    secure: Optional[bool] = False
+    session: Optional[bool] = False
+    sameSite: Optional[str] = "Lax"
+
+    @field_validator("path", mode="before")
+    @classmethod
+    def _coerce_path(cls, v):
+        return "/" if v is None else str(v)
+
+    @field_validator("expires", mode="before")
+    @classmethod
+    def _coerce_expires(cls, v):
+        return -1 if v is None else v
+
+    @field_validator("size", mode="before")
+    @classmethod
+    def _coerce_size(cls, v):
+        return 0 if v is None else v
+
+    @field_validator("httpOnly", "secure", "session", mode="before")
+    @classmethod
+    def _coerce_bools(cls, v):
+        return False if v is None else bool(v)
+
+    @field_validator("sameSite", mode="before")
+    @classmethod
+    def _coerce_same_site(cls, v):
+        return "Lax" if v is None else str(v)
 
 class ProxyConfig(BaseModel):
     url: str
@@ -30,7 +55,14 @@ class V1Request(BaseModel):
     session: Optional[str] = None
     session_ttl: Optional[int] = None
     userAgent: Optional[str] = None
-    headers: Optional[Dict[str, str]] = None
+    headers: Optional[Dict[str, Any]] = None
+
+    @field_validator("headers", mode="before")
+    @classmethod
+    def _coerce_headers(cls, v):
+        if isinstance(v, dict):
+            return {str(k): str(val) if val is not None else "" for k, val in v.items()}
+        return v
     
     # Solverr extensions beyond the FlareSolverr API.
     fastTlsOnly: Optional[bool] = False
@@ -41,6 +73,7 @@ class V1Request(BaseModel):
     extract_records: Optional[Dict[str, Any]] = None
     wait_selector: Optional[str] = None
     wait_delay_ms: Optional[int] = None
+    skip_cache: Optional[bool] = False
 
     def get_proxy_url(self) -> Optional[str]:
         if not self.proxy:
@@ -102,7 +135,14 @@ class ScrapeRequest(BaseModel):
     url: str
     method: str = "GET"
     postData: Optional[str] = None
-    headers: Optional[Dict[str, str]] = None
+    headers: Optional[Dict[str, Any]] = None
+
+    @field_validator("headers", mode="before")
+    @classmethod
+    def _coerce_headers(cls, v):
+        if isinstance(v, dict):
+            return {str(k): str(val) if val is not None else "" for k, val in v.items()}
+        return v
     cookies: Optional[List[CookieModel]] = None
     proxy: Optional[Union[ProxyConfig, Dict[str, Any], str]] = None
     session: Optional[str] = None
@@ -116,6 +156,7 @@ class ScrapeRequest(BaseModel):
     extract_records: Optional[Dict[str, Any]] = None
     maxTimeout: Optional[int] = 60000
     userAgent: Optional[str] = None
+    skip_cache: Optional[bool] = False
 
     def to_v1_request(self) -> V1Request:
         force_browser = (self.tier in ["tier3_browser", "tier4_proxy", "browser"])
@@ -137,7 +178,8 @@ class ScrapeRequest(BaseModel):
             screenshot_selector=self.screenshot_selector,
             extract_records=self.extract_records,
             wait_selector=self.wait_selector,
-            wait_delay_ms=self.wait_delay_ms
+            wait_delay_ms=self.wait_delay_ms,
+            skip_cache=self.skip_cache
         )
 
 class ScrapeResponse(BaseModel):

@@ -117,6 +117,9 @@ async def test_solver(req: TestRequestModel):
         screenshot=req.screenshot
     )
     
+    if not req.useCache:
+        v1_req.cookies = []
+        v1_req.skip_cache = True
     try:
         sol = await solver_engine.process_request(v1_req, bypass_cookie_cache=not req.useCache)
         return {

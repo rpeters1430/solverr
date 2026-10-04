@@ -312,8 +312,12 @@ class FastTLSEngine:
                 ]
             )
 
-            if resp.status_code == 200 and is_non_html_api:
-                # A 200 non-HTML API response is never a challenge page.
+            if not (100 <= resp.status_code <= 599):
+                logger.warning(f"[FastTLS] Invalid HTTP status code received: {resp.status_code}")
+                return True, None
+
+            if is_non_html_api and (resp.status_code not in [403, 429, 503] or not any(marker in body_lower for marker in ["cf-challenge", "turnstile", "challenges.cloudflare.com", "ddos-guard", "captcha"])):
+                # Non-HTML API responses (json, text, xml) without challenge scripts are legitimate API responses
                 is_cf_challenge = False
             else:
                 title_match = re.search(r"<title[^>]*>(.*?)</title>", body_text, re.IGNORECASE | re.DOTALL)
@@ -380,7 +384,7 @@ class FastTLSEngine:
         except Exception as e:
             await self._evict_session(pool_key)
             self.record_outcome(url, impersonate_target, False)
-            logger.warning(f"[FastTLS] Fast TLS request failed or timed out for {url}: {type(e).__name__} - {e}")
+            logger.warning(f"[FastTLS] Fast TLS request failed or timed out for {url}: {type(e).__name__} - {sanitize_proxy_url(str(e))}")
             return True, None
         finally:
             if session is not None and not self._pool_enabled:

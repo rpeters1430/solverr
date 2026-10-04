@@ -281,7 +281,7 @@ class HybridSolverEngine:
         combined_cookies: List[CookieModel] = []
         cached_cookies = []
         cached_ua: Optional[str] = None
-        if not bypass_cookie_cache:
+        if not (bypass_cookie_cache or getattr(req, "skip_cache", False)):
             cached_cookies, cached_ua = await cookie_cache.get_cookies_with_user_agent_async(url)
             metrics.record_cookie_cache_lookup(hit=bool(cached_cookies))
 
@@ -326,7 +326,11 @@ class HybridSolverEngine:
                 session_id=req.session
             )
 
-            if not is_cf_challenge and solution and (solution.status < 400 or solution.status == 404):
+            is_valid_http_response = (
+                solution.status < 400
+                or solution.status in (400, 401, 404, 405, 410, 422)
+            ) if solution else False
+            if not is_cf_challenge and solution and is_valid_http_response:
                 elapsed_ms = budget.elapsed_ms
                 tier_name = "tier2_cache" if had_cache else "tier1_fast_tls"
                 if had_cache:
@@ -425,6 +429,7 @@ class HybridSolverEngine:
             # Tier 4: retry through the fallback proxy.
             fallback_proxy = settings.FALLBACK_PROXY_URL
             if fallback_proxy and not proxy_url and not budget.is_expired and budget.remaining_s >= 2.0:
+                await check_target_url_async(fallback_proxy, label="Fallback proxy")
                 fallback_timeout_ms = max(3000, budget.remaining_ms)
                 logger.warning(f"[HybridEngine] Level 3 direct solve failed ({e}). Escalating to Tier 4 Fallback Proxy ({fallback_proxy}, remaining budget: {budget.remaining_s:.1f}s)...")
                 try:

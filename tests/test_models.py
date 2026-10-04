@@ -1,5 +1,5 @@
 import unittest
-from app.models.flaresolverr import V1Request, ProxyConfig, ScrapeRequest, ScrapeResponse, SolutionModel
+from app.models.flaresolverr import V1Request, ProxyConfig, ScrapeRequest
 
 class TestV1RequestModels(unittest.TestCase):
     def test_proxy_string_normalization(self):
@@ -50,6 +50,36 @@ class TestV1RequestModels(unittest.TestCase):
         self.assertTrue(v1_req.forceBrowser)
         self.assertTrue(v1_req.screenshot)
         self.assertEqual(v1_req.wait_selector, "#ready")
+
+    def test_cookie_model_null_fields(self):
+        from app.models.flaresolverr import CookieModel
+        c = CookieModel(
+            name="test",
+            value="val",
+            expires=None,
+            size=None,
+            httpOnly=None,
+            secure=None,
+            session=None,
+            sameSite=None,
+            path=None
+        )
+        self.assertEqual(c.name, "test")
+        self.assertEqual(c.value, "val")
+        self.assertEqual(c.expires, -1)
+        self.assertEqual(c.size, 0)
+        self.assertFalse(c.httpOnly)
+        self.assertFalse(c.secure)
+        self.assertFalse(c.session)
+        self.assertEqual(c.sameSite, "Lax")
+        self.assertEqual(c.path, "/")
+
+    def test_headers_numeric_and_boolean_coercion(self):
+        req = V1Request(cmd="request.get", url="http://example.com", headers={"x-num": 123, "x-bool": True, "x-none": None})
+        self.assertEqual(req.headers["x-num"], "123")
+        self.assertEqual(req.headers["x-bool"], "True")
+        self.assertEqual(req.headers["x-none"], "")
+
 
 if __name__ == "__main__":
     unittest.main()

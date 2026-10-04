@@ -140,6 +140,35 @@ class TestProxySSRFProtection(unittest.IsolatedAsyncioTestCase):
             fast_mock.assert_called_once()
             browser_mock.assert_called_once()
 
+    def test_file_scheme_blocked(self):
+        with self.assertRaises(SSRFBlockedError):
+            check_target_url("file:///etc/passwd")
+
+    def test_gopher_scheme_blocked(self):
+        with self.assertRaises(SSRFBlockedError):
+            check_target_url("gopher://example.com:70/1")
+
+    def test_empty_url_blocked(self):
+        with self.assertRaises(SSRFBlockedError):
+            check_target_url("")
+
+    def test_missing_hostname_blocked(self):
+        with self.assertRaises(SSRFBlockedError):
+            check_target_url("http://")
+
+    def test_proxy_file_scheme_blocked(self):
+        with self.assertRaises(SSRFBlockedError):
+            check_target_url("file:///etc/passwd", label="Proxy")
+
+    def test_browser_pseudo_schemes_allowed(self):
+        check_target_url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", label="Browser request")
+        check_target_url("about:blank", label="Browser request")
+        check_target_url("blob:https://example.com/uuid", label="Browser request")
+
+    def test_browser_file_scheme_blocked(self):
+        with self.assertRaises(SSRFBlockedError):
+            check_target_url("file:///etc/passwd", label="Browser request")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,16 +1,12 @@
 import unittest
-from unittest.mock import AsyncMock, patch, MagicMock
-from app.models.flaresolverr import V1Request, SolutionModel, CookieModel
+from app.models.flaresolverr import CookieModel
 from app.solver.browser import (
     detect_challenge,
     is_challenge_title,
     has_age_gate_marker,
-    CHALLENGE_MARKERS,
-    AGE_GATE_MARKERS,
 )
 from app.solver.cache import CookieCache
 from app.solver.fast_tls import FastTLSEngine
-from app.solver.engine import HybridSolverEngine
 
 
 class TestWAFChallengeScenarios(unittest.TestCase):

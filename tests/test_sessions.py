@@ -194,5 +194,18 @@ class TestSessionManager(unittest.TestCase):
             mgr._redis_last_attempt = 0
             self.assertIs(mgr._redis(), client)
 
+    def test_session_update_cookies_normalizes_leading_dot(self):
+        sid = self.mgr.create_session()
+        sess = self.mgr.get_session(sid)
+        c1 = CookieModel(name="test_cookie", value="val1", domain=".example.com")
+        sess.update_cookies([c1])
+        self.assertEqual(len(sess.cookies), 1)
+
+        c2 = CookieModel(name="test_cookie", value="val2_updated", domain="example.com")
+        sess.update_cookies([c2])
+        self.assertEqual(len(sess.cookies), 1)
+        self.assertEqual(sess.cookies[0].value, "val2_updated")
+
+
 if __name__ == "__main__":
     unittest.main()
