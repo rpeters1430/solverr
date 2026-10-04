@@ -98,7 +98,6 @@ class TestAPIEndpoints(unittest.TestCase):
 
     def test_human_cursor_bezier_path_overshoots_before_correcting(self):
         # Force the overshoot branch; landing on target alone wouldn't prove the path overshot.
-        import random
         from unittest.mock import patch
         start = (0.0, 0.0)
         end = (500.0, 0.0)
@@ -173,6 +172,67 @@ class TestAPIEndpoints(unittest.TestCase):
         res_json = self.client.get("/api/cookies/export?format=json")
         self.assertEqual(res_json.status_code, 200)
         self.assertIn("domains", res_json.json())
+
+    def test_proxy_unquotes_lowercase_urlencoded_url(self):
+        from unittest.mock import patch, AsyncMock
+        from app.models.flaresolverr import SolutionModel
+        fake_sol = SolutionModel(url="https://example.com/api", status=200, headers={}, response="ok")
+        with patch("app.api.flaresolverr.solver_engine.process_request", new=AsyncMock(return_value=fake_sol)) as mock_proc:
+            res = self.client.get("/proxy?url=https%3a%2f%2fexample.com%2fapi")
+            self.assertEqual(res.status_code, 200)
+            called_req = mock_proc.call_args[0][0]
+            self.assertEqual(called_req.url, "https://example.com/api")
+
+    def test_proxy_sanitizes_status_code_zero(self):
+        from unittest.mock import patch, AsyncMock
+        from app.models.flaresolverr import SolutionModel
+        fake_sol = SolutionModel(url="https://example.com", status=0, headers={}, response="")
+        with patch("app.api.flaresolverr.solver_engine.process_request", new=AsyncMock(return_value=fake_sol)):
+            res = self.client.get("/proxy?url=https://example.com")
+            self.assertEqual(res.status_code, 502)
+
+    def test_proxy_forwards_session_and_proxy(self):
+        from unittest.mock import patch, AsyncMock
+        from app.models.flaresolverr import SolutionModel
+        fake_sol = SolutionModel(url="https://example.com/api", status=200, headers={}, response="ok")
+        with patch("app.api.flaresolverr.solver_engine.process_request", new=AsyncMock(return_value=fake_sol)) as mock_proc:
+            res = self.client.get("/proxy?url=https://example.com/api&session=sess123&proxy=http://user:pass@proxy.com:8080")
+            self.assertEqual(res.status_code, 200)
+            called_req = mock_proc.call_args[0][0]
+            self.assertEqual(called_req.session, "sess123")
+            self.assertEqual(called_req.proxy, "http://user:pass@proxy.com:8080")
+
+    def test_proxy_ssrf_returns_400(self):
+        res = self.client.get("/proxy?url=file:///etc/passwd")
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("SSRF validation failed", res.json().get("detail", ""))
+
+    def test_scrape_ssrf_returns_400(self):
+        res = self.client.post("/scrape", json={"url": "file:///etc/passwd"})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("SSRF validation failed", res.json().get("detail", ""))
+
+    def test_sessions_create_ssrf_proxy_rejected(self):
+        res = self.client.post("/v1", json={
+            "cmd": "sessions.create",
+            "proxy": "file:///etc/passwd"
+        })
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data.get("status"), "error")
+        self.assertIn("SSRF validation failed", data.get("message", ""))
+
+    def test_dashboard_index_cached(self):
+        res = self.client.get("/")
+        self.assertEqual(res.status_code, 200)
+        self.assertIn("text/html", res.headers.get("content-type", ""))
+
+    def test_v1_validation_error_returns_flaresolverr_error_envelope(self):
+        res = self.client.post("/v1", json={})
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data.get("status"), "error")
+        self.assertIn("Validation error", data.get("message", ""))
 
 
 if __name__ == "__main__":

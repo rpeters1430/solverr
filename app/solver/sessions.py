@@ -32,11 +32,12 @@ class Session:
 
     def update_cookies(self, new_cookies: List[CookieModel]):
         self.touch()
-        # Identity is domain + path + name: a same-name cookie on a
-        # different path must not replace an unrelated cookie.
-        existing_keys = {(c.domain, c.path, c.name) for c in new_cookies}
+        def _cookie_key(c: CookieModel):
+            return ((c.domain or "").lstrip(".").lower(), c.path or "/", c.name)
+
+        existing_keys = {_cookie_key(c) for c in new_cookies}
         self.cookies = [
-            c for c in self.cookies if (c.domain, c.path, c.name) not in existing_keys
+            c for c in self.cookies if _cookie_key(c) not in existing_keys
         ] + new_cookies
 
     def to_dict(self) -> dict:

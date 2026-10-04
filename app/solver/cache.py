@@ -162,10 +162,11 @@ class CookieCache:
                         result.append(c_model)
                     except Exception:
                         pass
-        # Deduplicate by cookie name (last/most-specific wins)
-        deduped: Dict[str, CookieModel] = {}
+        # Deduplicate by domain+path+cookie name (last/most-specific wins)
+        deduped: Dict[tuple, CookieModel] = {}
         for c in result:
-            deduped[c.name] = c
+            key = ((c.domain or "").lstrip(".").lower(), c.path or "/", c.name)
+            deduped[key] = c
         return list(deduped.values())
 
     def get_cookie_dict(self, url_or_domain: str) -> Dict[str, str]:

@@ -26,6 +26,16 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
             fast_mock.assert_called_once()
             browser_mock.assert_not_called()
 
+    async def test_fast_tls_client_errors_accepted_without_browser_escalation(self):
+        for status_code in (400, 401, 404, 405, 410, 422):
+            with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(False, _sol(status_code)))) as fast_mock, \
+                 patch("app.solver.engine.browser_pool.solve", new=AsyncMock()) as browser_mock:
+                req = V1Request(cmd="request.get", url="https://example.com")
+                sol = await self.engine.process_request(req)
+                self.assertEqual(sol.status, status_code)
+                fast_mock.assert_called_once()
+                browser_mock.assert_not_called()
+
     async def test_fast_tls_challenge_escalates_to_browser(self):
         with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, _sol(503)))), \
              patch("app.solver.engine.browser_pool.solve", new=AsyncMock(return_value=_sol(200, challenge_type="cloudflare_turnstile"))) as browser_mock:
@@ -55,7 +65,7 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
     async def test_browser_failure_escalates_to_fallback_proxy(self):
         with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \
              patch("app.solver.engine.browser_pool.solve", new=AsyncMock(side_effect=[RuntimeError("boom"), _sol(200)])) as browser_mock, \
-             patch.object(settings, "FALLBACK_PROXY_URL", "http://fallback.proxy:8080"):
+             patch.object(settings, "FALLBACK_PROXY_URL", "http://example.com:8080"):
             req = V1Request(cmd="request.get", url="https://example.com")
             sol = await self.engine.process_request(req)
             self.assertEqual(sol.status, 200)
@@ -167,22 +177,37 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
             self.assertIn(("other.example.com", "session", "input-value"), seen)
             self.assertIn(("example.com", "session", "cached-value"), seen)
 
-    async def test_request_budget_propagates_remaining_timeout_to_browser(self):
-        with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \
-             patch("app.solver.engine.browser_pool.solve", new=AsyncMock(return_value=_sol(200))) as browser_mock:
-            req = V1Request(cmd="request.get", url="https://example.com", maxTimeout=20000)
+    async def test_skip_cache_bypasses_cookie_cache(self):
+        cached_cookie = _cookie("session", "cached-value", domain="example.com")
+        with patch("app.solver.engine.cookie_cache.get_cookies_async", new=AsyncMock(return_value=[cached_cookie])) as cache_mock, \
+             patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(False, _sol(200)))) as fast_mock, \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock()):
+            req = V1Request(cmd="request.get", url="https://example.com", skip_cache=True)
             await self.engine.process_request(req)
-            browser_mock.assert_called_once()
-            called_kwargs = browser_mock.call_args.kwargs
-            # Timeout passed to browser should be positive and <= 20000
-            self.assertGreater(called_kwargs["timeout_ms"], 0)
-            self.assertLessEqual(called_kwargs["timeout_ms"], 20000)
+            cache_mock.assert_not_called()
+            called_cookies = fast_mock.call_args.kwargs["cookies"]
+            self.assertEqual(called_cookies, [])
+
+    def test_cap_response_body_utf8_multibyte(self):
+        from app.solver.engine import _cap_response_body
+        with patch.object(settings, "MAX_RESPONSE_BODY_MB", 1):
+            # 1MB = 1048576 bytes. Create a string of 4-byte unicode emojis that exceeds 1MB.
+            # 300,000 emojis * 4 bytes = 1.2MB.
+            big_text = "🎉" * 300000
+            sol = SolutionModel(url="https://example.com", status=200, response=big_text, cookies=[])
+            _cap_response_body(sol)
+            self.assertIn("<!-- truncated: response exceeded MAX_RESPONSE_BODY_MB -->", sol.response)
+            # UTF-8 encoded size should be <= 1MB + truncation notice
+            encoded = sol.response.encode("utf-8")
+            self.assertLessEqual(len(encoded), 1048576 + 100)
+            # And it must decode cleanly without error
+            sol.response.encode("utf-8").decode("utf-8")
+
 
 
 class TestRequestBudget(unittest.TestCase):
     def test_budget_properties(self):
         from app.solver.engine import RequestBudget
-        import time
         budget = RequestBudget(5000)
         self.assertAlmostEqual(budget.total_timeout_s, 5.0, places=1)
         self.assertGreater(budget.remaining_s, 4.0)

@@ -362,6 +362,11 @@ class TestCookieCache(unittest.TestCase):
         ])
         stored = self.cache._store["example.com"]
         self.assertEqual(len(stored), 2)
+        fetched = self.cache.get_cookies("https://example.com")
+        self.assertEqual(len(fetched), 2)
+        paths = {c.path: c.value for c in fetched}
+        self.assertEqual(paths["/"], "root")
+        self.assertEqual(paths["/admin"], "admin")
 
 
 if __name__ == "__main__":

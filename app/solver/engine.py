@@ -159,14 +159,16 @@ def _cap_response_body(solution: SolutionModel) -> None:
     max_bytes = settings.MAX_RESPONSE_BODY_MB * 1024 * 1024
     if max_bytes <= 0 or not solution.response:
         return
-    body_bytes = len(solution.response.encode("utf-8", errors="ignore"))
+    encoded = solution.response.encode("utf-8", errors="ignore")
+    body_bytes = len(encoded)
     if body_bytes > max_bytes:
         logger.warning(
             f"[HybridEngine] Response body ({body_bytes / 1024 / 1024:.1f}MB) exceeds "
             f"MAX_RESPONSE_BODY_MB={settings.MAX_RESPONSE_BODY_MB}, truncating"
         )
-        truncated_chars = int(max_bytes)
-        solution.response = solution.response[:truncated_chars] + "\n<!-- truncated: response exceeded MAX_RESPONSE_BODY_MB -->"
+        truncated_bytes = encoded[:max_bytes]
+        solution.response = truncated_bytes.decode("utf-8", errors="ignore") + "\n<!-- truncated: response exceeded MAX_RESPONSE_BODY_MB -->"
+
 
 class HybridSolverEngine:
     def __init__(self):
@@ -241,8 +243,9 @@ class HybridSolverEngine:
         proxy_url = req.get_proxy_url()
 
         combined_cookies: List[CookieModel] = []
-        cached_cookies = await cookie_cache.get_cookies_async(url)
-        metrics.record_cookie_cache_lookup(hit=bool(cached_cookies))
+        cached_cookies = [] if getattr(req, "skip_cache", False) else await cookie_cache.get_cookies_async(url)
+        if not getattr(req, "skip_cache", False):
+            metrics.record_cookie_cache_lookup(hit=bool(cached_cookies))
 
         # Same identity as cookie_cache._cookie_key: same-name cookies on other paths are distinct.
         def _cookie_identity(c: CookieModel):
@@ -280,7 +283,11 @@ class HybridSolverEngine:
                 session_id=req.session
             )
 
-            if not is_cf_challenge and solution and (solution.status < 400 or solution.status == 404):
+            is_valid_http_response = (
+                solution.status < 400
+                or solution.status in (400, 401, 404, 405, 410, 422)
+            ) if solution else False
+            if not is_cf_challenge and solution and is_valid_http_response:
                 elapsed_ms = budget.elapsed_ms
                 tier_name = "tier2_cache" if had_cache else "tier1_fast_tls"
                 if had_cache:
@@ -376,6 +383,7 @@ class HybridSolverEngine:
             # Tier 4: retry through the fallback proxy.
             fallback_proxy = settings.FALLBACK_PROXY_URL
             if fallback_proxy and not proxy_url and not budget.is_expired and budget.remaining_s >= 2.0:
+                await check_target_url_async(fallback_proxy, label="Fallback proxy")
                 fallback_timeout_ms = max(3000, budget.remaining_ms)
                 logger.warning(f"[HybridEngine] Level 3 direct solve failed ({e}). Escalating to Tier 4 Fallback Proxy ({fallback_proxy}, remaining budget: {budget.remaining_s:.1f}s)...")
                 try:

@@ -35,7 +35,22 @@ def _describe_solve_error(e: BaseException, tier_timeout: float, tier_label: str
     """Name the tier and timeout on bare TimeoutErrors, whose str() is empty."""
     if isinstance(e, (asyncio.TimeoutError, TimeoutError)) and not str(e):
         return TimeoutError(f"{tier_label} timed out after {tier_timeout:.0f}s")
+    msg = sanitize_proxy_url(str(e))
+    if msg != str(e):
+        try:
+            return type(e)(msg)
+        except Exception:
+            return RuntimeError(msg)
     return e
+
+
+def _is_solution_acceptable(sol: Optional[SolutionModel]) -> bool:
+    """Check if solution is a valid HTTP response rather than an incomplete solve or network error."""
+    if not sol or sol.status <= 0 or sol.status == 502:
+        return False
+    if sol.status < 400 or sol.status in (400, 401, 404, 405, 410, 422):
+        return True
+    return False
 
 
 class BrowserPool:
@@ -167,7 +182,7 @@ class BrowserPool:
                         ),
                         timeout=tier_timeout
                     )
-                    if sol and sol.status < 400:
+                    if _is_solution_acceptable(sol):
                         return sol
                     last_error = RuntimeError(f"Pooled Camoufox solve incomplete (status {sol.status if sol else 'N/A'})")
                     logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve incomplete (Status {sol.status if sol else 'N/A'}). Retrying with a fresh ephemeral Camoufox instance...")
@@ -186,7 +201,7 @@ class BrowserPool:
                     ),
                     timeout=tier_timeout
                 )
-                if sol and sol.status < 400:
+                if _is_solution_acceptable(sol):
                     return sol
                 last_error = RuntimeError(f"Ephemeral Camoufox solve incomplete (status {sol.status if sol else 'N/A'})")
                 logger.warning(f"[CamoufoxEngine] Ephemeral Camoufox solve incomplete (Status {sol.status if sol else 'N/A'}).")
@@ -347,6 +362,18 @@ class BrowserPool:
         page.on("response", _on_response)
 
         response, initial_status = await navigate_to_target(page, url, method, post_data, timeout_ms)
+
+        curr_page_url = page.url or ""
+        if response is None and initial_status == 0 and (not curr_page_url or curr_page_url.startswith("about:blank")):
+            logger.warning(f"[BrowserPool] Browser navigation failed to reach target URL '{url}'")
+            return SolutionModel(
+                url=url,
+                status=502,
+                headers={"content-type": "text/html"},
+                response="<html><body><h1>502 Bad Gateway</h1><p>Browser navigation failed to reach target URL</p></body></html>",
+                cookies=[],
+                userAgent=active_ua
+            )
 
         initial_title = ""
         try:

@@ -8,6 +8,7 @@ from app.solver.engine import solver_engine
 from app.solver.sessions import session_manager
 from app.config import settings
 from app.logging_config import sanitize_proxy_url, get_request_id
+from app.security import check_target_url_async, SSRFBlockedError
 
 try:
     from bs4 import BeautifulSoup
@@ -129,6 +130,17 @@ async def flaresolverr_api(req: V1Request):
 
     elif cmd == "sessions.create":
         proxy_url = req.get_proxy_url()
+        if proxy_url:
+            try:
+                await check_target_url_async(proxy_url, label="Proxy")
+            except SSRFBlockedError as exc:
+                return V1Response(
+                    status="error",
+                    message=f"SSRF validation failed: {exc}",
+                    startTimestamp=start_ts,
+                    endTimestamp=int(time.time() * 1000),
+                    version=settings.VERSION,
+                )
         sid = await session_manager.create_session_async(session_id=req.session, proxy=proxy_url, ttl=req.session_ttl or 7200)
         return V1Response(
             status="ok",
@@ -206,13 +218,21 @@ async def native_scrape_api(req: ScrapeRequest):
             extracted=extracted,
             screenshot=solution.screenshot
         )
+    except SSRFBlockedError as e:
+        logger.warning(f"[ScrapeAPI] SSRF validation blocked for {req.url}: {e}")
+        raise HTTPException(status_code=400, detail=f"SSRF validation failed: {e}")
     except Exception as e:
         logger.error(f"[ScrapeAPI] Scrape failed for {req.url}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Scrape failed (request_id: {get_request_id()})")
 
 @router.get("/proxy")
 @router.post("/proxy")
-async def transparent_proxy(request: FastAPIRequest, url: Optional[str] = None):
+async def transparent_proxy(
+    request: FastAPIRequest,
+    url: Optional[str] = None,
+    session: Optional[str] = None,
+    proxy: Optional[str] = None,
+):
     """Transparent proxy: solves the target through the tiered engine and returns its response."""
     cmd = f"request.{request.method.lower()}"
     # The target often has its own unescaped "&" query, which query_params would truncate.
@@ -220,7 +240,7 @@ async def transparent_proxy(request: FastAPIRequest, url: Optional[str] = None):
     target_url = url or ""
     if "url=" in raw_query:
         target_url = raw_query.split("url=", 1)[1]
-        if target_url.startswith("http%3A") or target_url.startswith("https%3A"):
+        if "%" in target_url:
             from urllib.parse import unquote
             target_url = unquote(target_url)
 
@@ -230,11 +250,16 @@ async def transparent_proxy(request: FastAPIRequest, url: Optional[str] = None):
     body = await request.body()
     post_data = body.decode("utf-8") if body else None
 
+    # Forward session and proxy if specified via query or custom headers
+    resolved_session = session or request.headers.get("x-solverr-session") or request.query_params.get("session")
+    resolved_proxy = proxy or request.headers.get("x-solverr-proxy") or request.query_params.get("proxy")
+
     # These describe the caller-to-Solverr hop, not the outbound request.
     _HOP_BY_HOP_HEADERS = {
         "host", "connection", "content-length", "transfer-encoding",
         "keep-alive", "proxy-authenticate", "proxy-authorization",
         "te", "trailer", "upgrade", "accept-encoding", "x-api-key",
+        "x-solverr-session", "x-solverr-proxy",
     }
     forward_headers = {
         k: v for k, v in request.headers.items()
@@ -245,7 +270,9 @@ async def transparent_proxy(request: FastAPIRequest, url: Optional[str] = None):
         cmd=cmd,
         url=target_url,
         postData=post_data,
-        headers=forward_headers
+        headers=forward_headers,
+        session=resolved_session,
+        proxy=resolved_proxy
     )
 
     try:
@@ -253,9 +280,10 @@ async def transparent_proxy(request: FastAPIRequest, url: Optional[str] = None):
         media_type = solution.headers.get("content-type", "text/html")
         if ";" in media_type:
             media_type = media_type.split(";")[0].strip()
+        status_code = solution.status if (isinstance(solution.status, int) and 100 <= solution.status <= 599) else 502
         response = Response(
             content=solution.response,
-            status_code=solution.status,
+            status_code=status_code,
             media_type=media_type
         )
         if solution.cookies:
@@ -273,6 +301,9 @@ async def transparent_proxy(request: FastAPIRequest, url: Optional[str] = None):
                 except Exception:
                     pass
         return response
+    except SSRFBlockedError as e:
+        logger.warning(f"[ProxyAPI] SSRF validation blocked for '{target_url}': {e}")
+        raise HTTPException(status_code=400, detail=f"SSRF validation failed: {e}")
     except Exception as e:
         logger.error(f"[ProxyAPI] Proxy error solving '{target_url}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Proxy error solving target url (request_id: {get_request_id()})")
