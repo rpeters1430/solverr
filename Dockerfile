@@ -20,8 +20,8 @@ FROM base AS deps
 WORKDIR /app
 
 # Pinned here so an engine bump invalidates the fetch layer. Must match the browser
-# pythonlib pairs with (camoufox/browser-pin.json): 0.5.7b2 pairs with 156.0.1-beta.33.
-ARG CAMOUFOX_BROWSER_VERSION=156.0.1-beta.33
+# pythonlib pairs with (camoufox/browser-pin.json): 0.5.7 pairs with 156.0.1-beta.34.
+ARG CAMOUFOX_BROWSER_VERSION=156.0.1-beta.34
 
 # Installed before the venv exists so uv never ships in the runtime image.
 # Cache mounts live under /app/.cache because XDG_CACHE_HOME points there.
