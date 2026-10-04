@@ -3,7 +3,7 @@ import os
 import psutil
 import logging
 from typing import Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import PlainTextResponse, JSONResponse
 from app.models.flaresolverr import TestRequestModel, V1Request
 from app.solver.engine import metrics, solver_engine
@@ -12,9 +12,21 @@ from app.solver.sessions import session_manager
 from app.solver.fast_tls import fast_tls_engine
 from app.config import settings
 from app.logging_config import get_request_id
+from app.history import request_history
 
 logger = logging.getLogger("solverr.api.dashboard")
 router = APIRouter()
+
+@router.get("/history")
+async def get_history(limit: int = Query(100, ge=1, le=500), domain: Optional[str] = None,
+                      outcome: Optional[str] = None, tier: Optional[str] = None,
+                      hours: int = Query(24, ge=1, le=168)):
+    return {"requests": await request_history.recent(limit, domain, outcome, tier, hours)}
+
+@router.get("/history/summary")
+async def get_history_summary(domain: Optional[str] = None, outcome: Optional[str] = None,
+                              tier: Optional[str] = None, hours: int = Query(24, ge=1, le=168)):
+    return await request_history.summary(domain, outcome, tier, hours)
 
 @router.get("/stats")
 async def get_stats():
@@ -108,9 +120,8 @@ async def test_solver(req: TestRequestModel):
     if not req.useCache:
         v1_req.cookies = []
         v1_req.skip_cache = True
-
     try:
-        sol = await solver_engine.process_request(v1_req)
+        sol = await solver_engine.process_request(v1_req, bypass_cookie_cache=not req.useCache)
         return {
             "status": "ok",
             "url": sol.url,
@@ -157,4 +168,3 @@ async def sse_event_stream():
             "X-Accel-Buffering": "no"
         }
     )
-

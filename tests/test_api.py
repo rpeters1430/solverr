@@ -1,7 +1,9 @@
 import unittest
+from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 from app.main import app
 from app.solver.human_cursor import generate_bezier_path
+from app.models.flaresolverr import SolutionModel
 
 class TestAPIEndpoints(unittest.TestCase):
     def setUp(self):
@@ -77,6 +79,27 @@ class TestAPIEndpoints(unittest.TestCase):
 
         res_sessions = self.client.get("/api/sessions")
         self.assertEqual(res_sessions.status_code, 200)
+
+        res_history = self.client.get("/api/history/summary")
+        self.assertEqual(self.client.get("/api/history/summary?hours=169").status_code, 422)
+        self.assertEqual(self.client.get("/api/history?hours=0").status_code, 422)
+        self.assertEqual(res_history.status_code, 200)
+        self.assertEqual(len(res_history.json()["hours"]), 24)
+
+    def test_dashboard_test_forwards_cache_bypass_setting(self):
+        solution = SolutionModel(url="https://example.com", status=200)
+        with patch("app.api.dashboard.solver_engine.process_request", new=AsyncMock(return_value=solution)) as solve:
+            for use_cache in (True, False):
+                response = self.client.post("/api/test", json={
+                    "url": "https://example.com/",
+                    "useCache": use_cache,
+                })
+                self.assertEqual(response.status_code, 200)
+
+        self.assertEqual(
+            [call.kwargs["bypass_cookie_cache"] for call in solve.await_args_list],
+            [False, True],
+        )
 
     def test_dashboard_delete_session(self):
         res_create = self.client.post("/v1", json={"cmd": "sessions.create"})

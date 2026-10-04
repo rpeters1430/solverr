@@ -4,7 +4,7 @@ import time
 import asyncio
 import logging
 import threading
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 from app.models.flaresolverr import CookieModel
 from app.config import settings
@@ -13,6 +13,9 @@ logger = logging.getLogger("solverr.cache")
 
 # Bursts of set_cookies() within this window coalesce into one disk write.
 DEBOUNCE_SECONDS = 2.0
+
+# Clearance cookies are bound to the UA that earned them, so their UA wins when picking one to replay.
+CLEARANCE_COOKIE_NAMES = ("cf_clearance", "aws-waf-token", "datadome")
 
 # Without a cooldown, a dead Redis would cost a connect timeout on every lookup.
 REDIS_RECONNECT_INTERVAL_SECONDS = 30.0
@@ -122,8 +125,39 @@ class CookieCache:
         return list(self.redis_client.scan_iter(match=pattern, count=200))
 
     def get_cookies(self, url_or_domain: str) -> List[CookieModel]:
+        return self.get_cookies_with_user_agent(url_or_domain)[0]
+
+    @staticmethod
+    def _pick_user_agent(entries: List[dict], url_or_domain: str) -> Optional[str]:
+        """UA bound to the clearance cookie that will be sent for this URL, else the freshest UA seen.
+
+        Mirrors FastTLSEngine._select_cookies_for_url: among path-applicable cookies the most
+        specific path wins, so a fresher cf_clearance on another path can't lend its UA."""
+        with_ua = [e for e in entries if e.get("user_agent")]
+        if not with_ua:
+            return None
+        target_path = (urlparse(url_or_domain).path if "://" in url_or_domain else "") or "/"
+
+        def applies(entry: dict) -> bool:
+            path = entry["cookie"].get("path") or "/"
+            return target_path == path or path == "/" or target_path.startswith(path.rstrip("/") + "/")
+
+        clearance = [
+            e for e in with_ua
+            if e["cookie"].get("name") in CLEARANCE_COOKIE_NAMES and applies(e)
+        ]
+        if clearance:
+            return max(
+                clearance,
+                key=lambda e: (len(e["cookie"].get("path") or "/"), e.get("timestamp", 0)),
+            )["user_agent"]
+        return max(with_ua, key=lambda e: e.get("timestamp", 0))["user_agent"]
+
+    def get_cookies_with_user_agent(self, url_or_domain: str) -> Tuple[List[CookieModel], Optional[str]]:
+        """Cached cookies for the domain, plus the User-Agent they must be replayed with (if recorded)."""
         target_domain = self._normalize_domain(url_or_domain)
         result: List[CookieModel] = []
+        entries: List[dict] = []
         now = time.time()
 
         if self._redis():
@@ -144,7 +178,8 @@ class CookieCache:
                         if c_model.expires and c_model.expires > 0 and now > c_model.expires:
                             continue
                         result.append(c_model)
-                return result
+                        entries.append(data)
+                return result, self._pick_user_agent(entries, url_or_domain)
             except Exception as e:
                 logger.debug(f"[CookieCache] Redis read error: {e}")
                 self._invalidate_redis()
@@ -160,20 +195,32 @@ class CookieCache:
                         if c_model.expires and c_model.expires > 0 and now > c_model.expires:
                             continue
                         result.append(c_model)
+                        entries.append(data)
                     except Exception:
                         pass
-        # Deduplicate by domain+path+cookie name (last/most-specific wins)
-        deduped: Dict[tuple, CookieModel] = {}
-        for c in result:
-            key = ((c.domain or "").lstrip(".").lower(), c.path or "/", c.name)
-            deduped[key] = c
-        return list(deduped.values())
+        # Storage already deduplicates identical (domain, path, name) keys.
+        # Keep different paths and domains here: HTTP cookie selection needs
+        # that scope information, and Redis returns the same full cookie set.
+        return result, self._pick_user_agent(entries, url_or_domain)
 
     def get_cookie_dict(self, url_or_domain: str) -> Dict[str, str]:
         cookies = self.get_cookies(url_or_domain)
         return {c.name: c.value for c in cookies}
 
-    def set_cookies(self, url_or_domain: str, cookies: List[CookieModel], schedule_save: bool = True):
+    def _entry(self, cookie: CookieModel, now: float, user_agent: Optional[str]) -> dict:
+        entry = {"cookie": cookie.model_dump(), "timestamp": now}
+        if user_agent:
+            entry["user_agent"] = user_agent
+        return entry
+
+    def set_cookies(
+        self,
+        url_or_domain: str,
+        cookies: List[CookieModel],
+        schedule_save: bool = True,
+        user_agent: Optional[str] = None,
+    ):
+        """Store cookies; `user_agent` is the UA that earned them, needed to replay cf_clearance."""
         domain = self._normalize_domain(url_or_domain)
         now = time.time()
 
@@ -181,10 +228,9 @@ class CookieCache:
             try:
                 pipe = self.redis_client.pipeline(transaction=False)
                 for c in cookies:
-                    c_dict = c.model_dump()
                     c_domain = c.domain.lstrip(".") if c.domain else domain
                     key = f"solverr:cookie:{c_domain}:{self._cookie_key(c)}"
-                    val = json.dumps({"cookie": c_dict, "timestamp": now})
+                    val = json.dumps(self._entry(c, now, user_agent))
                     pipe.set(key, val, ex=settings.COOKIE_CACHE_TTL)
                 pipe.execute()
                 self._domain_count_cache_at = 0.0
@@ -195,15 +241,11 @@ class CookieCache:
                 self._invalidate_redis()
 
         for c in cookies:
-            c_dict = c.model_dump()
             c_domain = c.domain.lstrip(".") if c.domain else domain
             if c_domain not in self._store:
                 self._evict_domain_if_at_capacity()
                 self._store[c_domain] = {}
-            self._store[c_domain][self._cookie_key(c)] = {
-                "cookie": c_dict,
-                "timestamp": now
-            }
+            self._store[c_domain][self._cookie_key(c)] = self._entry(c, now, user_agent)
             self._evict_cookies_if_at_capacity(c_domain)
         self._domain_count_cache_at = 0.0
         logger.debug(f"[CookieCache] Saved {len(cookies)} cookie(s) to local cache for domain '{domain}'")
@@ -327,10 +369,16 @@ class CookieCache:
         async with self._async_lock:
             return await asyncio.to_thread(self.get_cookies, url_or_domain)
 
-    async def set_cookies_async(self, url_or_domain: str, cookies: List[CookieModel]) -> None:
+    async def get_cookies_with_user_agent_async(self, url_or_domain: str) -> Tuple[List[CookieModel], Optional[str]]:
+        async with self._async_lock:
+            return await asyncio.to_thread(self.get_cookies_with_user_agent, url_or_domain)
+
+    async def set_cookies_async(
+        self, url_or_domain: str, cookies: List[CookieModel], user_agent: Optional[str] = None
+    ) -> None:
         async with self._async_lock:
             # Schedule the flush here: in the worker thread there's no loop, so it would write immediately.
-            await asyncio.to_thread(self.set_cookies, url_or_domain, cookies, False)
+            await asyncio.to_thread(self.set_cookies, url_or_domain, cookies, False, user_agent)
             if not self.redis_client:
                 self._schedule_save()
 

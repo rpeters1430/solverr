@@ -93,6 +93,9 @@ class Settings:
     COOKIE_CACHE_PERSISTENT: bool = os.getenv("COOKIE_CACHE_PERSISTENT", "true").lower() in ("true", "1", "yes")
     COOKIE_CACHE_TTL: int = int(os.getenv("COOKIE_CACHE_TTL", "7200"))
     CACHE_FILE: str = os.getenv("CACHE_FILE", "data/cookies_cache.json")
+    HISTORY_DB_PATH: str = os.getenv("HISTORY_DB_PATH", "data/request_history.sqlite")
+    HISTORY_MAX_RECORDS: int = int(os.getenv("HISTORY_MAX_RECORDS", "5000"))
+    MAX_SCREENSHOT_HEIGHT_PX: int = int(os.getenv("MAX_SCREENSHOT_HEIGHT_PX", "8000"))
 
     # Local-backend bounds only; Redis relies on TTL expiry instead.
     MAX_CACHE_DOMAINS: int = int(os.getenv("MAX_CACHE_DOMAINS", "1000"))
@@ -117,7 +120,7 @@ class Settings:
     # Match timezone/locale/geolocation to the proxy's exit IP; costs one extra request per launch.
     CAMOUFOX_GEOIP_ON_PROXY: bool = os.getenv("CAMOUFOX_GEOIP_ON_PROXY", "true").lower() in ("true", "1", "yes")
 
-    # When set, every endpoint except /health and /metrics requires a matching X-Api-Key.
+# When set, all routes except health checks, /static/*, /favicon.ico, and /metrics unless METRICS_REQUIRE_AUTH=true require X-Api-Key or Authorization: Bearer.
     API_KEY: Optional[str] = os.getenv("API_KEY", None)
 
     # Off by default because typical Prometheus scrapers send no auth headers.

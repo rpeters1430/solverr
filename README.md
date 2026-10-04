@@ -16,7 +16,7 @@
   - **Tier 4 (Fallback Proxy)**: Automatic residential / fallback proxy escalation for rate-limited indexers.
 - **🛡️ Multi-WAF & CAPTCHA Solver Suite**: Automated solving for **Cloudflare Turnstile**, **Cloudflare 5s Interstitial**, **Google reCAPTCHA v2 / Enterprise**, **hCaptcha**, **GeeTest**, **Imperva / Incapsula**, **DataDome**, **Akamai**, and **AWS WAF**.
 - **🌐 Deep Shadow DOM & Web Component Traversal**: In-page recursive DOM walker locates Turnstile and CAPTCHA checkboxes nested inside `#shadow-root` nodes across custom web components.
-- **📈 Adaptive TLS Profile Learning**: Fast TLS automatically learns which browser TLS fingerprints (`firefox147`, `firefox144`, `firefox133`, `chrome146`, etc.) succeed per domain, penalizing failing fingerprints and picking optimal JA3 profiles.
+- **📈 Adaptive TLS Profile Learning**: Fast TLS automatically learns which browser TLS fingerprints (`firefox147`, `firefox144`, `firefox133`, `chrome150`, etc.) succeed per domain, penalizing failing fingerprints and picking optimal JA3 profiles.
 - **🖱️ Isolated Humanized Bézier Curve Movement**: Emulates organic human mouse trajectories with micro-jitters, variable velocities, and natural pauses — fully isolated per page using weakref cursor tracking for multi-worker concurrency.
 - **🍪 Netscape & JSON Cookie Export (`/api/cookies/export`)**: Single-click export of cached cookies in Netscape format (`curl -b cookies.txt`, `yt-dlp`, `wget`) or standard JSON.
 - **📡 Real-time Live Event Streaming (SSE)**: Server-Sent Events stream (`/api/events`) broadcasts real-time solve feeds, tier transitions, and telemetry directly to the interactive dashboard.
@@ -24,6 +24,7 @@
 - **🚀 Native High-Performance `POST /scrape` API**: Full programmatic control with tier overrides, DOM selector waiting (`wait_selector`), data extraction (`extract_rules`), and debug screenshots.
 - **🤖 MCP Server for AI Agents (`/mcp`)**: First-class [Model Context Protocol](https://modelcontextprotocol.io) tools (`solverr_scrape`, `solverr_screenshot`, `solverr_get_cookies`, `solverr_get_stats`) so an agent can drive Solverr directly, gated by the same `X-Api-Key` as the rest of the API. On by default; disable with `ENABLE_MCP=false`.
 - **📊 Native Prometheus Metrics (`GET /metrics`)**: Standard Prometheus exposition format for 1-click scraping in Grafana, Prometheus, or VictoriaMetrics.
+- **🗂️ Persistent Request History**: A bounded SQLite history at `GET /api/history` records domains, tier, result, duration, and sanitized failure type across restarts. The dashboard shows recent requests and a short activity trend.
 - **🧠 Dual-Mode Caching**: Zero-dependency local JSON file persistence by default, with automatic **Redis** cluster backend support via `REDIS_URL`.
 - **📊 Real-time Web Control Center**: Live interactive challenge test bench with HTML viewer, screenshot preview, live SSE event feed, cookie explorer, and hardware monitors.
 
@@ -40,12 +41,17 @@
 | **Caching Backend** | Memory only | Redis required (2 containers) | **Dual-Engine (Zero-dep Local + Optional Redis)** |
 | **Prometheus Telemetry** | ❌ None | ⚠️ External exporter | **✅ Built-in Native `/metrics` endpoint** |
 | **Cursor Emulation** | Direct click | Linear cursor | **Realistic Cubic Bézier Curves + Jitter** |
-| **Web Dashboard** | Plain text | Basic health | **Modern Real-Time Interactive Test Bench** |
-| **AI Agent Support (MCP)** | ❌ None | ✅ `read`/`scrape`/`screenshot`/`inspect` tools | **✅ `/mcp` Streamable HTTP server** (`solverr_scrape`/`solverr_screenshot`/`solverr_get_cookies`/`solverr_get_stats`) |
+| **Web Dashboard** | Plain text | Local metrics dashboard with persistent history | **Live test bench and bounded persistent request history** |
+| **AI Agent Support (MCP)** | ❌ None | ✅ Read, scrape, structured extraction, screenshots, inspect | **✅ `/mcp` Streamable HTTP server** (`solverr_scrape`/`solverr_screenshot`/`solverr_get_cookies`/`solverr_get_stats`) |
 
 ---
 
 ## 🟢 Quick Deployment: UGREEN NASync DXP4800 Pro (UGOS Pro)
+
+The image uses the Debian 13 (Trixie) Python 3.14 slim base. CI checks the
+distribution and launches Camoufox under the NAS runtime identity
+(`PUID=1000`, `PGID=10`) before publishing. The image runs on the NAS host's
+kernel; changing the container base does not change UGOS or its kernel.
 
 The included `compose.ugreen.yml` is tuned for the DXP4800 Pro while it is
 also running Jellyfin and the Arr stack. It fixes Solverr at two browser
@@ -187,9 +193,18 @@ Every request Solverr handles is a self-contained request/response - there's no 
   "extract_rules": {
     "title": "title",
     "links": "a@href"
+  },
+  "extract_records": {
+    "container": ".result",
+    "fields": {"title": ".title", "link": "a@href"}
   }
 }
 ```
+`extract_records` forces a rendered browser page and returns up to 50 records with
+12 fields of 500 characters each. Omit it to retain the fast HTML extraction path.
+For screenshots, set `screenshot: true` and optionally `screenshot_full_page: true`
+or `screenshot_selector: ".result"`. Full-page and element captures are height
+limited by `MAX_SCREENSHOT_HEIGHT_PX` and byte limited by `MAX_SCREENSHOT_MB`.
 
 ### 3. Prometheus Metrics (`GET /metrics`)
 Scrape endpoint for Grafana, Prometheus, or VictoriaMetrics:
@@ -217,6 +232,7 @@ curl -N http://localhost:8191/api/events
 Streamable HTTP [MCP](https://modelcontextprotocol.io) endpoint for AI agents - point an MCP-compatible client at `http://localhost:8191/mcp` (an `X-Api-Key` header is required if `API_KEY` is set, exactly like every other endpoint). Exposes:
 - `solverr_scrape` - fetch a URL through the tiered solver, with optional `extract_rules`
 - `solverr_screenshot` - solve and return a JPEG screenshot of the resulting page
+- `solverr_screenshot` accepts optional `full_page` or `selector` capture modes
 - `solverr_get_cookies` - read cached clearance cookies for a domain without a new request
 - `solverr_get_stats` - engine/browser-pool health
 
@@ -245,6 +261,9 @@ On by default; set `ENABLE_MCP=false` to disable.
 | `CAMOUFOX_GEOIP_ON_PROXY` | `true` | When a request carries its own proxy (or Tier 4 fallback-proxy escalation fires), derive Camoufox's timezone/locale/geolocation/WebRTC-visible IP from that proxy's actual exit IP instead of the container's real location - avoids the classic "proxy IP in one country, browser fingerprint in another" mismatch. Costs one extra request through the proxy at launch time |
 | `REDIS_URL` | `None` | Optional Redis URL for distributed cookie cache & sessions - required when running multiple replicas, see [Horizontal Scaling](#-horizontal-scaling) |
 | `COOKIE_CACHE_TTL` | `7200` | Clearance cookie cache TTL in seconds |
+| `HISTORY_DB_PATH` | `data/request_history.sqlite` | SQLite request history path (persist `/app/data` in Docker) |
+| `HISTORY_MAX_RECORDS` | `5000` | Maximum retained request records; oldest are removed |
+| `MAX_SCREENSHOT_HEIGHT_PX` | `8000` | Maximum height of a full-page or selected-element screenshot |
 | `MAX_CACHE_DOMAINS` | `1000` | Local (non-Redis) cookie cache: max distinct domains before the oldest is evicted |
 | `MAX_COOKIES_PER_DOMAIN` | `100` | Local (non-Redis) cookie cache: max cookies per domain before the oldest are evicted |
 | `MAX_SESSIONS` | `500` | Max in-memory sessions before the oldest (by last access) is evicted |

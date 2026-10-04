@@ -73,6 +73,32 @@ class TestCookieCache(unittest.TestCase):
         self.assertEqual(len(fetched), 1)
         self.assertEqual(fetched[0].value, "val_persistent")
 
+    def test_user_agent_round_trips_through_disk(self):
+        cookies = [CookieModel(name="cf_clearance", value="v", domain=".example.com")]
+        self.cache.set_cookies("https://example.com", cookies, user_agent="solver-ua")
+        _, ua = CookieCache(cache_file=self.cache_file).get_cookies_with_user_agent("https://example.com")
+        self.assertEqual(ua, "solver-ua")
+
+    def test_clearance_cookie_ua_wins_over_newer_plain_cookie_ua(self):
+        self.cache.set_cookies("https://example.com", [CookieModel(name="cf_clearance", value="v", domain="example.com")], user_agent="browser-ua")
+        self.cache.set_cookies("https://example.com", [CookieModel(name="tracking", value="t", domain="example.com")], user_agent="other-ua")
+        _, ua = self.cache.get_cookies_with_user_agent("https://example.com")
+        self.assertEqual(ua, "browser-ua")
+
+    def test_ua_comes_from_the_clearance_cookie_sent_for_the_path(self):
+        self.cache.set_cookies("https://example.com", [CookieModel(name="cf_clearance", value="root", domain="example.com", path="/")], user_agent="root-ua")
+        self.cache.set_cookies("https://example.com", [CookieModel(name="cf_clearance", value="admin", domain="example.com", path="/admin")], user_agent="admin-ua")
+        _, ua = self.cache.get_cookies_with_user_agent("https://example.com/")
+        self.assertEqual(ua, "root-ua")
+        _, ua = self.cache.get_cookies_with_user_agent("https://example.com/admin/page")
+        self.assertEqual(ua, "admin-ua")
+
+    def test_entries_without_user_agent_report_none(self):
+        self.cache.set_cookies("https://example.com", [CookieModel(name="cf_clearance", value="v", domain="example.com")])
+        cookies, ua = self.cache.get_cookies_with_user_agent("https://example.com")
+        self.assertEqual(len(cookies), 1)
+        self.assertIsNone(ua)
+
     def test_clear_cache(self):
         cookies = [CookieModel(name="cf_clearance", value="val_clear", domain=".example.com")]
         self.cache.set_cookies("https://example.com", cookies)
@@ -92,7 +118,7 @@ class TestCookieCache(unittest.TestCase):
             if os.path.exists(flat_file):
                 os.remove(flat_file)
 
-    def test_cookie_deduplication_by_name(self):
+    def test_duplicate_same_cookie_identity_keeps_latest_value(self):
         cookies = [
             CookieModel(name="cf_clearance", value="old_val", domain=".example.com"),
             CookieModel(name="cf_clearance", value="new_val", domain=".example.com"),
@@ -101,6 +127,18 @@ class TestCookieCache(unittest.TestCase):
         fetched = self.cache.get_cookies("https://example.com")
         self.assertEqual(len(fetched), 1)
         self.assertEqual(fetched[0].value, "new_val")
+
+    def test_same_name_cookies_on_different_paths_are_both_returned(self):
+        self.cache.set_cookies("https://example.com", [
+            CookieModel(name="token", value="root", domain="example.com", path="/"),
+            CookieModel(name="token", value="admin", domain="example.com", path="/admin"),
+        ])
+
+        fetched = self.cache.get_cookies("https://example.com")
+        self.assertEqual({(cookie.path, cookie.value) for cookie in fetched}, {
+            ("/", "root"),
+            ("/admin", "admin"),
+        })
 
     def test_redis_reconnects_after_initial_failure(self):
         # Redis being down at startup must not strand the cache on local disk.

@@ -4,27 +4,111 @@ function escapeHtml(value) {
     }[c]));
 }
 
+// Render a millisecond duration at a readable scale: "84 ms", "55.2 s", "1m 55s".
+function formatDuration(ms) {
+    const value = Number(ms);
+    if (!Number.isFinite(value) || value <= 0) return '0 ms';
+    if (value < 1000) return `${Math.round(value)} ms`;
+    if (value < 60000) return `${(value / 1000).toFixed(1)} s`;
+    const totalSeconds = Math.round(value / 1000);
+    return `${Math.floor(totalSeconds / 60)}m ${totalSeconds % 60}s`;
+}
+
+const TIER_LABELS = {
+    tier1_fast_tls: 'Fast TLS',
+    tier2_cache: 'Cookie cache',
+    tier3_stealth_browser: 'Browser',
+    tier4_fallback_proxy: 'Proxy',
+    failed: 'Failed'
+};
+
+function tierLabel(tier) {
+    return TIER_LABELS[tier] || tier || '—';
+}
+
 document.addEventListener('DOMContentLoaded', () => {
-    // Sidebar tabs
-    const navItems = document.querySelectorAll('.nav-item');
+    // Mobile navigation & sidebar drawer controls
+    const mobileMenuBtn = document.getElementById('btn-mobile-menu');
+    const sidebarCloseBtn = document.getElementById('btn-sidebar-close');
+    const sidebarBackdrop = document.getElementById('sidebar-backdrop');
+
+    function openMobileMenu() {
+        document.body.classList.add('sidebar-open');
+        if (mobileMenuBtn) {
+            mobileMenuBtn.setAttribute('aria-expanded', 'true');
+        }
+    }
+
+    function closeMobileMenu() {
+        document.body.classList.remove('sidebar-open');
+        if (mobileMenuBtn) {
+            mobileMenuBtn.setAttribute('aria-expanded', 'false');
+        }
+    }
+
+    if (mobileMenuBtn) {
+        mobileMenuBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (document.body.classList.contains('sidebar-open')) {
+                closeMobileMenu();
+            } else {
+                openMobileMenu();
+            }
+        });
+    }
+
+    if (sidebarCloseBtn) {
+        sidebarCloseBtn.addEventListener('click', closeMobileMenu);
+    }
+
+    if (sidebarBackdrop) {
+        sidebarBackdrop.addEventListener('click', closeMobileMenu);
+    }
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && document.body.classList.contains('sidebar-open')) {
+            closeMobileMenu();
+        }
+    });
+
+    // Unified tabs (Sidebar & Mobile Bottom Nav)
+    const allNavItems = document.querySelectorAll('.nav-item, .mobile-nav-item');
     const tabPages = document.querySelectorAll('.tab-page');
     const tabTitle = document.getElementById('current-tab-title');
 
-    navItems.forEach(item => {
+    function switchTab(tabName) {
+        allNavItems.forEach(n => {
+            if (n.getAttribute('data-tab') === tabName) {
+                n.classList.add('active');
+            } else {
+                n.classList.remove('active');
+            }
+        });
+
+        tabPages.forEach(p => p.classList.remove('active'));
+        const targetPage = document.getElementById(`tab-${tabName}`);
+        if (targetPage) targetPage.classList.add('active');
+
+        // Update header title based on active sidebar item
+        const matchingSidebarItem = document.querySelector(`.sidebar .nav-item[data-tab="${tabName}"] span`);
+        if (matchingSidebarItem && tabTitle) {
+            tabTitle.textContent = matchingSidebarItem.textContent;
+        }
+
+        if (tabName === 'cookies') {
+            fetchCookies();
+        } else if (tabName === 'history') {
+            fetchHistory();
+        }
+
+        closeMobileMenu();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    allNavItems.forEach(item => {
         item.addEventListener('click', () => {
             const tabName = item.getAttribute('data-tab');
-            
-            navItems.forEach(n => n.classList.remove('active'));
-            tabPages.forEach(p => p.classList.remove('active'));
-            
-            item.classList.add('active');
-            document.getElementById(`tab-${tabName}`).classList.add('active');
-            
-            tabTitle.textContent = item.querySelector('span').textContent;
-            
-            if (tabName === 'cookies') {
-                fetchCookies();
-            }
+            if (tabName) switchTab(tabName);
         });
     });
 
@@ -48,10 +132,17 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await res.json();
 
             document.getElementById('val-total-reqs').textContent = data.total_requests || 0;
+            document.getElementById('foot-failed').textContent = `${data.failed_requests || 0} failed`;
             document.getElementById('val-fast-rate').textContent = (data.fast_hit_rate_pct || 0) + '%';
             document.getElementById('val-fast-hits').textContent = (data.tier1_fast_tls_hits || 0) + (data.tier2_cache_hits || 0);
-            document.getElementById('val-fast-ms').innerHTML = `${data.avg_fast_ms || 0}<span class="unit">ms</span>`;
-            document.getElementById('val-browser-ms').textContent = data.avg_browser_ms || 0;
+            const [fastValue, fastUnit] = formatDuration(data.avg_fast_ms).split(' ');
+            document.getElementById('val-fast-ms').innerHTML = fastUnit
+                ? `${escapeHtml(fastValue)}<span class="unit">${escapeHtml(fastUnit)}</span>`
+                : escapeHtml(fastValue);
+            const browserAvg = data.avg_browser_ms ? formatDuration(data.avg_browser_ms) : '—';
+            document.getElementById('val-browser-ms').textContent = browserAvg;
+            if (document.getElementById('val-tier3-avg')) document.getElementById('val-tier3-avg').textContent = browserAvg;
+            if (document.getElementById('val-browser-measured')) document.getElementById('val-browser-measured').textContent = browserAvg;
             document.getElementById('val-ram').innerHTML = `${data.ram_usage_mb || 0}<span class="unit">MB</span>`;
             document.getElementById('val-cpu').textContent = (data.cpu_usage_pct || 0) + '%';
 
@@ -75,11 +166,15 @@ document.addEventListener('DOMContentLoaded', () => {
             if (document.getElementById('val-pool-recycles')) document.getElementById('val-pool-recycles').textContent = pool.recycles_total || 0;
             if (document.getElementById('val-browser-crashes')) document.getElementById('val-browser-crashes').textContent = pool.crashes_total || 0;
             if (document.getElementById('val-queue-wait')) document.getElementById('val-queue-wait').textContent = Math.round((pool.avg_queue_wait_seconds || 0) * 1000);
+            document.getElementById('val-queue-depth').textContent = pool.queue_depth || 0;
+            document.getElementById('val-queue-oldest').textContent = formatDuration((pool.oldest_queue_wait_seconds || 0) * 1000);
+            document.getElementById('val-checkout-oldest').textContent = formatDuration((pool.oldest_checkout_seconds || 0) * 1000);
             if (document.getElementById('val-cache-hit-ratio')) document.getElementById('val-cache-hit-ratio').textContent = (data.cache_hit_ratio_pct || 0) + '%';
             if (document.getElementById('val-cache-lookups')) {
                 const lookups = (data.cookie_cache_lookup_hits || 0) + (data.cookie_cache_lookup_misses || 0);
                 document.getElementById('val-cache-lookups').textContent = lookups;
             }
+            if (document.getElementById('val-cache-served')) document.getElementById('val-cache-served').textContent = data.tier2_cache_hits || 0;
             if (document.getElementById('val-timeouts')) document.getElementById('val-timeouts').textContent = data.timeouts_total || 0;
 
             const workerLabel = data.worker_auto_tuned 
@@ -96,8 +191,13 @@ document.addEventListener('DOMContentLoaded', () => {
             if (data.stealth_engine && document.getElementById('val-stealth-engine')) {
                 document.getElementById('val-stealth-engine').textContent = data.stealth_engine;
             }
-            if (data.version && document.getElementById('val-version-tag')) {
-                document.getElementById('val-version-tag').textContent = data.version;
+            if (data.version) {
+                if (document.getElementById('val-version-tag')) {
+                    document.getElementById('val-version-tag').textContent = data.version;
+                }
+                if (document.getElementById('val-version-tag-mobile')) {
+                    document.getElementById('val-version-tag-mobile').textContent = data.version;
+                }
             }
             if (data.tls_impersonation) {
                 const imp = String(data.tls_impersonation).toLowerCase();
@@ -121,6 +221,102 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(fetchStats, 3000);
 
     document.getElementById('btn-refresh-stats').addEventListener('click', fetchStats);
+
+    let historyRequest = 0;
+    async function fetchHistory() {
+        const requestId = ++historyRequest;
+        const domain = document.getElementById('history-domain').value.trim();
+        const outcome = document.getElementById('history-outcome').value;
+        const tier = document.getElementById('history-tier').value;
+        const hours = document.getElementById('history-hours').value;
+        const params = new URLSearchParams();
+        if (domain) params.set('domain', domain);
+        if (outcome) params.set('outcome', outcome);
+        if (tier) params.set('tier', tier);
+        params.set('hours', hours);
+        const error = document.getElementById('history-error');
+        try {
+            const [res, summaryRes] = await Promise.all([
+                fetch(`/api/history?limit=100&${params}`),
+                fetch(`/api/history/summary?${params}`)
+            ]);
+            if (!res.ok || !summaryRes.ok) throw new Error(`History unavailable (HTTP ${res.ok ? summaryRes.status : res.status})`);
+            const rows = (await res.json()).requests || [];
+            const summary = await summaryRes.json();
+            if (requestId !== historyRequest) return;
+            error.hidden = true;
+            document.getElementById('history-total').textContent = summary.total;
+            document.getElementById('history-period-label').textContent = `Requests · ${hours === '168' ? '7 days' : `${hours} hour${hours === '1' ? '' : 's'}`}`;
+            document.getElementById('history-failed').textContent = summary.failed;
+            document.getElementById('history-p95').textContent = summary.p95_ms === null ? '—' : formatDuration(summary.p95_ms);
+            const body = document.getElementById('history-rows');
+            body.replaceChildren();
+            for (const row of rows) {
+                const tr = document.createElement('tr');
+                const values = [new Date(row.timestamp * 1000).toLocaleString(), row.domain, tierLabel(row.tier),
+                    row.http_status ? `${row.outcome} (${row.http_status})` : row.outcome,
+                    formatDuration(row.duration_ms), row.failure_type || row.challenge || '—'];
+                for (const value of values) {
+                    const td = document.createElement('td');
+                    td.textContent = value;
+                    tr.appendChild(td);
+                }
+                body.appendChild(tr);
+            }
+            if (!rows.length) body.innerHTML = '<tr><td colspan="6">No matching requests.</td></tr>';
+            const trend = document.getElementById('history-trend');
+            trend.replaceChildren();
+            const timeBuckets = summary.hours || [];
+            const peak = Math.max(1, ...timeBuckets.map(hour => hour.success + hour.failed));
+            for (const hour of timeBuckets) {
+                const bar = document.createElement('div');
+                bar.className = 'history-bar';
+                const count = hour.success + hour.failed;
+                bar.title = `${new Date(hour.timestamp * 1000).toLocaleString()}: ${hour.success} success, ${hour.failed} failed`;
+                bar.setAttribute('aria-label', bar.title);
+                for (const [outcome, value] of [['success', hour.success], ['failed', hour.failed]]) {
+                    if (!value) continue;
+                    const segment = document.createElement('div');
+                    segment.className = `history-bar-${outcome}`;
+                    segment.style.height = `${value / peak * 100}%`;
+                    bar.appendChild(segment);
+                }
+                if (!count) bar.classList.add('history-bar-empty');
+                trend.appendChild(bar);
+            }
+            trend.setAttribute('aria-label', `Request volume over the past ${summary.window_hours} hours: ${summary.total} requests, ${summary.failed} failed`);
+            const renderBreakdown = (elementId, entries, fallback) => {
+                const container = document.getElementById(elementId);
+                container.replaceChildren();
+                if (!entries.length) { container.textContent = fallback; return; }
+                for (const [label, count] of entries) {
+                    const line = document.createElement('p');
+                    const name = document.createElement('span');
+                    const total = document.createElement('strong');
+                    name.textContent = label;
+                    total.textContent = count;
+                    line.append(name, total);
+                    container.appendChild(line);
+                }
+            };
+            renderBreakdown('history-tier-counts', Object.entries(summary.tier_counts || {}).sort((a, b) => b[1] - a[1]).map(([tier, count]) => [tierLabel(tier), count]), 'No requests yet.');
+            renderBreakdown('history-failed-domains', summary.top_failed_domains || [], 'No failures.');
+        } catch (e) {
+            if (requestId !== historyRequest) return;
+            error.textContent = e.message || 'Unable to load request history.';
+            error.hidden = false;
+            console.error('History poll error:', e);
+        }
+    }
+    document.getElementById('history-refresh').addEventListener('click', fetchHistory);
+    document.getElementById('history-domain').addEventListener('change', fetchHistory);
+    document.getElementById('history-outcome').addEventListener('change', fetchHistory);
+    document.getElementById('history-tier').addEventListener('change', fetchHistory);
+    document.getElementById('history-hours').addEventListener('change', fetchHistory);
+    fetchHistory();
+    setInterval(() => {
+        if (document.getElementById('tab-history').classList.contains('active')) fetchHistory();
+    }, 15000);
 
     function initEventStream() {
         const feed = document.getElementById('live-activity-feed');
@@ -338,13 +534,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 `).join('');
 
                 card.innerHTML = `
-                    <h4 style="margin-bottom: 12px; color: var(--accent-cyan);">🌐 ${escapeHtml(domain)}</h4>
-                    <table class="data-table">
-                        <thead>
-                            <tr><th>Name</th><th>Value</th><th>Age</th></tr>
-                        </thead>
-                        <tbody>${cookiesHtml}</tbody>
-                    </table>
+                    <h4 style="margin-bottom: 12px; color: var(--accent-cyan); word-break: break-all;">🌐 ${escapeHtml(domain)}</h4>
+                    <div class="table-responsive">
+                        <table class="data-table">
+                            <thead>
+                                <tr><th>Name</th><th>Value</th><th>Age</th></tr>
+                            </thead>
+                            <tbody>${cookiesHtml}</tbody>
+                        </table>
+                    </div>
                 `;
                 container.appendChild(card);
             }

@@ -11,6 +11,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  DOCKER_BUILD_RECORD_UPLOAD: 'false'
 
 permissions:
   contents: read
@@ -121,6 +122,8 @@ jobs:
 
       - name: Smoke test the built image
         run: |
+          docker run --rm --entrypoint sh "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-staging-${{ github.sha }}" \
+            -c '. /etc/os-release; test "$VERSION_CODENAME" = trixie'
           docker run -d --name solverr-smoke -p 8191:8191 "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-staging-${{ github.sha }}"
           echo "Waiting for /health to report ok..."
           for i in $(seq 1 30); do

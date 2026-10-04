@@ -6,7 +6,8 @@ from app.security import check_target_url, check_target_url_async, SSRFBlockedEr
 
 class TestSSRFProtection(unittest.TestCase):
     def test_public_host_allowed(self):
-        check_target_url("https://example.com/path")  # must not raise
+        with patch("app.security.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 0))]):
+            check_target_url("https://example.com/path")  # must not raise
 
     def test_loopback_blocked(self):
         with self.assertRaises(SSRFBlockedError):
@@ -64,7 +65,8 @@ class TestSSRFProtection(unittest.TestCase):
             check_target_url("127.0.0.1:8080")
 
     def test_scheme_less_public_host_allowed(self):
-        check_target_url("example.com:8080")  # must not raise
+        with patch("app.security.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 0))]):
+            check_target_url("example.com:8080")  # must not raise
 
 
 class TestAsyncSSRFProtection(unittest.IsolatedAsyncioTestCase):
@@ -129,7 +131,8 @@ class TestProxySSRFProtection(unittest.IsolatedAsyncioTestCase):
         # NXDOMAIN counts as blocked, so this needs a host that really resolves.
         req = V1Request(cmd="request.get", url="https://example.com", proxy="http://example.com:8080")
         # Stub every tier so only the SSRF check is under test.
-        with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(False, None))) as fast_mock, \
+        with patch("asyncio.BaseEventLoop.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 0))]), \
+             patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(False, None))) as fast_mock, \
              patch("app.solver.engine.browser_pool.solve", new=AsyncMock(side_effect=RuntimeError("browser should not be reached in this test"))) as browser_mock, \
              patch.object(settings, "FALLBACK_PROXY_URL", None):
             with self.assertRaises(RuntimeError):

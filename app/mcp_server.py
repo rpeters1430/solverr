@@ -1,4 +1,4 @@
-"""MCP server mounted at /mcp, exposing Solverr's solver as agent tools.
+"""MCP server optionally mounted at /mcp, exposing Solverr's solver as agent tools.
 
 Tools share the HTTP routes' singletons, so MCP solves appear in /metrics and the dashboard.
 """
@@ -42,6 +42,7 @@ async def solverr_scrape(
     tier: str = "auto",
     wait_selector: Optional[str] = None,
     extract_rules: Optional[Dict[str, str]] = None,
+    extract_records: Optional[Dict[str, Any]] = None,
     max_timeout_ms: int = 60000,
 ) -> Dict[str, Any]:
     """Fetch a URL through Solverr's tiered solver, automatically clearing any
@@ -69,6 +70,7 @@ async def solverr_scrape(
             postData=post_data,
             tier=tier,
             wait_selector=wait_selector,
+            extract_records=extract_records,
             maxTimeout=max_timeout_ms,
         ).to_v1_request()
         solution = await solver_engine.process_request(req)
@@ -78,7 +80,9 @@ async def solverr_scrape(
         raise ToolError(f"Scrape failed for {url}; see server logs for details.") from e
 
     extracted = None
-    if extract_rules and solution.response:
+    if solution.extracted is not None:
+        extracted = solution.extracted
+    elif extract_rules and solution.response:
         extracted = _extract_data(solution.response, extract_rules)
 
     return {
@@ -93,7 +97,8 @@ async def solverr_scrape(
 
 
 @mcp_server.tool()
-async def solverr_screenshot(url: str, max_timeout_ms: int = 60000) -> Image:
+async def solverr_screenshot(url: str, max_timeout_ms: int = 60000,
+                             full_page: bool = False, selector: Optional[str] = None) -> Image:
     """Solve any challenge on a URL and return a JPEG screenshot of the
     resulting page. Always uses the stealth browser tier, since a screenshot
     requires a real rendered page rather than a raw HTTP response."""
@@ -102,6 +107,8 @@ async def solverr_screenshot(url: str, max_timeout_ms: int = 60000) -> Image:
             url=url,
             tier="tier3_browser",
             screenshot=True,
+            screenshot_full_page=full_page,
+            screenshot_selector=selector,
             maxTimeout=max_timeout_ms,
         ).to_v1_request()
         solution = await solver_engine.process_request(req)

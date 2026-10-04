@@ -1,5 +1,6 @@
 import unittest
-from app.solver.fast_tls import FastTLSEngine, FIREFOX_PROFILES, CHROME_PROFILES, _sec_ch_ua_for
+from unittest.mock import AsyncMock, patch
+from app.solver.fast_tls import FastTLSEngine, FIREFOX_PROFILES, CHROME_PROFILES, _platform_hint_for
 
 
 class TestFastTLSProfileRotation(unittest.TestCase):
@@ -28,11 +29,16 @@ class TestFastTLSProfileRotation(unittest.TestCase):
         for domain in ["a.com", "b.com", "c.com"]:
             self.assertEqual(engine._profile_for_domain(f"https://{domain}"), FIREFOX_PROFILES[0])
 
-    def test_sec_ch_ua_only_generated_for_chrome_targets(self):
-        self.assertIsNone(_sec_ch_ua_for("firefox147"))
-        header = _sec_ch_ua_for("chrome146")
-        self.assertIn("146", header)
-        self.assertIn("Chromium", header)
+    def test_platform_hint_only_for_chrome_targets_and_follows_ua(self):
+        self.assertIsNone(_platform_hint_for("firefox147", FIREFOX_PROFILES[0][1]))
+        self.assertEqual(_platform_hint_for("chrome150", CHROME_PROFILES[0][1]), '"Windows"')
+        mac_ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+        self.assertEqual(_platform_hint_for("chrome150", mac_ua), '"macOS"')
+
+    def test_profile_targets_are_supported_by_curl_cffi(self):
+        from app.solver.fast_tls import SUPPORTED_TARGETS
+        for target, _ in FIREFOX_PROFILES + CHROME_PROFILES:
+            self.assertIn(target, SUPPORTED_TARGETS)
 
     def test_adaptive_profile_scoring_favors_successful_profile(self):
         engine = FastTLSEngine()
@@ -65,8 +71,94 @@ class TestFastTLSProfileRotation(unittest.TestCase):
         self.assertIn("domain3.test", engine._domain_scores)
         self.assertIn("domain4.test", engine._domain_scores)
 
+    def test_non_positive_max_domain_scores_setting_is_clamped(self):
+        # MAX_FAST_TLS_DOMAIN_SCORES=0 (or negative) must not leave the
+        # engine with a cap that makes the eviction branch always true on an
+        # empty mapping, which raised KeyError on the first new domain.
+        from unittest.mock import patch
+        with patch("app.solver.fast_tls.settings") as mock_settings:
+            mock_settings.FAST_TLS_TARGET = "firefox"
+            mock_settings.FAST_TLS_ROTATE = True
+            mock_settings.MAX_FAST_TLS_DOMAIN_SCORES = 0
+            mock_settings.FAST_TLS_POOL_ENABLED = True
+            mock_settings.FAST_TLS_POOL_SIZE = 50
+            engine = FastTLSEngine()
+        self.assertGreaterEqual(engine._max_domain_scores, 1)
+        engine.record_outcome("https://example.com/", "firefox144", success=True)
+        self.assertIn("example.com", engine._domain_scores)
+
+
+class TestFastTLSUserAgentCompatibility(unittest.TestCase):
+    def test_firefox_target_accepts_only_firefox_uas(self):
+        engine = FastTLSEngine()
+        engine.impersonate_target = "firefox147"
+        self.assertTrue(engine.is_compatible_user_agent("Mozilla/5.0 (X11; Linux x86_64; rv:152.0) Gecko/20100101 Firefox/152.0"))
+        self.assertFalse(engine.is_compatible_user_agent(CHROME_PROFILES[0][1]))
+        self.assertFalse(engine.is_compatible_user_agent(None))
+
+    def test_target_matches_ua_version_when_supported(self):
+        engine = FastTLSEngine()
+        engine.impersonate_target = "firefox147"
+        self.assertEqual(engine.target_for_user_agent(FIREFOX_PROFILES[1][1]), "firefox144")
+
+    def test_target_falls_back_to_newest_not_newer_than_ua(self):
+        engine = FastTLSEngine()
+        engine.impersonate_target = "firefox133"
+        target = engine.target_for_user_agent("Mozilla/5.0 (X11; Linux x86_64; rv:999.0) Gecko/20100101 Firefox/999.0")
+        self.assertTrue(target.startswith("firefox"))
+        self.assertLessEqual(int(target[len("firefox"):]), 999)
+        self.assertNotEqual(target, "firefox133")
+
+    def test_target_defaults_when_ua_has_no_version(self):
+        engine = FastTLSEngine()
+        engine.impersonate_target = "firefox147"
+        self.assertEqual(engine.target_for_user_agent("custom-agent"), "firefox147")
+
+    def test_chrome_target_accepts_only_chrome_uas(self):
+        engine = FastTLSEngine()
+        engine.impersonate_target = "chrome146"
+        self.assertTrue(engine.is_compatible_user_agent(CHROME_PROFILES[0][1]))
+        self.assertFalse(engine.is_compatible_user_agent(FIREFOX_PROFILES[0][1]))
+
+
+class TestFastTLSCookieSelection(unittest.TestCase):
+    def _cookie(self, name, value, domain, path="/"):
+        from app.models.flaresolverr import CookieModel
+        return CookieModel(name=name, value=value, domain=domain, path=path)
+
+    def test_same_name_cookies_on_different_domains_do_not_shadow_each_other(self):
+        engine = FastTLSEngine()
+        cookies = [
+            self._cookie("session", "unrelated-domain-value", domain="other.test"),
+            self._cookie("session", "target-domain-value", domain="target.test"),
+        ]
+        selected = engine._select_cookies_for_url(cookies, "https://target.test/page")
+        self.assertEqual(selected.get("session"), "target-domain-value")
+
+    def test_same_name_cookies_on_different_paths_prefer_more_specific_path(self):
+        engine = FastTLSEngine()
+        cookies = [
+            self._cookie("token", "root-value", domain="target.test", path="/"),
+            self._cookie("token", "scoped-value", domain="target.test", path="/account"),
+        ]
+        selected = engine._select_cookies_for_url(cookies, "https://target.test/account/settings")
+        self.assertEqual(selected.get("token"), "scoped-value")
+
+    def test_cookie_scoped_to_unrelated_path_is_excluded(self):
+        engine = FastTLSEngine()
+        cookies = [self._cookie("token", "scoped-value", domain="target.test", path="/account")]
+        selected = engine._select_cookies_for_url(cookies, "https://target.test/other")
+        self.assertNotIn("token", selected)
+
 
 class TestFastTLSChallengeDetection(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.target_check = patch("app.solver.fast_tls.check_target_url_async", new=AsyncMock())
+        self.target_check.start()
+
+    def tearDown(self):
+        self.target_check.stop()
+
     async def test_detects_challenge_on_status_200_with_cloudflare_title(self):
         from unittest.mock import AsyncMock, patch, MagicMock
         mock_resp = MagicMock()
@@ -148,6 +240,13 @@ class TestFastTLSChallengeDetection(unittest.IsolatedAsyncioTestCase):
 
 
 class TestFastTLSSessionPool(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.target_check = patch("app.solver.fast_tls.check_target_url_async", new=AsyncMock())
+        self.target_check.start()
+
+    def tearDown(self):
+        self.target_check.stop()
+
     async def test_session_reused_across_requests_for_same_domain(self):
         from unittest.mock import AsyncMock, patch, MagicMock
         mock_resp = MagicMock()

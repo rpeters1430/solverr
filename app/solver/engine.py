@@ -10,6 +10,7 @@ from app.solver.fast_tls import fast_tls_engine
 from app.solver.browser import browser_pool
 from app.config import settings
 from app.events import event_broadcaster
+from app.history import request_history
 from app.security import check_target_url_async
 
 logger = logging.getLogger("solverr.engine")
@@ -156,25 +157,44 @@ class RequestBudget:
 
 
 def _cap_response_body(solution: SolutionModel) -> None:
-    max_bytes = settings.MAX_RESPONSE_BODY_MB * 1024 * 1024
+    max_bytes = int(settings.MAX_RESPONSE_BODY_MB * 1024 * 1024)
     if max_bytes <= 0 or not solution.response:
         return
-    encoded = solution.response.encode("utf-8", errors="ignore")
-    body_bytes = len(encoded)
+    response_bytes = solution.response.encode("utf-8", errors="ignore")
+    body_bytes = len(response_bytes)
     if body_bytes > max_bytes:
         logger.warning(
             f"[HybridEngine] Response body ({body_bytes / 1024 / 1024:.1f}MB) exceeds "
             f"MAX_RESPONSE_BODY_MB={settings.MAX_RESPONSE_BODY_MB}, truncating"
         )
-        truncated_bytes = encoded[:max_bytes]
-        solution.response = truncated_bytes.decode("utf-8", errors="ignore") + "\n<!-- truncated: response exceeded MAX_RESPONSE_BODY_MB -->"
-
+        marker = "\n<!-- truncated: response exceeded MAX_RESPONSE_BODY_MB -->"
+        marker_bytes = marker.encode("utf-8")
+        if len(marker_bytes) <= max_bytes:
+            content_budget = max_bytes - len(marker_bytes)
+            solution.response = response_bytes[:content_budget].decode("utf-8", errors="ignore") + marker
+        else:
+            # For very small limits, keep the strict byte cap even when the
+            # explanatory marker itself would exceed it.
+            solution.response = response_bytes[:max_bytes].decode("utf-8", errors="ignore")
 
 class HybridSolverEngine:
     def __init__(self):
         self._inflight: Dict[str, asyncio.Future] = {}
 
-    async def process_request(self, req: V1Request) -> SolutionModel:
+    async def _record_history(self, url: str, budget: RequestBudget, solution: SolutionModel | None = None,
+                              failure: BaseException | None = None):
+        try:
+            await request_history.record(
+                url, solution.tier if solution else "failed",
+                "success" if solution and (solution.status < 400 or solution.status == 404) else "failed",
+                budget.elapsed_ms, solution.status if solution else None,
+                solution.challengeType if solution else None,
+                type(failure).__name__ if failure else None,
+            )
+        except Exception:
+            logger.warning("Request history could not be persisted", exc_info=True)
+
+    async def process_request(self, req: V1Request, bypass_cookie_cache: bool = False) -> SolutionModel:
         budget = RequestBudget(req.maxTimeout or settings.BROWSER_TIMEOUT_MS)
         url = req.url
         method = req.cmd.split(".")[-1].upper() if "." in req.cmd else "GET"
@@ -200,7 +220,11 @@ class HybridSolverEngine:
             "wait_selector": req.wait_selector,
             "wait_delay_ms": req.wait_delay_ms,
             "screenshot": bool(req.screenshot),
+            "screenshot_full_page": req.screenshot_full_page,
+            "screenshot_selector": req.screenshot_selector,
+            "extract_records": req.extract_records,
             "maxTimeout": req.maxTimeout,
+            "bypassCookieCache": bypass_cookie_cache,
         }
         inflight_key = hashlib.sha256(
             json.dumps(fingerprint, sort_keys=True, default=str).encode()
@@ -223,12 +247,22 @@ class HybridSolverEngine:
         self._inflight[inflight_key] = future
 
         try:
-            res = await self._do_process_request(req, budget, url, method)
+            res = await self._do_process_request(req, budget, url, method, bypass_cookie_cache)
             _cap_response_body(res)
+            await self._record_history(url, budget, solution=res)
             if not future.done():
                 future.set_result(res)
             return res
+        except asyncio.CancelledError:
+            await self._record_history(url, budget, failure=asyncio.CancelledError())
+            # A cancelled owner task must still release any waiters shielded
+            # onto this future via asyncio.shield(existing) above - otherwise
+            # they block forever on a future nothing will ever resolve.
+            if not future.done():
+                future.cancel()
+            raise
         except Exception as e:
+            await self._record_history(url, budget, failure=e)
             if not future.done():
                 future.set_exception(e)
                 # Mark retrieved so asyncio doesn't warn when no waiter awaited it.
@@ -239,12 +273,16 @@ class HybridSolverEngine:
             if self._inflight.get(inflight_key) is future:
                 self._inflight.pop(inflight_key, None)
 
-    async def _do_process_request(self, req: V1Request, budget: RequestBudget, url: str, method: str) -> SolutionModel:
+    async def _do_process_request(
+        self, req: V1Request, budget: RequestBudget, url: str, method: str, bypass_cookie_cache: bool = False
+    ) -> SolutionModel:
         proxy_url = req.get_proxy_url()
 
         combined_cookies: List[CookieModel] = []
-        cached_cookies = [] if getattr(req, "skip_cache", False) else await cookie_cache.get_cookies_async(url)
-        if not getattr(req, "skip_cache", False):
+        cached_cookies = []
+        cached_ua: Optional[str] = None
+        if not (bypass_cookie_cache or getattr(req, "skip_cache", False)):
+            cached_cookies, cached_ua = await cookie_cache.get_cookies_with_user_agent_async(url)
             metrics.record_cookie_cache_lookup(hit=bool(cached_cookies))
 
         # Same identity as cookie_cache._cookie_key: same-name cookies on other paths are distinct.
@@ -266,6 +304,11 @@ class HybridSolverEngine:
         if cached_cookies:
             logger.info(f"[HybridEngine] Merged {len(cached_cookies)} cached cookie(s) for domain '{cookie_cache._normalize_domain(url)}'")
 
+        # Clearance cookies only validate with the UA that earned them, so Tier 2 replays with it.
+        fast_tls_ua = req.userAgent
+        if not fast_tls_ua and had_cache and fast_tls_engine.is_compatible_user_agent(cached_ua):
+            fast_tls_ua = cached_ua
+
         # Tiers 1 and 2
         if settings.ENABLE_FAST_TLS and not req.forceBrowser:
             tls_timeout = max(1, min(10, int(budget.remaining_s)))
@@ -279,7 +322,7 @@ class HybridSolverEngine:
                 headers=req.headers,
                 proxy=proxy_url,
                 timeout=tls_timeout,
-                user_agent=req.userAgent,
+                user_agent=fast_tls_ua,
                 session_id=req.session
             )
 
@@ -298,7 +341,7 @@ class HybridSolverEngine:
                 solution.tier = tier_name
 
                 if solution.cookies:
-                    await cookie_cache.set_cookies_async(url, solution.cookies)
+                    await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent)
                 event_broadcaster.emit("solve", {
                     "url": url,
                     "tier": tier_name,
@@ -315,7 +358,7 @@ class HybridSolverEngine:
                     logger.info("[HybridEngine] fastTlsOnly=True requested. Returning Fast TLS solution without browser escalation.")
                     solution.tier = "tier1_fast_tls"
                     if solution.cookies:
-                        await cookie_cache.set_cookies_async(url, solution.cookies)
+                        await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent)
                     event_broadcaster.emit("solve", {
                         "url": url,
                         "tier": "tier1_fast_tls",
@@ -355,7 +398,10 @@ class HybridSolverEngine:
                 headers=req.headers,
                 wait_selector=req.wait_selector,
                 wait_delay_ms=req.wait_delay_ms,
-                capture_screenshot=bool(req.screenshot)
+                capture_screenshot=bool(req.screenshot or req.screenshot_selector or req.screenshot_full_page),
+                screenshot_full_page=req.screenshot_full_page,
+                screenshot_selector=req.screenshot_selector,
+                extract_records=req.extract_records,
             )
             
             elapsed_ms = budget.elapsed_ms
@@ -364,7 +410,7 @@ class HybridSolverEngine:
             solution.tier = "tier3_stealth_browser"
 
             if solution.cookies:
-                await cookie_cache.set_cookies_async(url, solution.cookies)
+                await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent)
 
             event_broadcaster.emit("solve", {
                 "url": url,
@@ -398,14 +444,17 @@ class HybridSolverEngine:
                         headers=req.headers,
                         wait_selector=req.wait_selector,
                         wait_delay_ms=req.wait_delay_ms,
-                        capture_screenshot=bool(req.screenshot)
+                        capture_screenshot=bool(req.screenshot or req.screenshot_selector or req.screenshot_full_page),
+                        screenshot_full_page=req.screenshot_full_page,
+                        screenshot_selector=req.screenshot_selector,
+                        extract_records=req.extract_records,
                     )
                     elapsed_ms = budget.elapsed_ms
                     metrics.record_fallback_proxy(elapsed_ms)
                     logger.info(f"[HybridEngine] Tier 4 Fallback Proxy SUCCESS in {elapsed_ms:.1f}ms | Status: {solution.status}")
                     solution.tier = "tier4_fallback_proxy"
                     if solution.cookies:
-                        await cookie_cache.set_cookies_async(url, solution.cookies)
+                        await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent)
                     event_broadcaster.emit("solve", {
                         "url": url,
                         "tier": "tier4_fallback_proxy",

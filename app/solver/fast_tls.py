@@ -6,7 +6,7 @@ import zlib
 from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
-from curl_cffi.requests import AsyncSession
+from curl_cffi.requests import AsyncSession, BrowserType
 from app.models.flaresolverr import CookieModel, SolutionModel
 from app.solver.browser import detect_challenge, is_challenge_title
 from app.config import settings
@@ -24,16 +24,36 @@ FIREFOX_PROFILES = [
     ("firefox133", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0"),
 ]
 CHROME_PROFILES = [
+    ("chrome150", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"),
     ("chrome146", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"),
     ("chrome145", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"),
     ("chrome142", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"),
 ]
 
-def _sec_ch_ua_for(target: str) -> Optional[str]:
+SUPPORTED_TARGETS = {b.value for b in BrowserType}
+_UA_VERSION_RE = {
+    "firefox": re.compile(r"Firefox/(\d+)"),
+    "chrome": re.compile(r"Chrome/(\d+)"),
+}
+
+
+def _platform_hint_for(target: str, user_agent: str) -> Optional[str]:
+    """sec-ch-ua-platform matching the UA's OS; curl_cffi's Chrome targets default to "macOS"
+    while our profile UAs are Windows. Firefox sends no client hints at all."""
     if not target.startswith("chrome"):
         return None
-    version = "".join(ch for ch in target if ch.isdigit()) or "146"
-    return f'"Chromium";v="{version}", "Not?A_Brand";v="24", "Google Chrome";v="{version}"'
+    if "Windows" in user_agent:
+        return '"Windows"'
+    if "Android" in user_agent:
+        return '"Android"'
+    if "Macintosh" in user_agent:
+        return '"macOS"'
+    if "CrOS" in user_agent:
+        return '"Chrome OS"'
+    if "Linux" in user_agent or "X11" in user_agent:
+        return '"Linux"'
+    return None
+
 
 class FastTLSEngine:
     def __init__(self):
@@ -41,8 +61,12 @@ class FastTLSEngine:
         self.rotate = getattr(settings, "FAST_TLS_ROTATE", True)
         self.profiles = FIREFOX_PROFILES if self.impersonate_target.startswith("firefox") else CHROME_PROFILES
         self._domain_scores: "OrderedDict[str, Dict[str, int]]" = OrderedDict()
-        self._max_domain_scores: int = getattr(settings, "MAX_FAST_TLS_DOMAIN_SCORES", 2000)
-        self._sessions: Dict[str, AsyncSession] = {}
+        # Clamp to at least 1 - a non-positive value would make the eviction
+        # check in record_outcome() always true, causing popitem(last=False)
+        # to raise KeyError on the still-empty mapping on the very first
+        # new domain seen.
+        self._max_domain_scores: int = max(1, getattr(settings, "MAX_FAST_TLS_DOMAIN_SCORES", 2000))
+        self._sessions: Dict[Tuple[str, str, str, str], AsyncSession] = {}
         self._pool_enabled: bool = getattr(settings, "FAST_TLS_POOL_ENABLED", True)
         self._pool_size: int = getattr(settings, "FAST_TLS_POOL_SIZE", 50)
         self._lock = asyncio.Lock()
@@ -53,6 +77,52 @@ class FastTLSEngine:
         else:
             domain = url.split("/")[0].split(":")[0].lower()
         return domain.lstrip(".")
+
+    def is_compatible_user_agent(self, user_agent: Optional[str]) -> bool:
+        """Whether a UA can ride this engine's TLS target; a Chrome UA on a Firefox handshake is itself a bot signal."""
+        if not user_agent:
+            return False
+        if self.impersonate_target.startswith("firefox"):
+            return "Firefox/" in user_agent
+        return "Chrome/" in user_agent and "Firefox/" not in user_agent
+
+    def target_for_user_agent(self, user_agent: str) -> str:
+        """The impersonation target matching the UA's browser version: exact when curl_cffi
+        supports it, else the newest supported one not newer than the UA, else the default."""
+        family = "firefox" if self.impersonate_target.startswith("firefox") else "chrome"
+        match = _UA_VERSION_RE[family].search(user_agent or "")
+        if not match:
+            return self.impersonate_target
+        ua_version = int(match.group(1))
+        candidates = [
+            int(t[len(family):]) for t in SUPPORTED_TARGETS
+            if t.startswith(family) and t[len(family):].isdigit() and int(t[len(family):]) <= ua_version
+        ]
+        return f"{family}{max(candidates)}" if candidates else self.impersonate_target
+
+    def _select_cookies_for_url(self, cookies: Optional[List[CookieModel]], url: str) -> Dict[str, str]:
+        """Collapse identity-distinct cookies (domain+path+name) to the flat
+        name->value mapping curl_cffi's `cookies` kwarg accepts for a single
+        request, applying standard cookie-matching rules (domain suffix,
+        path prefix) rather than letting same-name cookies from unrelated
+        domains/paths silently overwrite each other by insertion order.
+        """
+        if not cookies:
+            return {}
+        target_domain = self._normalize_domain(url)
+        target_path = urlparse(url).path or "/"
+        best: Dict[str, Tuple[str, str]] = {}  # name -> (path, value), keeping the most specific path
+        for c in cookies:
+            cookie_domain = (c.domain or "").lstrip(".").lower()
+            if cookie_domain and cookie_domain != target_domain and not target_domain.endswith("." + cookie_domain):
+                continue
+            cookie_path = c.path or "/"
+            if not (target_path == cookie_path or target_path.startswith(cookie_path.rstrip("/") + "/") or cookie_path == "/"):
+                continue
+            existing = best.get(c.name)
+            if existing is None or len(cookie_path) >= len(existing[0]):
+                best[c.name] = (cookie_path, c.value)
+        return {name: value for name, (_, value) in best.items()}
 
     def record_outcome(self, url: str, profile_target: str, success: bool):
         """Track success/failure per-domain profile to adaptively pick optimal TLS profiles."""
@@ -90,7 +160,7 @@ class FastTLSEngine:
         idx = zlib.crc32(domain.encode("utf-8")) % len(valid_profiles)
         return valid_profiles[idx]
 
-    async def _get_session(self, pool_key: str, impersonate_target: str) -> AsyncSession:
+    async def _get_session(self, pool_key: Tuple[str, str, str, str], impersonate_target: str) -> AsyncSession:
         if not self._pool_enabled:
             return AsyncSession(impersonate=impersonate_target)
         async with self._lock:
@@ -108,7 +178,7 @@ class FastTLSEngine:
             self._sessions[pool_key] = sess
             return sess
 
-    async def _evict_session(self, pool_key: str):
+    async def _evict_session(self, pool_key: Tuple[str, str, str, str]):
         if not self._pool_enabled:
             return
         async with self._lock:
@@ -142,37 +212,32 @@ class FastTLSEngine:
         user_agent: Optional[str] = None,
         session_id: Optional[str] = None
     ) -> Tuple[bool, Optional[SolutionModel]]:
-        # A caller-pinned UA keeps the default target instead of rotating.
+        # A pinned UA gets the TLS target closest to its own browser version, not a rotated one.
         if user_agent:
             active_ua = user_agent
-            impersonate_target = self.impersonate_target
+            impersonate_target = self.target_for_user_agent(user_agent)
         else:
             impersonate_target, active_ua = self._profile_for_domain(url)
 
         domain = self._normalize_domain(url)
-        # Each pooled session has its own cookie jar, so the session id keys it to prevent cookie bleed.
-        pool_key = f"{domain}:{impersonate_target}:{proxy or ''}:{session_id or ''}"
+        # Include the caller's FlareSolverr session id in the pool key - the
+        # pooled AsyncSession carries its own persistent cookie jar, so two
+        # concurrent callers hitting the same domain under different (or no)
+        # session ids must not share one jar and bleed cookies into each
+        # other's requests/responses. A tuple key (rather than colon-joined
+        # string) avoids ambiguous collisions between fields that can
+        # themselves contain colons (e.g. a proxy URL's port).
+        pool_key = (domain, impersonate_target, proxy or "", session_id or "")
 
-        cookie_dict = {}
-        if cookies:
-            for c in cookies:
-                cookie_dict[c.name] = c.value
+        cookie_dict = self._select_cookies_for_url(cookies, url)
 
-        req_headers = {
-            "User-Agent": active_ua,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "Sec-Ch-Ua-Platform": '"Windows"',
-        }
-        sec_ch_ua = _sec_ch_ua_for(impersonate_target)
-        if sec_ch_ua:
-            req_headers["Sec-Ch-Ua"] = sec_ch_ua
-            req_headers["Sec-Ch-Ua-Mobile"] = "?0"
+        # curl_cffi sends each target's real browser headers (Accept, Sec-Fetch-*, sec-ch-ua
+        # with its per-version GREASE brand) in the browser's own order; overriding a name
+        # keeps its position, so only override what must follow our UA.
+        req_headers = {"User-Agent": active_ua}
+        platform_hint = _platform_hint_for(impersonate_target, active_ua)
+        if platform_hint:
+            req_headers["sec-ch-ua-platform"] = platform_hint
         if headers:
             # Case-insensitively merge caller headers over defaults
             lower_to_key = {k.lower(): k for k in req_headers}
