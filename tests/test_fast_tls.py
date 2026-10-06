@@ -218,6 +218,37 @@ class TestFastTLSChallengeDetection(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sol.status, 200)
             self.assertEqual(len(sol.cookies), 1)
 
+    async def _request(self, text, status=200, headers=None):
+        from unittest.mock import AsyncMock, patch, MagicMock
+        mock_resp = MagicMock()
+        mock_resp.status_code = status
+        mock_resp.text = text
+        mock_resp.headers = {"content-type": "text/html", **(headers or {})}
+        mock_resp.cookies = {}
+        mock_resp.url = "https://example.com"
+        mock_session = AsyncMock()
+        mock_session.get = AsyncMock(return_value=mock_resp)
+        with patch("app.solver.fast_tls.AsyncSession", return_value=mock_session):
+            return await FastTLSEngine().request("https://example.com")
+
+    async def test_provider_telemetry_on_a_real_page_stays_on_fast_tls(self):
+        body = "<body>" + "<p>row</p>" * 800 + "</body>"
+        for tag in (
+            '<script src="https://js.datadome.co/tags.js"></script>',
+            '<script src="/_Incapsula_Resource?SWJIYLWA=1"></script>',
+            '<script src="https://abc.token.awswaf.com/abc/challenge.js"></script>',
+        ):
+            is_challenge, sol = await self._request(f"<html><head><title>Shop</title>{tag}</head>{body}</html>")
+            self.assertFalse(is_challenge, tag)
+            self.assertEqual(sol.status, 200)
+
+    async def test_provider_declared_challenge_header_escalates(self):
+        is_challenge, _ = await self._request(
+            "<html><head><title>example.com</title></head><body></body></html>",
+            headers={"cf-mitigated": "challenge"},
+        )
+        self.assertTrue(is_challenge)
+
     async def test_api_json_response_not_marked_as_challenge(self):
         from unittest.mock import AsyncMock, patch, MagicMock
         mock_resp = MagicMock()

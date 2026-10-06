@@ -250,6 +250,25 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertIn("text/html", res.headers.get("content-type", ""))
 
+    def test_unsolved_challenge_reason_reaches_the_client(self):
+        from app.solver.browser import ChallengeNotSolvedError
+        failure = ChallengeNotSolvedError("cloudflare_turnstile", "still present after 40s")
+        with patch("app.api.flaresolverr.solver_engine.process_request", new=AsyncMock(side_effect=failure)):
+            v1 = self.client.post("/v1", json={"cmd": "request.get", "url": "https://example.com"}).json()
+            scrape = self.client.post("/scrape", json={"url": "https://example.com"})
+        self.assertEqual(v1["status"], "error")
+        self.assertIn("cloudflare_turnstile challenge not solved: still present after 40s", v1["message"])
+        self.assertEqual(scrape.status_code, 500)
+        self.assertIn("cloudflare_turnstile challenge not solved", scrape.json()["detail"])
+
+    def test_other_failures_stay_opaque_to_the_client(self):
+        failure = RuntimeError("proxy http://user:secret@10.0.0.1:8080 refused")
+        with patch("app.api.flaresolverr.solver_engine.process_request", new=AsyncMock(side_effect=failure)):
+            v1 = self.client.post("/v1", json={"cmd": "request.get", "url": "https://example.com"}).json()
+        self.assertEqual(v1["status"], "error")
+        self.assertNotIn("secret", v1["message"])
+        self.assertTrue(v1["message"].startswith("Error solving request (request_id:"))
+
     def test_v1_validation_error_returns_flaresolverr_error_envelope(self):
         res = self.client.post("/v1", json={})
         self.assertEqual(res.status_code, 200)

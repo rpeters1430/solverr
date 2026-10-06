@@ -14,7 +14,7 @@ from starlette.applications import Starlette
 from app.api.flaresolverr import _extract_data
 from app.config import settings
 from app.models.flaresolverr import ScrapeRequest
-from app.solver.browser import browser_pool
+from app.solver.browser import ChallengeNotSolvedError, browser_pool
 from app.solver.cache import cookie_cache
 from app.solver.engine import metrics, solver_engine
 
@@ -77,6 +77,8 @@ async def solverr_scrape(
     except Exception as e:
         # Exception text can carry proxy credentials, so details go to the log only.
         logger.error(f"[MCP] solverr_scrape failed for {url}: {type(e).__name__}: {e}", exc_info=True)
+        if isinstance(e, ChallengeNotSolvedError):
+            raise ToolError(f"Scrape failed for {url}: {e}") from e
         raise ToolError(f"Scrape failed for {url}; see server logs for details.") from e
 
     extracted = None
@@ -114,6 +116,8 @@ async def solverr_screenshot(url: str, max_timeout_ms: int = 60000,
         solution = await solver_engine.process_request(req)
     except Exception as e:
         logger.error(f"[MCP] solverr_screenshot failed for {url}: {type(e).__name__}: {e}", exc_info=True)
+        if isinstance(e, ChallengeNotSolvedError):
+            raise ToolError(f"Screenshot failed for {url}: {e}") from e
         raise ToolError(f"Screenshot failed for {url}; see server logs for details.") from e
 
     if not solution.screenshot:

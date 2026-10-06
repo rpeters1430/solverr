@@ -3,6 +3,7 @@
 - `pool` - Camoufox process lifecycle (CamoufoxPool)
 - `models` - small shared dataclasses (_PooledCamoufox)
 - `challenges` - pure challenge/age-gate detection (no page/browser dependency)
+- `clearance` - pure sensor-cookie checks (which cookie proves which provider's check passed)
 - `captcha` - paid captcha-solver escalation (sitekey extraction, token injection)
 - `cookies` - Playwright <-> CookieModel conversion
 - `navigation` - page navigation (GET/POST) and media-blocking setup
@@ -24,10 +25,23 @@ from app.solver.browser.challenges import (
     AGE_GATE_MARKERS,
     CHALLENGE_TITLE_MARKERS,
     BROWSER_ERROR_TITLES,
+    WALL_MARKERS,
+    WIDGET_CHALLENGES,
+    ChallengeNotSolvedError,
+    challenge_from_headers,
+    datadome_action,
     detect_challenge,
+    ip_block_provider,
     is_challenge_title,
+    is_challenge_wall,
     is_browser_error,
     has_age_gate_marker,
+    needs_unsolvable_captcha,
+)
+from app.solver.browser.clearance import (
+    SENSOR_COOKIES,
+    has_earned_sensor_cookie,
+    sensor_snapshot,
 )
 from app.solver.browser.captcha import (
     CAPTCHA_SOLVER_WIDGETS,
@@ -50,8 +64,19 @@ __all__ = [
     "AGE_GATE_MARKERS",
     "CHALLENGE_TITLE_MARKERS",
     "BROWSER_ERROR_TITLES",
+    "WALL_MARKERS",
+    "WIDGET_CHALLENGES",
+    "ChallengeNotSolvedError",
+    "challenge_from_headers",
+    "datadome_action",
+    "needs_unsolvable_captcha",
+    "SENSOR_COOKIES",
+    "has_earned_sensor_cookie",
+    "sensor_snapshot",
     "detect_challenge",
+    "ip_block_provider",
     "is_challenge_title",
+    "is_challenge_wall",
     "is_browser_error",
     "has_age_gate_marker",
     "CAPTCHA_SOLVER_WIDGETS",
