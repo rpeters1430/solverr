@@ -9,6 +9,7 @@ from app.solver.sessions import session_manager
 from app.config import settings
 from app.logging_config import sanitize_proxy_url, get_request_id
 from app.security import check_target_url_async, SSRFBlockedError
+from app.solver.browser import ChallengeNotSolvedError
 
 try:
     from bs4 import BeautifulSoup
@@ -119,10 +120,12 @@ async def flaresolverr_api(req: V1Request):
         except Exception as e:
             elapsed_ms = int(time.time() * 1000) - start_ts
             logger.error(f"Solve request failed after {elapsed_ms}ms for {req.url}: {type(e).__name__} - {str(e)}", exc_info=True)
-            # Exception text can carry proxy credentials; clients get only the request_id.
+            # Exception text can carry proxy credentials; clients get only the request_id,
+            # plus the reason when it's an unsolved challenge (whose text we compose ourselves).
+            detail = f"Error solving the challenge: {e}" if isinstance(e, ChallengeNotSolvedError) else "Error solving request"
             return V1Response(
                 status="error",
-                message=f"Error solving request (request_id: {get_request_id()})",
+                message=f"{detail} (request_id: {get_request_id()})",
                 startTimestamp=start_ts,
                 endTimestamp=int(time.time() * 1000),
                 version=settings.VERSION
@@ -225,7 +228,8 @@ async def native_scrape_api(req: ScrapeRequest):
         raise HTTPException(status_code=400, detail=f"SSRF validation failed: {e}")
     except Exception as e:
         logger.error(f"[ScrapeAPI] Scrape failed for {req.url}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Scrape failed (request_id: {get_request_id()})")
+        detail = f"Scrape failed: {e}" if isinstance(e, ChallengeNotSolvedError) else "Scrape failed"
+        raise HTTPException(status_code=500, detail=f"{detail} (request_id: {get_request_id()})")
 
 @router.get("/proxy")
 @router.post("/proxy")

@@ -1,6 +1,9 @@
 import unittest
 from app.solver.browser import (
+    challenge_from_headers,
     detect_challenge,
+    ip_block_provider,
+    is_challenge_wall,
     is_challenge_title,
     has_age_gate_marker,
     is_browser_error,
@@ -93,6 +96,118 @@ class TestChallengeDetection(unittest.TestCase):
         self.assertTrue(is_browser_error("Anything", "about:certerror?e=nssBadCert"))
         self.assertFalse(is_browser_error("Search results - Example Indexer", "https://example.com"))
         self.assertFalse(is_browser_error("Home", "https://cloudflare.manfredi.io/"))
+
+
+REAL_PAGE_BODY = "<main>" + "<p>search result row</p>" * 400 + "</main>"
+
+
+class TestBrandNamesAreNotChallenges(unittest.TestCase):
+    def test_datadome_telemetry_tag_is_not_a_challenge(self):
+        html = '<html><title>Shop</title><script src="https://js.datadome.co/tags.js"></script>' + REAL_PAGE_BODY
+        self.assertIsNone(detect_challenge("Shop", html, check_content=True))
+
+    def test_prose_mentioning_captcha_vendors_is_not_a_challenge(self):
+        html = "<p>We compared GeeTest, hCaptcha (hcaptcha.com) and Incapsula for our forum.</p>"
+        self.assertIsNone(detect_challenge("Blog", html, check_content=True))
+
+    def test_geetest_widget_markup_is_detected(self):
+        self.assertEqual(detect_challenge("Login", '<div class="geetest_btn_click"></div>', check_content=True), "geetest")
+        self.assertEqual(detect_challenge("Login", "<script>initGeetest4({captchaId: 'x'})</script>", check_content=True), "geetest")
+
+
+class TestChallengeFromHeaders(unittest.TestCase):
+    def test_cloudflare_mitigated_header(self):
+        self.assertEqual(challenge_from_headers({"CF-Mitigated": "challenge"}), "cloudflare_turnstile")
+        self.assertEqual(detect_challenge("", "", False, headers={"cf-mitigated": "challenge"}), "cloudflare_turnstile")
+
+    def test_aws_waf_action_needs_its_documented_status(self):
+        self.assertEqual(challenge_from_headers({"x-amzn-waf-action": "challenge"}, 202), "aws_waf")
+        self.assertEqual(challenge_from_headers({"x-amzn-waf-action": "captcha"}, 405), "aws_waf")
+        self.assertIsNone(challenge_from_headers({"x-amzn-waf-action": "challenge"}, 200))
+
+    def test_datadome_block_header_but_not_the_always_on_one(self):
+        self.assertEqual(challenge_from_headers({"x-dd-b": "1"}, 403), "datadome")
+        self.assertIsNone(challenge_from_headers({"x-datadome": "protected"}, 200))
+
+    def test_ordinary_headers_declare_nothing(self):
+        self.assertIsNone(challenge_from_headers({"content-type": "text/html", "server": "cloudflare"}, 200))
+        self.assertIsNone(challenge_from_headers(None))
+
+
+class TestIsChallengeWall(unittest.TestCase):
+    def _wall(self, title, html, status=200, headers=None):
+        challenge = detect_challenge(title, html, True, headers=headers, status=status)
+        return is_challenge_wall(challenge, title, html, status=status, headers=headers)
+
+    def test_cloudflare_interstitial_is_a_wall(self):
+        html = '<h2 id="challenge-running">Checking</h2><script>window._cf_chl_opt={}</script>'
+        self.assertTrue(self._wall("Just a moment...", html, status=403))
+        # Served with a 200 and a neutral title, the orchestration markers still give it away.
+        self.assertTrue(self._wall("example.com", html, status=200))
+
+    def test_embedded_widget_on_a_real_page_is_not_a_wall(self):
+        for widget in (
+            '<div class="cf-turnstile" data-sitekey="x"></div>',
+            '<div class="g-recaptcha" data-sitekey="x"></div>',
+            '<div class="h-captcha" data-sitekey="x"></div>',
+        ):
+            self.assertFalse(self._wall("Login", "<form>" + widget + "</form>" + REAL_PAGE_BODY), widget)
+
+    def test_widget_page_served_with_a_block_status_is_a_wall(self):
+        self.assertTrue(self._wall("Verify", '<div class="h-captcha" data-sitekey="x"></div>', status=403))
+
+    def test_imperva_telemetry_on_a_real_page_is_not_a_wall(self):
+        html = '<script src="/_Incapsula_Resource?SWJIYLWA=719d34d31c8e3a6e6fffd425f7e032f3"></script>' + REAL_PAGE_BODY
+        self.assertFalse(self._wall("Search results", html))
+
+    def test_imperva_lean_stub_and_incident_page_are_walls(self):
+        self.assertTrue(self._wall("", '<html><script src="/_Incapsula_Resource?SWJIYLWA=1"></script></html>'))
+        self.assertTrue(self._wall("", "Request unsuccessful. Incapsula incident ID: 123-456" + REAL_PAGE_BODY))
+
+    def test_aws_waf_sdk_on_a_real_page_is_not_a_wall_but_the_interstitial_is(self):
+        sdk = '<script src="https://abc.token.awswaf.com/abc/challenge.js"></script>' + REAL_PAGE_BODY
+        self.assertFalse(self._wall("Shop", sdk))
+        self.assertTrue(self._wall("", "<script>window.gokuProps = {key: 'a'};</script>"))
+        self.assertTrue(self._wall("", "", status=202, headers={"x-amzn-waf-action": "challenge"}))
+
+    def test_datadome_wall_variants(self):
+        self.assertTrue(self._wall("", "<script>var dd={'rt':'c','cid':'x','host':'geo.captcha-delivery.com'}</script>", status=403))
+        self.assertTrue(self._wall("", '{"url":"https://geo.captcha-delivery.com/captcha/?initialCid=x"}', status=200))
+
+    def test_ddos_guard_footer_mention_is_not_a_wall(self):
+        self.assertFalse(self._wall("Tracker", "<footer>Protected by ddos-guard</footer>" + REAL_PAGE_BODY))
+        self.assertTrue(self._wall("Tracker", '<script src="https://check.ddos-guard.net/check.js"></script>'))
+
+    def test_clean_page_is_not_a_wall(self):
+        self.assertFalse(self._wall("Home", REAL_PAGE_BODY))
+        self.assertFalse(is_challenge_wall(None, "Home", "", status=403))
+
+    def test_challenge_title_alone_is_a_wall(self):
+        self.assertTrue(is_challenge_wall(None, "Just a moment...", ""))
+
+
+class TestIpBlockProvider(unittest.TestCase):
+    def test_cloudflare_firewall_and_rate_limit_pages(self):
+        blocked = '<div id="cf-error-details"><h1>Sorry, you have been blocked</h1></div>'
+        self.assertEqual(ip_block_provider(blocked), "cloudflare")
+        coded = '<div id="cf-error-details"><span class="cf-error-code">1020</span> Access denied</div>'
+        self.assertEqual(ip_block_provider(coded), "cloudflare")
+        self.assertEqual(ip_block_provider('<div class="cf-error-details">Error code: 1015</div>'), "cloudflare")
+        self.assertEqual(ip_block_provider("", "https://example.com/cdn-cgi/error/1020"), "cloudflare")
+
+    def test_cloudflare_browser_signature_ban_is_left_to_a_fresh_fingerprint(self):
+        self.assertIsNone(ip_block_provider('<div id="cf-error-details"><span class="cf-error-code">1010</span></div>'))
+
+    def test_datadome_hard_block_but_not_its_solvable_walls(self):
+        hard = "<script>var dd={'rt':'c','t':'bv','host':'geo.captcha-delivery.com'}</script>"
+        self.assertEqual(ip_block_provider(hard), "datadome")
+        self.assertEqual(ip_block_provider('{"url":"https://geo.captcha-delivery.com/captcha/?cid=x&t=bv"}'), "datadome")
+        self.assertIsNone(ip_block_provider("<script>var dd={'rt':'c','t':'fe','host':'geo.captcha-delivery.com'}</script>"))
+
+    def test_ordinary_pages_and_solvable_challenges_are_not_ip_blocks(self):
+        self.assertIsNone(ip_block_provider(REAL_PAGE_BODY, "https://example.com/"))
+        self.assertIsNone(ip_block_provider("<title>Just a moment...</title><script>window._cf_chl_opt={}</script>"))
+        self.assertIsNone(ip_block_provider("<p>Our docs explain Error 1020 and why you have been blocked.</p>"))
 
 
 if __name__ == "__main__":

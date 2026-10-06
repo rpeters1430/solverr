@@ -12,15 +12,29 @@ from app.logging_config import sanitize_proxy_url
 
 from app.solver.browser.pool import CamoufoxPool, CAMOUFOX_AVAILABLE
 from app.solver.browser.challenges import (
+    IP_BLOCKED_REASON,
+    UNSOLVABLE_CAPTCHA_REASON,
+    WIDGET_CHALLENGES,
+    ChallengeNotSolvedError,
     detect_challenge,
     is_challenge_title,
+    is_challenge_wall,
+    ip_block_provider,
+    needs_unsolvable_captcha,
     has_age_gate_marker,
     is_browser_error,
 )
 from app.solver.browser.captcha import CAPTCHA_SOLVER_WIDGETS, try_captcha_solver_escalation
 from app.solver.browser.cookies import build_playwright_cookies, read_context_cookies, extract_captured_cookies
 from app.solver.browser.navigation import install_media_blocking, navigate_to_target
-from app.solver.browser.interactions import dispatch_challenge_click, describe_challenge_frames
+from app.solver.browser.interactions import (
+    AKAMAI_HOLD_SECONDS,
+    akamai_press_and_hold,
+    describe_challenge_frames,
+    dispatch_challenge_click,
+    wander_mouse,
+)
+from app.solver.browser.clearance import BLOCK_PAGE_COOKIES, has_earned_sensor_cookie, host_of, sensor_snapshot
 
 if CAMOUFOX_AVAILABLE:
     from camoufox.async_api import AsyncCamoufox
@@ -46,6 +60,14 @@ SOLVE_FINALIZE_RESERVE_SECONDS = 3.0
 CHALLENGE_CLICK_COOLDOWN_SECONDS = 4.0
 CHALLENGE_CLICK_RETRY_SECONDS = 1.2
 WIDGET_REPORT_INTERVAL_SECONDS = 10.0
+# A captcha widget embedded in a real page gets this long to be clicked through; after that the
+# page is returned as it stands rather than holding the request for the whole budget.
+WIDGET_SOLVE_WINDOW_SECONDS = 15.0
+# How long a wall may stay up after its sensor cookie is issued before the target is reloaded by
+# hand. Providers normally redirect within 2-3s; some never do.
+SENSOR_REDIRECT_GRACE_SECONDS = 5.0
+# After that reload, a wall still up this long is the site refusing the cookie it just issued.
+POST_RENAVIGATE_GRACE_SECONDS = 10.0
 
 
 def _describe_solve_error(e: BaseException, tier_timeout: float, tier_label: str) -> BaseException:
@@ -278,6 +300,10 @@ class BrowserPool:
                 except Exception as e:
                     last_error = _describe_solve_error(e, tier_timeout, "Pooled Camoufox solve")
                     logger.warning(f"[CamoufoxEngine] Pooled Camoufox solve notice/fallback: {last_error}.")
+                    if isinstance(e, ChallengeNotSolvedError) and e.ip_blocked:
+                        # The retry would leave from the same IP, so fail now and leave the budget to Tier 4.
+                        self._crashes_total += 1
+                        raise last_error
 
             # Fresh fingerprint: the pooled path's retry, or the only attempt for proxy/custom-UA requests.
             # A retry gets only what's left of the caller's budget, not a second full timeout.
@@ -513,14 +539,23 @@ class BrowserPool:
 
         await install_media_blocking(context)
 
+        # Sensor cookies already in the context (cached ones replayed above) are not proof of a pass
+        # during this solve: if a wall is up despite them, the site has stopped honouring them.
+        target_host = host_of(url)
+        sensor_baseline = sensor_snapshot(await read_context_cookies(context), target_host)
+
         # Track the real final status across challenge redirects; a clean title can still be a 404.
         last_main_status: Dict[str, Optional[int]] = {"code": None}
+        # Providers declare some walls only in response headers (cf-mitigated, x-amzn-waf-action, x-dd-b).
+        last_main_headers: Dict[str, str] = {}
 
         def _on_response(resp):
             try:
                 req = resp.request
                 if req.resource_type == "document" and req.frame == page.main_frame:
                     last_main_status["code"] = resp.status
+                    last_main_headers.clear()
+                    last_main_headers.update(resp.headers)
             except Exception:
                 pass
 
@@ -559,6 +594,14 @@ class BrowserPool:
         last_logged_step = 0.0
         age_gate_clicked = False
         last_detected_challenge: Optional[str] = None
+        # Wall verdict from the last pass that read the page content; title-only passes can't refresh it.
+        active_wall = False
+        widget_seen_at: Optional[float] = None
+        wall_seen = False
+        unsolvable_passes = 0
+        sensor_earned_at: Optional[float] = None
+        renavigated_at: Optional[float] = None
+        akamai_held = False
         cleared = False
 
         while time.monotonic() < loop_deadline:
@@ -584,12 +627,70 @@ class BrowserPool:
 
             content_lower = content.lower() if content else ""
 
-            active_challenge = detect_challenge(title, content, check_content)
+            if check_content:
+                blocked_by = ip_block_provider(content, curr_url)
+                if blocked_by:
+                    raise ChallengeNotSolvedError(blocked_by, IP_BLOCKED_REASON, ip_blocked=True)
+
+            active_challenge = detect_challenge(
+                title, content, check_content, headers=last_main_headers, status=last_main_status["code"]
+            )
+            if check_content:
+                active_wall = is_challenge_wall(
+                    active_challenge, title, content, status=last_main_status["code"], headers=last_main_headers
+                )
+                if active_challenge and not active_wall and active_challenge not in WIDGET_CHALLENGES:
+                    # A provider's telemetry script on the real page, not a challenge.
+                    active_challenge = None
             if active_challenge:
                 last_detected_challenge = active_challenge
             elif not check_content and last_detected_challenge:
                 # Most markers live only in page content, so a content-skipped pass can't prove it cleared.
                 active_challenge = last_detected_challenge
+
+            if check_content and active_wall and active_challenge:
+                wall_cookies = await read_context_cookies(context)
+                if not wall_seen:
+                    wall_seen = True
+                    sensor_baseline |= sensor_snapshot(wall_cookies, target_host, BLOCK_PAGE_COOKIES)
+
+                if needs_unsolvable_captcha(active_challenge, content, last_main_headers, last_main_status["code"]):
+                    # Two readings, so a page caught mid-transition isn't written off.
+                    unsolvable_passes += 1
+                    if unsolvable_passes >= 2:
+                        raise ChallengeNotSolvedError(active_challenge, UNSOLVABLE_CAPTCHA_REASON)
+                else:
+                    unsolvable_passes = 0
+
+                now_wall = time.monotonic()
+                if renavigated_at is not None:
+                    if now_wall - renavigated_at >= POST_RENAVIGATE_GRACE_SECONDS:
+                        # Fail the attempt now so the retry and Tier 4 get what's left of the budget.
+                        raise ChallengeNotSolvedError(
+                            active_challenge, "its clearance cookie was issued but the challenge kept being served"
+                        )
+                elif has_earned_sensor_cookie(active_challenge, wall_cookies, target_host, sensor_baseline):
+                    if sensor_earned_at is None:
+                        sensor_earned_at = now_wall
+                        logger.info(f"[BrowserPool] {active_challenge} clearance cookie issued; waiting for the site to redirect.")
+                    elif now_wall - sensor_earned_at >= SENSOR_REDIRECT_GRACE_SECONDS and loop_deadline - now_wall > 2.0:
+                        # The check passed but the provider's own redirect never fired: load the target ourselves.
+                        logger.info(f"[BrowserPool] {active_challenge} cookie set but still on the challenge page; reloading {url}")
+                        await navigate_to_target(
+                            page, url, method, post_data, max(1000, int((deadline - now_wall) * 1000))
+                        )
+                        renavigated_at = time.monotonic()
+                        continue
+
+            # A captcha widget embedded in the real page gets a bounded window, not the whole budget.
+            if active_challenge in WIDGET_CHALLENGES and not active_wall and not is_challenge_title(title):
+                if widget_seen_at is None:
+                    widget_seen_at = time.monotonic()
+                elif time.monotonic() - widget_seen_at >= WIDGET_SOLVE_WINDOW_SECONDS:
+                    logger.info(f"[BrowserPool] Embedded {active_challenge} widget left unsolved after {WIDGET_SOLVE_WINDOW_SECONDS:.0f}s; returning the page as-is.")
+                    break
+            else:
+                widget_seen_at = None
 
             # Cleared means no challenge, a clearance cookie, or a populated widget response token.
             challenge_cleared = False
@@ -597,12 +698,15 @@ class BrowserPool:
                 if not active_challenge:
                     challenge_cleared = True
                 elif check_content:
-                    try:
-                        raw_cookies = await read_context_cookies(context)
-                        if any(c.get("name") in ("cf_clearance", "aws-waf-token") for c in raw_cookies):
-                            challenge_cleared = True
-                    except Exception:
-                        pass
+                    # Only for a widget on a real page. On a wall the cookie alone isn't the page:
+                    # the sensor-cookie handling above waits for the redirect or reloads the target.
+                    if not active_wall:
+                        try:
+                            raw_cookies = await read_context_cookies(context)
+                            if any(c.get("name") in ("cf_clearance", "aws-waf-token") for c in raw_cookies):
+                                challenge_cleared = True
+                        except Exception:
+                            pass
 
                     if not challenge_cleared:
                         try:
@@ -653,7 +757,13 @@ class BrowserPool:
                 logger.info(f"[BrowserPool] Anti-bot / gate active ({state_label}, {elapsed:.1f}s elapsed) | Current Title: '{title}'")
                 last_logged_step = now_ts
 
-            if now_ts >= next_click_at and (now_ts - loop_start) > 0.6:
+            if now_ts >= next_click_at and (now_ts - loop_start) > 0.6 and active_challenge == "akamai" and active_wall:
+                # Akamai scores pointer telemetry rather than a click: hold its button once, then keep moving.
+                if not akamai_held and loop_deadline - now_ts > AKAMAI_HOLD_SECONDS + 3.0:
+                    akamai_held = await akamai_press_and_hold(page)
+                await wander_mouse(page)
+                next_click_at = time.monotonic() + CHALLENGE_CLICK_RETRY_SECONDS
+            elif now_ts >= next_click_at and (now_ts - loop_start) > 0.6:
                 clicked, age_gate_clicked = await dispatch_challenge_click(page, active_challenge, title, age_gate_clicked)
                 next_click_at = time.monotonic() + (CHALLENGE_CLICK_COOLDOWN_SECONDS if clicked else CHALLENGE_CLICK_RETRY_SECONDS)
                 if not clicked and active_challenge and (now_ts - last_widget_report) >= WIDGET_REPORT_INTERVAL_SECONDS:
@@ -737,6 +847,19 @@ class BrowserPool:
             except Exception:
                 final_title = final_title or ""
                 html_content = ""
+
+        # A wall that outlived the attempt is a failed solve, not a page to hand back as solved.
+        if not cleared and not is_browser_error(final_title, final_url):
+            final_status = last_main_status["code"]
+            final_challenge = detect_challenge(final_title, html_content, True, headers=last_main_headers, status=final_status)
+            blocked_by = ip_block_provider(html_content, final_url)
+            if blocked_by:
+                raise ChallengeNotSolvedError(blocked_by, IP_BLOCKED_REASON, ip_blocked=True)
+            if is_challenge_wall(final_challenge, final_title, html_content, status=final_status, headers=last_main_headers):
+                raise ChallengeNotSolvedError(
+                    final_challenge or last_detected_challenge or "unrecognized",
+                    f"still present after {time.monotonic() - loop_start:.0f}s",
+                )
 
         raw_cookies = await read_context_cookies(context)
         captured_cookies = extract_captured_cookies(raw_cookies)

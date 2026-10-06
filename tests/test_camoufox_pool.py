@@ -2,7 +2,7 @@ import asyncio
 import time
 import unittest
 from unittest.mock import patch
-from app.solver.browser import BrowserPool, CamoufoxPool, _PooledCamoufox
+from app.solver.browser import BrowserPool, CamoufoxPool, ChallengeNotSolvedError, _PooledCamoufox
 from app.solver.browser import browser as browser_module
 from app.config import settings
 from app.models.flaresolverr import SolutionModel
@@ -329,14 +329,277 @@ class TestSolveFlowDeadline(unittest.IsolatedAsyncioTestCase):
              patch.object(browser_module, "install_media_blocking", return_value=None), \
              patch.object(browser_module, "dispatch_challenge_click", return_value=(False, False)), \
              patch.object(browser_module, "SOLVE_FINALIZE_RESERVE_SECONDS", 0.2):
-            sol = await pool._execute_solve_flow(
-                context=Ctx(), page=ChallengePage(), url="https://example.com", method="GET",
-                post_data=None, cookies=None, timeout_ms=1500, active_ua="ua",
-                headers=None, start_time=start, deadline=start + 1.5,
-            )
+            # The wall never clears, so the attempt fails rather than returning it as a solved page.
+            with self.assertRaises(ChallengeNotSolvedError):
+                await pool._execute_solve_flow(
+                    context=Ctx(), page=ChallengePage(), url="https://example.com", method="GET",
+                    post_data=None, cookies=None, timeout_ms=1500, active_ua="ua",
+                    headers=None, start_time=start, deadline=start + 1.5,
+                )
         # Old behaviour: 0.5s navigation + a fresh 1.5s loop + finalisation.
         self.assertLess(time.monotonic() - start, 2.0)
-        self.assertEqual(sol.status, 503)
+
+
+class _StaticPage(FakePage):
+    """A page that never navigates: fixed title, content and main-document status."""
+    url = "https://example.com/page"
+    main_frame = object()
+    frames = []
+    page_title = "Search results"
+    html = ""
+
+    def on(self, *args):
+        pass
+
+    async def title(self):
+        return self.page_title
+
+    async def content(self):
+        return self.html
+
+    async def evaluate(self, script, *args):
+        # No widget token is ever populated; body/readyState probes report a rendered page.
+        return "response" not in script
+
+
+class _NoCookieContext(FakeContext):
+    async def cookies(self, *args, **kwargs):
+        return []
+
+
+REAL_BODY = "<body>" + "<p>search result row</p>" * 200 + "</body>"
+
+
+class TestSolveFlowWallVersusRealPage(unittest.IsolatedAsyncioTestCase):
+    async def _run(self, page, status=200, timeout_s=3.0, **patches):
+        pool = BrowserPool()
+
+        async def nav(*args, **kwargs):
+            return None, status
+
+        start = time.monotonic()
+        with patch.object(browser_module, "navigate_to_target", side_effect=nav), \
+             patch.object(browser_module, "install_media_blocking", return_value=None), \
+             patch.object(browser_module, "dispatch_challenge_click", return_value=(False, False)), \
+             patch.multiple(browser_module, SOLVE_FINALIZE_RESERVE_SECONDS=0.2, **patches):
+            try:
+                return await pool._execute_solve_flow(
+                    context=_NoCookieContext(), page=page, url=page.url, method="GET",
+                    post_data=None, cookies=None, timeout_ms=int(timeout_s * 1000), active_ua="ua",
+                    headers=None, start_time=start, deadline=start + timeout_s,
+                ), time.monotonic() - start
+            except ChallengeNotSolvedError as e:
+                return e, time.monotonic() - start
+
+    async def test_provider_telemetry_on_a_real_page_returns_at_once(self):
+        page = _StaticPage()
+        page.html = '<html><script src="/_Incapsula_Resource?SWJIYLWA=1"></script>' + REAL_BODY + "</html>"
+        sol, elapsed = await self._run(page)
+        self.assertEqual(sol.status, 200)
+        self.assertIsNone(sol.challengeType)
+        self.assertLess(elapsed, 1.5)
+
+    async def test_embedded_widget_gets_a_bounded_window_then_the_page_is_returned(self):
+        page = _StaticPage()
+        page.html = '<html><div class="g-recaptcha" data-sitekey="x"></div>' + REAL_BODY + "</html>"
+        sol, elapsed = await self._run(page, timeout_s=6.0, WIDGET_SOLVE_WINDOW_SECONDS=0.5)
+        self.assertEqual(sol.status, 200)
+        self.assertEqual(sol.challengeType, "recaptcha")
+        self.assertLess(elapsed, 3.0)
+
+    async def test_wall_served_with_200_fails_instead_of_returning_as_solved(self):
+        page = _StaticPage()
+        page.page_title = "example.com"
+        page.html = "<html><script>var dd={'rt':'c','cid':'x','host':'geo.captcha-delivery.com'}</script></html>"
+        err, _ = await self._run(page, timeout_s=1.5)
+        self.assertIsInstance(err, ChallengeNotSolvedError)
+        self.assertEqual(err.challenge, "datadome")
+        self.assertFalse(err.ip_blocked)
+
+    async def test_ip_block_fails_fast_without_waiting_out_the_budget(self):
+        page = _StaticPage()
+        page.page_title = "Attention Required! | Cloudflare"
+        page.html = '<html><div id="cf-error-details"><h1>Sorry, you have been blocked</h1></div></html>'
+        err, elapsed = await self._run(page, status=403, timeout_s=10.0)
+        self.assertIsInstance(err, ChallengeNotSolvedError)
+        self.assertTrue(err.ip_blocked)
+        self.assertLess(elapsed, 2.0)
+
+
+CF_WALL_HTML = '<html><h2 id="challenge-running">Checking</h2><script>window._cf_chl_opt={}</script></html>'
+REAL_HTML = "<html>" + REAL_BODY + "</html>"
+
+
+class _ScriptedContext(FakeContext):
+    """Cookie jar the test rewrites while the solve loop is polling."""
+
+    def __init__(self, cookies=None):
+        self.jar = list(cookies or [])
+
+    async def cookies(self, *args, **kwargs):
+        return list(self.jar)
+
+
+def _sensor(name, value, domain="example.com"):
+    return {"name": name, "value": value, "domain": domain, "path": "/"}
+
+
+class TestSolveFlowSensorCookies(unittest.IsolatedAsyncioTestCase):
+    async def _run(self, page, context, timeout_s=6.0, on_navigate=None, **patches):
+        pool = BrowserPool()
+        navigations = []
+
+        async def nav(*args, **kwargs):
+            navigations.append(time.monotonic())
+            if on_navigate:
+                on_navigate(len(navigations))
+            return None, 403
+
+        patches.setdefault("SOLVE_FINALIZE_RESERVE_SECONDS", 0.2)
+        start = time.monotonic()
+        with patch.object(browser_module, "navigate_to_target", side_effect=nav), \
+             patch.object(browser_module, "install_media_blocking", return_value=None), \
+             patch.object(browser_module, "dispatch_challenge_click", return_value=(False, False)), \
+             patch.multiple(browser_module, **patches):
+            try:
+                result = await pool._execute_solve_flow(
+                    context=context, page=page, url=page.url, method="GET",
+                    post_data=None, cookies=None, timeout_ms=int(timeout_s * 1000), active_ua="ua",
+                    headers=None, start_time=start, deadline=start + timeout_s,
+                )
+            except ChallengeNotSolvedError as e:
+                result = e
+        return result, navigations, time.monotonic() - start
+
+    def _wall_page(self, html=CF_WALL_HTML, title="example.com"):
+        page = _StaticPage()
+        page.page_title = title
+        # Padded past the flow's "is this a full document yet" re-read threshold, which only costs time here.
+        page.html = html + "<body><!--" + "x" * 400 + "--></body>"
+        return page
+
+    async def test_reloads_the_target_when_the_cookie_is_issued_but_no_redirect_fires(self):
+        page = self._wall_page()
+        context = _ScriptedContext()
+
+        def on_navigate(count):
+            if count == 1:
+                # The check passes shortly after the wall loads, but the page never redirects.
+                asyncio.get_running_loop().call_later(
+                    0.3, lambda: context.jar.append(_sensor("cf_clearance", "fresh")))
+            else:
+                page.html = REAL_HTML
+
+        sol, navigations, _ = await self._run(
+            page, context, on_navigate=on_navigate, SENSOR_REDIRECT_GRACE_SECONDS=0.5)
+        self.assertEqual(len(navigations), 2)
+        self.assertEqual(sol.status, 200)
+        self.assertIn("search result row", sol.response)
+        self.assertEqual(sol.challengeType, "cloudflare_turnstile")
+
+    async def test_cached_cookie_the_site_no_longer_honours_does_not_clear_the_wall(self):
+        page = self._wall_page()
+        context = _ScriptedContext([_sensor("cf_clearance", "cached")])
+        err, navigations, _ = await self._run(page, context, timeout_s=1.5, SENSOR_REDIRECT_GRACE_SECONDS=0.2)
+        self.assertIsInstance(err, ChallengeNotSolvedError)
+        self.assertEqual(len(navigations), 1)
+
+    async def test_wall_that_survives_the_reload_fails_the_attempt_early(self):
+        page = self._wall_page()
+        context = _ScriptedContext()
+
+        def on_navigate(count):
+            if count == 1:
+                asyncio.get_running_loop().call_later(
+                    0.2, lambda: context.jar.append(_sensor("cf_clearance", "fresh")))
+
+        err, navigations, elapsed = await self._run(
+            page, context, timeout_s=30.0, on_navigate=on_navigate,
+            SENSOR_REDIRECT_GRACE_SECONDS=0.3, POST_RENAVIGATE_GRACE_SECONDS=0.5)
+        self.assertIsInstance(err, ChallengeNotSolvedError)
+        self.assertIn("clearance cookie was issued", err.reason)
+        self.assertFalse(err.ip_blocked)
+        self.assertEqual(len(navigations), 2)
+        self.assertLess(elapsed, 6.0)
+
+    async def test_datadome_cookie_handed_out_with_the_wall_is_not_a_pass(self):
+        page = self._wall_page("<html><script>var dd={'rt':'i','cid':'x','host':'geo.captcha-delivery.com'}</script></html>")
+        context = _ScriptedContext()
+
+        def on_navigate(count):
+            context.jar.append(_sensor("datadome", "issued-with-the-wall"))
+
+        err, navigations, _ = await self._run(
+            page, context, timeout_s=1.5, on_navigate=on_navigate, SENSOR_REDIRECT_GRACE_SECONDS=0.2)
+        self.assertIsInstance(err, ChallengeNotSolvedError)
+        self.assertEqual(len(navigations), 1)
+
+    async def test_datadome_slider_is_written_off_without_waiting_out_the_budget(self):
+        page = self._wall_page("<html><script>var dd={'rt':'c','cid':'x','host':'geo.captcha-delivery.com'}</script></html>")
+        err, _, elapsed = await self._run(page, _ScriptedContext(), timeout_s=30.0)
+        self.assertIsInstance(err, ChallengeNotSolvedError)
+        self.assertEqual(err.challenge, "datadome")
+        self.assertIn("interactive captcha", err.reason)
+        self.assertLess(elapsed, 4.0)
+
+    async def test_akamai_wall_gets_one_press_and_hold_and_continuous_pointer_movement(self):
+        page = self._wall_page('<html><div id="sec-if-cpt-container"><div id="progress-button"></div></div></html>')
+        held, wandered = [], []
+
+        async def hold(_page):
+            held.append(1)
+            return True
+
+        async def wander(_page, *args):
+            wandered.append(1)
+
+        clicks = []
+
+        async def click(*args):
+            clicks.append(1)
+            return False, False
+
+        with patch.object(browser_module, "akamai_press_and_hold", side_effect=hold), \
+             patch.object(browser_module, "wander_mouse", side_effect=wander):
+            err, _, _ = await self._run(
+                page, _ScriptedContext(), timeout_s=4.5,
+                AKAMAI_HOLD_SECONDS=0.1, CHALLENGE_CLICK_RETRY_SECONDS=0.3, dispatch_challenge_click=click)
+        self.assertIsInstance(err, ChallengeNotSolvedError)
+        self.assertEqual(err.challenge, "akamai")
+        self.assertEqual(len(held), 1)
+        self.assertGreater(len(wandered), 2)
+        self.assertEqual(clicks, [])
+
+
+class TestIpBlockSkipsSameIpRetry(unittest.IsolatedAsyncioTestCase):
+    async def test_ip_blocked_pooled_attempt_does_not_retry_from_the_same_ip(self):
+        pool = BrowserPool()
+        pool.camoufox_pool = FakeCamoufoxPoolWithBrowser(1)
+
+        async def pooled(**kwargs):
+            raise ChallengeNotSolvedError("cloudflare", "the site refused this IP address outright", ip_blocked=True)
+
+        with patch.object(pool, "_solve_with_pooled_camoufox", side_effect=pooled), \
+             patch.object(pool, "_solve_with_ephemeral_camoufox") as ephemeral:
+            with self.assertRaises(ChallengeNotSolvedError):
+                await pool.solve("https://example.com", timeout_ms=60000)
+        ephemeral.assert_not_called()
+
+    async def test_unsolved_wall_still_gets_the_fresh_fingerprint_retry(self):
+        pool = BrowserPool()
+        pool.camoufox_pool = FakeCamoufoxPoolWithBrowser(1)
+
+        async def pooled(**kwargs):
+            raise ChallengeNotSolvedError("cloudflare_turnstile", "still present after 40s")
+
+        async def ephemeral(**kwargs):
+            return SolutionModel(url="https://example.com", status=200, cookies=[], userAgent="ua")
+
+        with patch.object(pool, "_solve_with_pooled_camoufox", side_effect=pooled), \
+             patch.object(pool, "_solve_with_ephemeral_camoufox", side_effect=ephemeral) as retry:
+            sol = await pool.solve("https://example.com", timeout_ms=60000)
+        self.assertEqual(sol.status, 200)
+        retry.assert_called_once()
 
 
 class TestBrowserPoolCancellation(unittest.IsolatedAsyncioTestCase):

@@ -182,6 +182,8 @@ Every request Solverr handles is a self-contained request/response - there's no 
 }
 ```
 
+If a challenge wall is still up when the request's `maxTimeout` runs out, the response is `"status": "error"` with the reason in `message` (for example `Error solving the challenge: cloudflare_turnstile challenge not solved: still present after 38s`), never the challenge page returned as a solution. A captcha widget embedded in an otherwise real page (a login form's reCAPTCHA, say) is not a wall: Solverr tries it for up to 15 seconds and then returns the page.
+
 ### 2. Native Scrape API (`POST /scrape`)
 ```json
 {

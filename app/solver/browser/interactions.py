@@ -1,12 +1,67 @@
+import asyncio
 import logging
+import random
+import time
 from typing import Optional, Tuple
 
 from playwright.async_api import Page
 
-from app.solver.human_cursor import human_click
+from app.solver.human_cursor import human_click, human_mouse_move
 from app.solver.browser.challenges import is_challenge_title
 
 logger = logging.getLogger("solverr.browser")
+
+# Akamai's behavioral interstitial: a button that must be held down while its sensor samples the pointer.
+AKAMAI_HOLD_SELECTOR = "#progress-button, .behavioral-button, #sec-if-cpt-container [role='button']"
+AKAMAI_HOLD_SECONDS = 5.5
+
+
+async def wander_mouse(page: Page, points: int = 3) -> None:
+    """Drift the pointer between a few random spots; Akamai's sensor scores pointer telemetry
+    and an idle cursor reads as a bot."""
+    try:
+        viewport = page.viewport_size or {}
+        width = float(viewport.get("width") or 1280)
+        height = float(viewport.get("height") or 720)
+        for _ in range(points):
+            await human_mouse_move(page, random.uniform(0.1, 0.9) * width, random.uniform(0.1, 0.9) * height)
+            await asyncio.sleep(random.uniform(0.06, 0.2))
+    except Exception as e:
+        # Navigation can invalidate the input target mid-move.
+        logger.debug(f"[Akamai] Pointer wander notice: {e}")
+
+
+async def akamai_press_and_hold(page: Page) -> bool:
+    """Hold Akamai's press-and-hold button down for its full sampling window. False if there is none."""
+    mouse_down = False
+    try:
+        button = page.locator(AKAMAI_HOLD_SELECTOR).first
+        if await button.count() == 0:
+            return False
+        box = await button.bounding_box()
+        if not box or box["width"] < 4 or box["height"] < 4:
+            return False
+        center_x = box["x"] + box["width"] / 2.0
+        center_y = box["y"] + box["height"] / 2.0
+        await human_mouse_move(page, center_x, center_y)
+        await page.mouse.down()
+        mouse_down = True
+        hold_until = time.monotonic() + AKAMAI_HOLD_SECONDS
+        while time.monotonic() < hold_until:
+            # A real held finger is never perfectly still.
+            await page.mouse.move(center_x + random.uniform(-1.5, 1.5), center_y + random.uniform(-1.5, 1.5))
+            await asyncio.sleep(0.22)
+        logger.info(f"[Akamai] Held the behavioral button for {AKAMAI_HOLD_SECONDS:.1f}s.")
+        return True
+    except Exception as e:
+        logger.debug(f"[Akamai] Press-and-hold notice: {e}")
+        return False
+    finally:
+        if mouse_down:
+            try:
+                await page.mouse.up()
+            except Exception:
+                pass
 
 
 async def dispatch_challenge_click(

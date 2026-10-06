@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 from curl_cffi.requests import AsyncSession, BrowserType
 from app.models.flaresolverr import CookieModel, SolutionModel
-from app.solver.browser import detect_challenge, is_challenge_title
+from app.solver.browser import WIDGET_CHALLENGES, detect_challenge, is_challenge_title, is_challenge_wall
 from app.config import settings
 from app.logging_config import sanitize_proxy_url
 from app.security import check_target_url_async
@@ -323,7 +323,15 @@ class FastTLSEngine:
                 title_match = re.search(r"<title[^>]*>(.*?)</title>", body_text, re.IGNORECASE | re.DOTALL)
                 page_title = title_match.group(1).strip() if title_match else ""
 
-                detected_challenge = detect_challenge(page_title, body_lower, check_content=True)
+                detected_challenge = detect_challenge(
+                    page_title, body_lower, check_content=True, headers=resp.headers, status=resp.status_code
+                )
+                # A provider's telemetry script on an otherwise real page needs no browser; a wall does,
+                # and so does an embedded captcha widget, which only renders once its script runs.
+                if detected_challenge and detected_challenge not in WIDGET_CHALLENGES and not is_challenge_wall(
+                    detected_challenge, page_title, body_lower, status=resp.status_code, headers=resp.headers
+                ):
+                    detected_challenge = None
 
                 embedded_script_markers = [
                     "challenges.cloudflare.com", "cf-challenge", "turnstile.min.js",
