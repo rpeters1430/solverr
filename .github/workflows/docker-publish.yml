@@ -187,6 +187,7 @@ jobs:
           done <<< "$RELEASE_TAGS"
 
       - name: Record validated image and rollback references
+        if: env.PUBLISH == 'true'
         env:
           SOURCE: ${{ steps.candidate.outputs.ref }}
           RELEASE_TAGS: ${{ steps.meta.outputs.tags }}
@@ -195,7 +196,7 @@ jobs:
             echo '### Validated Docker image'
             echo "Commit: $GITHUB_SHA"
             echo "Image: $SOURCE"
-            echo 'Keep the digest or commit tag to restore this exact image.'
+            echo 'Use the digest to restore this exact image; commit tags can move on reruns.'
             echo '```text'
             echo "$RELEASE_TAGS"
             echo '```'

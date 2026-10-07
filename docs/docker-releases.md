@@ -23,7 +23,7 @@ docker compose ps
 ```
 
 To hold or restore a tested image, replace the image in your Compose file with
-the full digest reference recorded in the successful Actions summary:
+the full digest reference recorded in the successful release Actions summary:
 
 ```yaml
 image: ghcr.io/rpeters1430/solverr@sha256:REPLACE_WITH_VALIDATED_DIGEST
@@ -33,7 +33,9 @@ Then pull and recreate the service. `latest` tracks new validated main builds;
 a digest remains fixed until you edit it. Image rollback does not reverse data
 or database migrations, so keep a matching pre-upgrade config/data backup.
 Version tags `vX.Y.Z` publish version and major/minor image tags without moving
-`latest`. Commit tags remain available for identifying earlier builds.
+`latest`. Commit tags identify source commits, but rerunning a build can move those tags.
+Use the digest to restore the exact image. Validation-only PR/manual runs do not
+publish images or provide pullable rollback references.
 
 ## Maintaining the release pipeline
 
