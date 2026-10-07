@@ -41,10 +41,11 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertIn("solverr_timeouts_total", body)
 
     def test_flaresolverr_sessions_flow(self):
-        # 1. Create session
+        # 1. Create session. A numeric public address avoids external DNS in
+        # this API unit test; creating a session does not connect to the proxy.
         res_create = self.client.post("/v1", json={
             "cmd": "sessions.create",
-            "proxy": "http://user:secret@proxy.com:8080"
+            "proxy": "http://user:secret@93.184.216.34:8080"
         })
         self.assertEqual(res_create.status_code, 200)
         data_create = res_create.json()

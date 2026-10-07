@@ -19,10 +19,6 @@ ENV PYTHONUNBUFFERED=1 \
 FROM base AS deps
 WORKDIR /app
 
-# Pinned here so an engine bump invalidates the fetch layer. Must match the browser
-# pythonlib pairs with (camoufox/browser-pin.json): 0.5.7 pairs with 156.0.1-beta.34.
-ARG CAMOUFOX_BROWSER_VERSION=156.0.1-beta.34
-
 # Installed before the venv exists so uv never ships in the runtime image.
 # Cache mounts live under /app/.cache because XDG_CACHE_HOME points there.
 RUN --mount=type=cache,target=/app/.cache/pip \
@@ -36,12 +32,20 @@ RUN --mount=type=cache,target=/app/.cache/uv \
     uv pip install --python /opt/venv/bin/python -r requirements.txt
 
 # Every launch pins os="linux", so the macOS/Windows font sets (~890MB) are never used.
-# A bare `fetch` installs pythonlib's paired browser (no prerelease prompt) and seeds the
-# pinned fpgen model; it exits 0 on failure, so assert the pinned build actually landed.
-RUN python -m camoufox fetch \
-    && python -m camoufox set "official/prerelease/${CAMOUFOX_BROWSER_VERSION}" \
-    && ls -d /app/.cache/camoufox/browsers/official/${CAMOUFOX_BROWSER_VERSION}* \
+# Follow the browser paired with the installed Python package. Reset any explicit
+# selection BEFORE fetching so a Camoufox update cannot install one browser and
+# subsequently select a different, missing version. CLI failures can exit zero;
+# checking the actual executable below makes an incomplete download fail the build.
+RUN python -m camoufox set --release \
+    && python -m camoufox fetch \
     && python -m camoufox version
+RUN python <<'EOF'
+from pathlib import Path
+from camoufox.pkgman import launch_path
+browser = Path(launch_path())
+assert browser.is_file(), f"paired Camoufox executable not installed: {browser}"
+print(f"Verified paired browser: {browser}")
+EOF
 # Newer bundles store each font once under an OS-set group (L, LM, LMW, ..., per
 # fonts/groups.json); older ones ship fonts/<os>/. Keep only what Linux reads, and fail on
 # an unrecognised layout so a future change can't silently ship the other OSes' fonts again.
