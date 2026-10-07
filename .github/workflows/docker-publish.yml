@@ -12,13 +12,14 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   DOCKER_BUILD_RECORD_UPLOAD: 'false'
+  PUBLISH: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
 
 permissions:
   contents: read
 
 concurrency:
   group: docker-publish-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -40,7 +41,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements.txt -r requirements-ci.txt
 
       - name: Run Test Suite
         run: |
@@ -48,13 +49,11 @@ jobs:
 
       - name: Lint (ruff)
         run: |
-          pip install ruff
           ruff check app/
 
       - name: Security scan (bandit, non-blocking)
         continue-on-error: true
         run: |
-          pip install bandit
           bandit -r app -ll
 
   build-and-push:
@@ -65,7 +64,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      actions: write
 
     steps:
       - name: Checkout repository
@@ -77,7 +75,7 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request'
+        if: env.PUBLISH == 'true'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ${{ env.REGISTRY }}
@@ -96,14 +94,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha,format=short
 
-      # Build exactly once, to a disposable staging tag, and both load it
-      # locally (for the smoke test / trivy scan below) and push it (so the
-      # later promotion step can retag it by digest without rebuilding).
-      # Building a second time for the real push - as this workflow used to
-      # do - gave no guarantee the pushed image matched what was validated:
-      # the floating python base tag and the `>=` pins in requirements.txt
-      # mean a second `docker buildx build` invocation can resolve different
-      # package/base versions than the first, even with layer caching.
+      # Push only a candidate tag; release tags are updated after validation.
       - name: Build candidate image
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
@@ -111,20 +102,33 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64
-          push: ${{ github.event_name != 'pull_request' }}
-          load: ${{ github.event_name == 'pull_request' }}
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-staging-${{ github.sha }}
+          push: ${{ env.PUBLISH == 'true' }}
+          load: ${{ env.PUBLISH != 'true' }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-staging-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          provenance: ${{ github.event_name != 'pull_request' }}
-          sbom: ${{ github.event_name != 'pull_request' }}
+          provenance: ${{ env.PUBLISH == 'true' }}
+          sbom: ${{ env.PUBLISH == 'true' }}
+
+      - name: Select exact image for validation
+        id: candidate
+        env:
+          LOCAL_TAG: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-staging-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          if [ "$PUBLISH" = true ]; then
+            test -n "$DIGEST"
+            echo "ref=$REGISTRY/$IMAGE_NAME@$DIGEST" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=$LOCAL_TAG" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Smoke test the built image
         run: |
-          docker run --rm --entrypoint sh "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-staging-${{ github.sha }}" \
+          docker run --rm --entrypoint sh "${{ steps.candidate.outputs.ref }}" \
             -c '. /etc/os-release; test "$VERSION_CODENAME" = trixie'
-          docker run -d --name solverr-smoke -p 8191:8191 "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-staging-${{ github.sha }}"
+          docker run -d --name solverr-smoke -p 8191:8191 "${{ steps.candidate.outputs.ref }}"
           echo "Waiting for /health to report ok..."
           for i in $(seq 1 30); do
             if curl -fs http://localhost:8191/health | tee /tmp/health.json | grep -q '"status":"ok"'; then
@@ -145,7 +149,7 @@ jobs:
         run: |
           docker run -d --name solverr-nonroot --shm-size=1g -p 8191:8191 \
             -e PUID=1000 -e PGID=10 \
-            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-staging-${{ github.sha }}"
+            "${{ steps.candidate.outputs.ref }}"
           for i in $(seq 1 30); do
             curl -fs http://localhost:8191/health >/dev/null && break
             sleep 2
@@ -164,22 +168,34 @@ jobs:
       - name: Scan image for vulnerabilities (trivy)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-staging-${{ github.sha }}
+          image-ref: ${{ steps.candidate.outputs.ref }}
           severity: "CRITICAL,HIGH"
           exit-code: "1"
           ignore-unfixed: true
 
-      # Everything above validated the exact digest built above. Promote
-      # that same digest to the real tags (latest/branch/semver/short-sha)
-      # via imagetools - a registry-side retag, not a rebuild - so what
-      # gets those tags is guaranteed byte-identical to what was scanned.
       - name: Promote validated image to release tags
-        if: github.event_name != 'pull_request'
+        if: env.PUBLISH == 'true'
+        env:
+          SOURCE: ${{ steps.candidate.outputs.ref }}
+          RELEASE_TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           set -eu
-          digest="${{ steps.build.outputs.digest }}"
-          source="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${digest}"
           while IFS= read -r tag; do
             [ -n "$tag" ] || continue
-            docker buildx imagetools create -t "$tag" "$source"
-          done <<< "${{ steps.meta.outputs.tags }}"
+            docker buildx imagetools create -t "$tag" "$SOURCE"
+          done <<< "$RELEASE_TAGS"
+
+      - name: Record validated image and rollback references
+        env:
+          SOURCE: ${{ steps.candidate.outputs.ref }}
+          RELEASE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo '### Validated Docker image'
+            echo "Commit: $GITHUB_SHA"
+            echo "Image: $SOURCE"
+            echo 'Keep the digest or commit tag to restore this exact image.'
+            echo '```text'
+            echo "$RELEASE_TAGS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
