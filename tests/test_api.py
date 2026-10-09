@@ -40,6 +40,16 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertIn("solverr_cookie_cache_lookups_total", body)
         self.assertIn("solverr_timeouts_total", body)
 
+    def test_prometheus_tier_labels_are_consistent(self):
+        import re
+        body = self.client.get("/metrics").text
+        counter_tiers = set(re.findall(r'solverr_requests_total\{tier="([^"]+)",status="success"\}', body))
+        histogram_tiers = set(re.findall(r'solverr_request_duration_seconds_count\{tier="([^"]+)"\}', body))
+        self.assertEqual(counter_tiers, histogram_tiers)
+        self.assertEqual(counter_tiers, {"tier1_fast_tls", "tier2_cache", "tier3_stealth_browser", "tier4_fallback_proxy"})
+        self.assertIn('solverr_requests_total{tier="none",status="failed"}', body)
+        self.assertNotIn('solverr_request_duration_avg_ms{tier=', body)
+
     def test_flaresolverr_sessions_flow(self):
         # 1. Create session. A numeric public address avoids external DNS in
         # this API unit test; creating a session does not connect to the proxy.
