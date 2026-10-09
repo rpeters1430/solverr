@@ -117,8 +117,7 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
         with patch.object(fast_tls_engine, "request", autospec=True, return_value=(True, _sol(503))) as fast_mock, \
              patch.object(browser_pool, "solve", autospec=True, return_value=_sol(200)) as browser_mock:
             req = V1Request(cmd="request.get", url="https://example.com", session="s1", followMetaRefresh=True)
-            req._browser_storage = {"local": {"https://example.com": {"k": "v"}}}
-            await self.engine.process_request(req)
+            await self.engine.process_request(req, browser_storage={"local": {"https://example.com": {"k": "v"}}})
         self.assertTrue(fast_mock.call_args.kwargs["follow_meta_refresh"])
         kwargs = browser_mock.call_args.kwargs
         self.assertTrue(kwargs["follow_meta_refresh"])

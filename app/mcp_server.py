@@ -82,8 +82,8 @@ async def solverr_scrape(
             followMetaRefresh=follow_meta_refresh,
             session=session,
         ).to_v1_request()
-        await apply_session(req)
-        solution = await solver_engine.process_request(req)
+        storage = await apply_session(req)
+        solution = await solver_engine.process_request(req, browser_storage=storage)
         await persist_session(req, solution)
     except Exception as e:
         # Exception text can carry proxy credentials, so details go to the log only.

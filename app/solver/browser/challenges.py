@@ -180,10 +180,8 @@ def anubis_state(content: str) -> Optional[str]:
 
     Structural only: the JSON metadata scripts Anubis renders, or its own bootstrap module. A page
     that merely mentions or documents Anubis has neither in executable markup."""
-    if not content:
-        return None
-    lowered = content.lower()
-    if "anubis_" not in lowered and _ANUBIS_PATH not in lowered:
+    # Its challenge and reject pages both render an anubis_version or anubis_challenge script.
+    if not content or "anubis_" not in content.lower():
         return None
     live = _INERT_BLOCK_RE.sub("", content)
     version = challenge = bootstrap = False
@@ -245,13 +243,15 @@ def detect_challenge(
     declared = challenge_from_headers(headers, status)
     if declared:
         return declared
-    if check_content and anubis_state(content):
-        return "anubis"
     title_lower = title.lower() if title else ""
     content_lower = content.lower() if content else ""
     for ctype, markers in CHALLENGE_MARKERS.items():
         if any(m in title_lower or (check_content and m in content_lower) for m in markers):
             return ctype
+    # Every Anubis wall carries an anubis_challenge/anubis_version script, so the substring
+    # gates the structural parse and a clean page pays for one scan.
+    if check_content and "anubis_" in content_lower and anubis_state(content):
+        return "anubis"
     return None
 
 

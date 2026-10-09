@@ -86,10 +86,10 @@ async def flaresolverr_api(req: V1Request):
                 endTimestamp=int(time.time() * 1000)
             )
         
-        await apply_session(req)
+        storage = await apply_session(req)
 
         try:
-            solution = await solver_engine.process_request(req)
+            solution = await solver_engine.process_request(req, browser_storage=storage)
             await persist_session(req, solution)
 
             if req.returnOnlyCookies:
@@ -192,8 +192,8 @@ async def native_scrape_api(req: ScrapeRequest):
     v1_req = req.to_v1_request()
 
     try:
-        await apply_session(v1_req)
-        solution = await solver_engine.process_request(v1_req)
+        storage = await apply_session(v1_req)
+        solution = await solver_engine.process_request(v1_req, browser_storage=storage)
         await persist_session(v1_req, solution)
         duration_ms = round((time.time() - start_ts) * 1000, 2)
 
@@ -276,8 +276,8 @@ async def transparent_proxy(
     )
 
     try:
-        await apply_session(v1_req)
-        solution = await solver_engine.process_request(v1_req)
+        storage = await apply_session(v1_req)
+        solution = await solver_engine.process_request(v1_req, browser_storage=storage)
         await persist_session(v1_req, solution)
         media_type = solution.headers.get("content-type", "text/html")
         if ";" in media_type:

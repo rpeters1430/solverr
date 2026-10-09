@@ -258,9 +258,9 @@ class TestApplyAndPersistSession(unittest.IsolatedAsyncioTestCase):
             sid = await manager.create_session_async("s1", proxy="http://proxy.test:8080")
             await manager.update_session_storage_async(sid, {"local": {"https://a.test": {"k": "v"}}})
             req = V1Request(cmd="request.get", url="https://a.test/", session=sid)
-            await sessions_module.apply_session(req)
+            storage = await sessions_module.apply_session(req)
             self.assertEqual(req.get_proxy_url(), "http://proxy.test:8080")
-            self.assertEqual(req._browser_storage["local"], {"https://a.test": {"k": "v"}})
+            self.assertEqual(storage["local"], {"https://a.test": {"k": "v"}})
 
             sol = SolutionModel(url="https://a.test/", status=200, storage={"local": {"https://a.test": {"k": "new"}}})
             await sessions_module.persist_session(req, sol)
@@ -275,5 +275,5 @@ class TestApplyAndPersistSession(unittest.IsolatedAsyncioTestCase):
 
     def test_clients_cannot_inject_browser_storage(self):
         from app.models.flaresolverr import V1Request
-        req = V1Request(cmd="request.get", url="https://a.test/", _browser_storage={"local": {"x": {}}})
-        self.assertIsNone(req._browser_storage)
+        req = V1Request(cmd="request.get", url="https://a.test/", browser_storage={"local": {"x": {}}})
+        self.assertNotIn("browser_storage", req.model_dump())

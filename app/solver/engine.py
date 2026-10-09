@@ -197,7 +197,14 @@ class HybridSolverEngine:
         except Exception:
             logger.warning("Request history could not be persisted", exc_info=True)
 
-    async def process_request(self, req: V1Request, bypass_cookie_cache: bool = False) -> SolutionModel:
+    async def process_request(
+        self,
+        req: V1Request,
+        bypass_cookie_cache: bool = False,
+        browser_storage: Optional[Dict[str, Dict[str, Dict[str, str]]]] = None,
+    ) -> SolutionModel:
+        """`browser_storage` is the request's session web storage (from apply_session()), restored
+        into the browser tiers; it is never taken from the client."""
         budget = RequestBudget(req.maxTimeout or settings.BROWSER_TIMEOUT_MS)
         url = req.url
         method = req.cmd.split(".")[-1].upper() if "." in req.cmd else "GET"
@@ -251,7 +258,7 @@ class HybridSolverEngine:
         self._inflight[inflight_key] = future
 
         try:
-            res = await self._do_process_request(req, budget, url, method, bypass_cookie_cache)
+            res = await self._do_process_request(req, budget, url, method, bypass_cookie_cache, browser_storage)
             _cap_response_body(res)
             await self._record_history(url, budget, solution=res)
             if not future.done():
@@ -278,7 +285,13 @@ class HybridSolverEngine:
                 self._inflight.pop(inflight_key, None)
 
     async def _do_process_request(
-        self, req: V1Request, budget: RequestBudget, url: str, method: str, bypass_cookie_cache: bool = False
+        self,
+        req: V1Request,
+        budget: RequestBudget,
+        url: str,
+        method: str,
+        bypass_cookie_cache: bool = False,
+        browser_storage: Optional[Dict[str, Dict[str, Dict[str, str]]]] = None,
     ) -> SolutionModel:
         proxy_url = req.get_proxy_url()
 
@@ -419,7 +432,7 @@ class HybridSolverEngine:
                 screenshot_selector=req.screenshot_selector,
                 extract_records=req.extract_records,
                 follow_meta_refresh=req.follows_meta_refresh(),
-                browser_storage=req._browser_storage,
+                browser_storage=browser_storage,
                 capture_storage=bool(req.session),
             )
             
@@ -468,7 +481,7 @@ class HybridSolverEngine:
                         screenshot_selector=req.screenshot_selector,
                         extract_records=req.extract_records,
                         follow_meta_refresh=req.follows_meta_refresh(),
-                        browser_storage=req._browser_storage,
+                        browser_storage=browser_storage,
                         capture_storage=bool(req.session),
                     )
                     elapsed_ms = budget.elapsed_ms

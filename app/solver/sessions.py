@@ -317,19 +317,19 @@ class SessionManager:
 session_manager = SessionManager()
 
 
-async def apply_session(req: V1Request) -> None:
-    """Load a request's FlareSolverr session into it: cookies, the session's proxy (unless the
-    request names one) and its browser storage for the browser tiers."""
+async def apply_session(req: V1Request) -> Optional[Dict[str, Any]]:
+    """Load a request's FlareSolverr session into it (cookies, and the session's proxy unless the
+    request names one). Returns the session's browser storage, for process_request(browser_storage=)."""
     if not req.session:
-        return
+        return None
     sess = await session_manager.get_session_async(req.session)
     if not sess:
-        return
+        return None
     if sess.cookies:
         req.cookies = (req.cookies or []) + sess.cookies
     if sess.proxy and not req.proxy:
         req.proxy = {"url": sess.proxy}
-    req._browser_storage = sess.storage_payload()
+    return sess.storage_payload()
 
 
 async def persist_session(req: V1Request, solution: SolutionModel) -> None:
