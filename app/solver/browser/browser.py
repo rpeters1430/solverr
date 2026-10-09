@@ -28,9 +28,9 @@ from app.solver.browser.challenges import (
     has_age_gate_marker,
     is_browser_error,
 )
-from app.solver.browser.captcha import CAPTCHA_SOLVER_WIDGETS, try_captcha_solver_escalation
+from app.solver.browser.captcha import CAPTCHA_SOLVER_WIDGETS, try_captcha_solver_escalation, try_datadome_slider_solver
 from app.solver.browser.cookies import build_playwright_cookies, read_context_cookies, extract_captured_cookies
-from app.solver.browser.content import decode_text_body, is_non_html_text
+from app.solver.browser.content import decode_browser_body, is_non_html_text
 from app.solver.browser.navigation import follow_meta_refresh as follow_meta_refresh_in_page, install_media_blocking, navigate_to_target
 from app.solver.browser.interactions import (
     AKAMAI_HOLD_SECONDS,
@@ -73,6 +73,8 @@ WIDGET_SOLVE_WINDOW_SECONDS = 15.0
 # How long a wall may stay up after its sensor cookie is issued before the target is reloaded by
 # hand. Providers normally redirect within 2-3s; some never do.
 SENSOR_REDIRECT_GRACE_SECONDS = 5.0
+# The paid DataDome slider solve needs at least this much of the attempt left to be worth starting.
+DATADOME_SOLVER_MIN_SECONDS = 15.0
 # After that reload, a wall still up this long is the site refusing the cookie it just issued.
 POST_RENAVIGATE_GRACE_SECONDS = 10.0
 
@@ -605,6 +607,7 @@ class BrowserPool:
                 timeout_ms=timeout_ms,
                 deadline=deadline,
                 active_ua=active_ua,
+                proxy_url=pw_proxy["server"] if pw_proxy else None,
                 headers=headers,
                 start_time=start_time,
                 wait_selector=wait_selector,
@@ -637,6 +640,7 @@ class BrowserPool:
         follow_meta_refresh: bool = False,
         browser_storage: Optional[Dict[str, Any]] = None,
         capture_storage: bool = False,
+        proxy_url: Optional[str] = None,
     ) -> SolutionModel:
         # Navigation and the challenge loop share one deadline; the loop used to get a fresh full
         # timeout_ms after navigation, overrunning the tier's wait_for and starving the ephemeral retry.
@@ -728,6 +732,7 @@ class BrowserPool:
         sensor_earned_at: Optional[float] = None
         renavigated_at: Optional[float] = None
         akamai_held = False
+        datadome_solver_tried = False
         cleared = False
 
         while time.monotonic() < loop_deadline:
@@ -787,6 +792,19 @@ class BrowserPool:
                     # Two readings, so a page caught mid-transition isn't written off.
                     unsolvable_passes += 1
                     if unsolvable_passes >= 2:
+                        solver_window = loop_deadline - time.monotonic() - 5.0
+                        if (
+                            active_challenge == "datadome" and not datadome_solver_tried and captcha_solver.enabled
+                            and proxy_url and solver_window >= DATADOME_SOLVER_MIN_SECONDS
+                        ):
+                            # Tier 3.5 for the slider: only through a proxy, which the service must share.
+                            datadome_solver_tried = True
+                            if await try_datadome_slider_solver(page, context, url, active_ua, proxy_url, solver_window):
+                                await navigate_to_target(
+                                    page, url, method, post_data, max(1000, int((deadline - time.monotonic()) * 1000))
+                                )
+                                unsolvable_passes = 0
+                                continue
                         raise ChallengeNotSolvedError(active_challenge, UNSOLVABLE_CAPTCHA_REASON)
                 else:
                     unsolvable_passes = 0
@@ -998,7 +1016,7 @@ class BrowserPool:
         if main_resp is not None and is_non_html_text(main_content_type):
             try:
                 raw = await asyncio.wait_for(main_resp.body(), timeout=5.0)
-                html_content = decode_text_body(raw, main_content_type)
+                html_content = decode_browser_body(raw, main_content_type)
                 response_headers = {"content-type": main_content_type}
             except Exception as e:
                 logger.debug(f"[BrowserPool] Raw body read notice: {e}")

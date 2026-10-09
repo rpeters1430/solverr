@@ -125,6 +125,16 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(kwargs["capture_storage"])
         self.assertEqual(kwargs["browser_storage"], {"local": {"https://example.com": {"k": "v"}}})
 
+    async def test_plain_429_from_tier1_is_returned_when_escalation_is_off(self):
+        limited = SolutionModel(url="https://example.com", status=429, response="slow down", headers={"Retry-After": "30"})
+        with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(False, limited))), \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock()) as browser_mock, \
+             patch.object(settings, "ESCALATE_HTTP_429", False):
+            sol = await self.engine.process_request(V1Request(cmd="request.get", url="https://example.com"))
+        self.assertEqual(sol.status, 429)
+        self.assertEqual(sol.tier, "tier1_fast_tls")
+        browser_mock.assert_not_called()
+
     async def test_browser_failure_without_fallback_proxy_raises(self):
         with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \
              patch("app.solver.engine.browser_pool.solve", new=AsyncMock(side_effect=RuntimeError("boom"))), \

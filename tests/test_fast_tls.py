@@ -434,5 +434,38 @@ class TestFastTLSSessionPool(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.get.await_count, MAX_REFRESH_HOPS + 1)
 
 
+    async def test_plain_429_is_returned_when_escalation_is_off(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.config import settings
+        resp = MagicMock(status_code=429, text="Too many requests", cookies={},
+                         headers={"content-type": "text/html", "retry-after": "60"})
+        resp.url = "https://example.com/api"
+        for escalate, expected in ((True, True), (False, False)):
+            session = self._refresh_session(resp)
+            with patch("app.solver.fast_tls.AsyncSession", return_value=session), \
+                 patch("app.solver.fast_tls.check_target_url_async", new=AsyncMock()), \
+                 patch.object(settings, "ESCALATE_HTTP_429", escalate):
+                engine = FastTLSEngine()
+                engine._pool_enabled = False
+                challenged, solution = await engine.request("https://example.com/api")
+            self.assertEqual(challenged, expected)
+            self.assertEqual(solution.status, 429)
+
+    async def test_429_challenge_page_still_escalates_when_escalation_is_off(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.config import settings
+        resp = MagicMock(status_code=429, text="<html><title>Just a moment...</title></html>", cookies={},
+                         headers={"content-type": "text/html"})
+        resp.url = "https://example.com/"
+        session = self._refresh_session(resp)
+        with patch("app.solver.fast_tls.AsyncSession", return_value=session), \
+             patch("app.solver.fast_tls.check_target_url_async", new=AsyncMock()), \
+             patch.object(settings, "ESCALATE_HTTP_429", False):
+            engine = FastTLSEngine()
+            engine._pool_enabled = False
+            challenged, _ = await engine.request("https://example.com/")
+        self.assertTrue(challenged)
+
+
 if __name__ == "__main__":
     unittest.main()

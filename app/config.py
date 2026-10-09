@@ -211,6 +211,8 @@ class Settings:
     # Paid 2Captcha-compatible fallback for image challenges clicks can't clear. Off without a key.
     CAPTCHA_SOLVER_API_KEY: Optional[str] = os.getenv("CAPTCHA_SOLVER_API_KEY", None)
     CAPTCHA_SOLVER_BASE_URL: str = os.getenv("CAPTCHA_SOLVER_BASE_URL", "https://2captcha.com")
+    # 2Captcha API v2 (createTask), used for task types the legacy in.php protocol lacks (DataDome slider).
+    CAPTCHA_SOLVER_API_V2_URL: str = os.getenv("CAPTCHA_SOLVER_API_V2_URL", "https://api.2captcha.com")
     CAPTCHA_SOLVER_TIMEOUT: int = int(os.getenv("CAPTCHA_SOLVER_TIMEOUT", "120"))
     CAPTCHA_SOLVER_POLL_INTERVAL: int = int(os.getenv("CAPTCHA_SOLVER_POLL_INTERVAL", "5"))
 
@@ -219,6 +221,10 @@ class Settings:
     FAST_TLS_POOL_SIZE: int = int(os.getenv("FAST_TLS_POOL_SIZE", "50"))
     # Bounds the per-domain TLS profile score dict, which otherwise grows forever.
     MAX_FAST_TLS_DOMAIN_SCORES: int = int(os.getenv("MAX_FAST_TLS_DOMAIN_SCORES", "2000"))
+
+    # A 429 with no challenge markers is usually plain rate limiting, which a browser from the same IP
+    # only meets again. false returns it to the caller as-is (with Retry-After) instead of escalating.
+    ESCALATE_HTTP_429: bool = os.getenv("ESCALATE_HTTP_429", "true").lower() in ("true", "1", "yes")
 
     # Default for requests that don't set followMetaRefresh: follow short-delay
     # <meta http-equiv="refresh"> redirects (at most 3 hops, delay <= 10s).

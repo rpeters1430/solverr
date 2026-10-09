@@ -288,6 +288,10 @@ async def transparent_proxy(
             status_code=status_code,
             media_type=media_type
         )
+        # Lets the caller (Prowlarr, Jackett...) honour the site's own back-off.
+        retry_after = next((v for k, v in solution.headers.items() if k.lower() == "retry-after"), None)
+        if retry_after and status_code in (429, 503):
+            response.headers["Retry-After"] = retry_after
         if solution.cookies:
             for c in solution.cookies:
                 clean_dom = c.domain.lstrip(".") if c.domain else None

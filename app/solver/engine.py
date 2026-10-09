@@ -337,6 +337,7 @@ class HybridSolverEngine:
             is_valid_http_response = (
                 solution.status < 400
                 or solution.status in (400, 401, 404, 405, 410, 422)
+                or (solution.status == 429 and not settings.ESCALATE_HTTP_429)
             ) if solution else False
             if not is_cf_challenge and solution and is_valid_http_response:
                 elapsed_ms = budget.elapsed_ms

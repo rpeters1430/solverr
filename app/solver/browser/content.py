@@ -34,3 +34,14 @@ def decode_text_body(body: bytes, content_type: Optional[str]) -> str:
     except LookupError:
         charset = "utf-8"
     return body.decode(charset or "utf-8", errors="replace")
+
+
+def decode_browser_body(body: bytes, content_type: Optional[str]) -> str:
+    """Decode a Playwright response body. Chromium hands back documents already transcoded to
+    UTF-8 while Firefox can hand back the bytes as served, so valid UTF-8 is taken as such and
+    anything else is read with the declared charset. Legacy-charset text with non-ASCII bytes is
+    almost never valid UTF-8, so the two cases don't collide in practice."""
+    try:
+        return body.decode("utf-8")
+    except UnicodeDecodeError:
+        return decode_text_body(body, content_type)

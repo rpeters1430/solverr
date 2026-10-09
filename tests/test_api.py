@@ -226,6 +226,16 @@ class TestAPIEndpoints(unittest.TestCase):
             self.assertEqual(called_req.session, "sess123")
             self.assertEqual(called_req.proxy, "http://user:pass@proxy.com:8080")
 
+    def test_proxy_passes_retry_after_through_on_429(self):
+        from unittest.mock import patch, AsyncMock
+        from app.models.flaresolverr import SolutionModel
+        fake_sol = SolutionModel(url="https://example.com/api", status=429,
+                                 headers={"content-type": "text/plain", "Retry-After": "120"}, response="slow down")
+        with patch("app.api.flaresolverr.solver_engine.process_request", new=AsyncMock(return_value=fake_sol)):
+            res = self.client.get("/proxy?url=https://example.com/api")
+        self.assertEqual(res.status_code, 429)
+        self.assertEqual(res.headers["retry-after"], "120")
+
     def test_proxy_ssrf_returns_400(self):
         res = self.client.get("/proxy?url=file:///etc/passwd")
         self.assertEqual(res.status_code, 400)

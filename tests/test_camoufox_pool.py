@@ -599,6 +599,96 @@ class TestSolveFlowAnubis(unittest.IsolatedAsyncioTestCase):
         self.assertLess(elapsed, 2.0)
 
 
+class TestSolveFlowDataDomeSolver(unittest.IsolatedAsyncioTestCase):
+    WALL = "<html><script>var dd={'rt':'c','cid':'x','host':'geo.captcha-delivery.com'}</script></html>"
+
+    async def _run(self, page, proxy_url, solver_result):
+        from unittest.mock import AsyncMock
+        pool = BrowserPool()
+        navigations = []
+
+        async def nav(*args, **kwargs):
+            navigations.append(1)
+            return None, 403
+
+        solver = AsyncMock(return_value=solver_result)
+        start = time.monotonic()
+        with patch.object(browser_module, "navigate_to_target", side_effect=nav), \
+             patch.object(browser_module, "install_media_blocking", return_value=None), \
+             patch.object(browser_module, "dispatch_challenge_click", return_value=(False, False)), \
+             patch.object(browser_module, "try_datadome_slider_solver", solver), \
+             patch.object(browser_module.captcha_solver, "api_key", "key"), \
+             patch.multiple(browser_module, SOLVE_FINALIZE_RESERVE_SECONDS=0.2, DATADOME_SOLVER_MIN_SECONDS=0.5):
+            try:
+                result = await pool._execute_solve_flow(
+                    context=_NoCookieContext(), page=page, url=page.url, method="GET", post_data=None, cookies=None,
+                    timeout_ms=8000, active_ua="ua", headers=None, start_time=start, deadline=start + 8.0,
+                    proxy_url=proxy_url,
+                )
+            except ChallengeNotSolvedError as e:
+                result = e
+        return result, solver, navigations
+
+    async def test_slider_is_sent_to_the_paid_solver_through_the_proxy(self):
+        wall = self.WALL
+
+        class Page(_StaticPage):
+            solved = False
+
+            async def content(self):
+                return REAL_HTML if Page.solved else wall
+
+        async def solve(*args, **kwargs):
+            Page.solved = True
+            return True
+
+        page = Page()
+        page.page_title = "example.com"
+        result, solver, navigations = await self._run_with(page, solve)
+        self.assertEqual(result.status, 200)
+        self.assertEqual(len(navigations), 2)  # initial load + reload after the cookie
+
+    async def _run_with(self, page, side_effect):
+        from unittest.mock import AsyncMock
+        pool = BrowserPool()
+        navigations = []
+
+        async def nav(*args, **kwargs):
+            navigations.append(1)
+            return None, 200
+
+        solver = AsyncMock(side_effect=side_effect)
+        start = time.monotonic()
+        with patch.object(browser_module, "navigate_to_target", side_effect=nav), \
+             patch.object(browser_module, "install_media_blocking", return_value=None), \
+             patch.object(browser_module, "dispatch_challenge_click", return_value=(False, False)), \
+             patch.object(browser_module, "try_datadome_slider_solver", solver), \
+             patch.object(browser_module.captcha_solver, "api_key", "key"), \
+             patch.multiple(browser_module, SOLVE_FINALIZE_RESERVE_SECONDS=0.2, DATADOME_SOLVER_MIN_SECONDS=0.5):
+            result = await pool._execute_solve_flow(
+                context=_NoCookieContext(), page=page, url=page.url, method="GET", post_data=None, cookies=None,
+                timeout_ms=8000, active_ua="ua", headers=None, start_time=start, deadline=start + 8.0,
+                proxy_url="http://u:p@proxy.test:8080",
+            )
+        return result, solver, navigations
+
+    async def test_without_a_proxy_the_slider_fails_fast_as_before(self):
+        page = _StaticPage()
+        page.page_title = "example.com"
+        page.html = self.WALL
+        err, solver, _ = await self._run(page, None, True)
+        self.assertIsInstance(err, ChallengeNotSolvedError)
+        solver.assert_not_awaited()
+
+    async def test_failed_paid_solve_fails_the_attempt(self):
+        page = _StaticPage()
+        page.page_title = "example.com"
+        page.html = self.WALL
+        err, solver, _ = await self._run(page, "http://proxy.test:8080", False)
+        self.assertIsInstance(err, ChallengeNotSolvedError)
+        solver.assert_awaited_once()
+
+
 CF_WALL_HTML = '<html><h2 id="challenge-running">Checking</h2><script>window._cf_chl_opt={}</script></html>'
 REAL_HTML = "<html>" + REAL_BODY + "</html>"
 

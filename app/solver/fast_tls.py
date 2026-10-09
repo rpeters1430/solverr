@@ -382,6 +382,9 @@ class FastTLSEngine:
                 elif is_challenge_title(page_title):
                     is_cf_challenge = True
                     matched_marker = "challenge_title"
+                elif resp.status_code == 429 and not settings.ESCALATE_HTTP_429:
+                    # Plain rate limiting; the caller should back off, not get a browser solve.
+                    is_cf_challenge = False
                 elif resp.status_code in [403, 429, 503]:
                     is_cf_challenge = True
                     matched_marker = f"http_{resp.status_code}"

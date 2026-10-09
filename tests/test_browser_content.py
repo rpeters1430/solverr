@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from app.solver.browser import BrowserPool
 from app.solver.browser import browser as browser_module
-from app.solver.browser.content import decode_text_body, is_html_content_type, is_non_html_text, is_text_content_type
+from app.solver.browser.content import decode_browser_body, decode_text_body, is_html_content_type, is_non_html_text, is_text_content_type
 
 
 class TestContentTypeHelpers(unittest.TestCase):
@@ -24,6 +24,11 @@ class TestContentTypeHelpers(unittest.TestCase):
         self.assertEqual(decode_text_body("café".encode("latin-1"), "text/plain; charset=ISO-8859-1"), "café")
         self.assertEqual(decode_text_body("café".encode("latin-1"), 'text/plain; charset="iso-8859-1"'), "café")
         self.assertEqual(decode_text_body("café".encode(), "application/json"), "café")
+
+    def test_browser_body_handles_raw_and_transcoded_bytes(self):
+        ct = "application/rss+xml; charset=iso-8859-1"
+        self.assertEqual(decode_browser_body("Café".encode("latin-1"), ct), "Café")  # as served (Firefox)
+        self.assertEqual(decode_browser_body("Café".encode("utf-8"), ct), "Café")  # transcoded (Chromium)
 
     def test_unknown_charset_falls_back_to_utf8(self):
         self.assertEqual(decode_text_body("ok ✓".encode(), "text/plain; charset=made-up"), "ok ✓")
