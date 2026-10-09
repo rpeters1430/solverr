@@ -17,6 +17,7 @@ from app.models.flaresolverr import ScrapeRequest
 from app.solver.browser import ChallengeNotSolvedError, browser_pool
 from app.solver.cache import cookie_cache
 from app.solver.engine import metrics, solver_engine
+from app.solver.sessions import apply_session, persist_session
 
 logger = logging.getLogger("solverr.mcp")
 
@@ -44,6 +45,8 @@ async def solverr_scrape(
     extract_rules: Optional[Dict[str, str]] = None,
     extract_records: Optional[Dict[str, Any]] = None,
     max_timeout_ms: int = 60000,
+    follow_meta_refresh: Optional[bool] = None,
+    session: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Fetch a URL through Solverr's tiered solver, automatically clearing any
     Cloudflare/CAPTCHA/WAF challenge in the way, and return its content.
@@ -59,6 +62,10 @@ async def solverr_scrape(
     extract_rules: optional {name: rule} map for pulling fields out of the
     returned HTML - rule is a CSS selector (text), "selector@attr" (an
     attribute), "selector[]" (a list of matches), or "regex:pattern".
+    follow_meta_refresh: follow short-delay <meta http-equiv="refresh">
+    redirects (defaults to the server's FOLLOW_META_REFRESH setting).
+    session: a FlareSolverr session id (sessions.create on /v1) whose cookies,
+    proxy and browser storage this request should use and update.
     """
     if method.upper() not in ("GET", "POST"):
         raise ToolError(f"Unsupported method '{method}' - only GET and POST are supported.")
@@ -72,8 +79,12 @@ async def solverr_scrape(
             wait_selector=wait_selector,
             extract_records=extract_records,
             maxTimeout=max_timeout_ms,
+            followMetaRefresh=follow_meta_refresh,
+            session=session,
         ).to_v1_request()
-        solution = await solver_engine.process_request(req)
+        storage = await apply_session(req)
+        solution = await solver_engine.process_request(req, browser_storage=storage)
+        await persist_session(req, solution)
     except Exception as e:
         # Exception text can carry proxy credentials, so details go to the log only.
         logger.error(f"[MCP] solverr_scrape failed for {url}: {type(e).__name__}: {e}", exc_info=True)

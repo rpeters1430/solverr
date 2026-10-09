@@ -13,8 +13,8 @@ class FakeCamoufoxPool(CamoufoxPool):
     cheap fakes, so pool bookkeeping (acquire/release/recycle/capacity) can
     be tested without spawning a real browser process."""
 
-    def __init__(self, size):
-        super().__init__(size)
+    def __init__(self, size, memory_usage=lambda: None):
+        super().__init__(size, memory_usage=memory_usage)
         self.launch_count = 0
         self.close_count = 0
 
@@ -87,6 +87,134 @@ class TestCamoufoxPool(unittest.IsolatedAsyncioTestCase):
         await pool.close()
         self.assertEqual(pool.close_count, 2)
         self.assertEqual(pool._created, 0)
+
+
+class _DeadBrowser:
+    def is_connected(self):
+        return False
+
+
+class TestCamoufoxPoolResilience(unittest.IsolatedAsyncioTestCase):
+    async def test_dead_idle_browser_is_never_handed_out(self):
+        with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 100), \
+             patch.object(settings, "CAMOUFOX_POOL_RECYCLE_SECONDS", 100000):
+            pool = FakeCamoufoxPool(1)
+            inst = await pool.acquire()
+            await pool.release(inst)
+            inst.browser = _DeadBrowser()  # Firefox crashed while idle
+            fresh = await pool.acquire()
+            self.assertIsNot(fresh, inst)
+            self.assertEqual(pool.launch_count, 2)
+            self.assertEqual(pool.close_count, 1)
+            self.assertEqual(pool.dead_reclaimed_total, 1)
+            self.assertEqual(pool._created, 1)
+
+    async def test_dead_browser_returned_by_a_peer_is_replaced_for_the_waiter(self):
+        pool = FakeCamoufoxPool(1)
+        inst = await pool.acquire()
+        waiter = asyncio.create_task(pool.acquire(wait_timeout=2))
+        await asyncio.sleep(0.01)
+        inst.browser = _DeadBrowser()
+        with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 100), \
+             patch.object(settings, "CAMOUFOX_POOL_RECYCLE_SECONDS", 100000):
+            await pool.release(inst)
+            got = await waiter
+        self.assertIsNot(got, inst)
+        self.assertEqual(pool._created, 1)
+
+    async def test_memory_pressure_retires_on_release_without_warm_replacement(self):
+        gib = 1024 ** 3
+        with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 100), \
+             patch.object(settings, "CAMOUFOX_POOL_RECYCLE_SECONDS", 100000), \
+             patch.object(settings, "CAMOUFOX_MEMORY_RECYCLE_PERCENT", 85), \
+             patch.object(settings, "CAMOUFOX_MIN_REPLACE_HEADROOM_MB", 512):
+            pool = FakeCamoufoxPool(2, memory_usage=lambda: (int(1.9 * gib), 2 * gib))
+            inst = await pool.acquire()
+            await pool.release(inst)
+            self.assertEqual(pool.memory_recycles_total, 1)
+            self.assertEqual(pool.close_count, 1)
+            self.assertEqual(pool.launch_count, 1)  # no warm replacement at 100MB headroom
+            self.assertEqual(pool._created, 0)
+            await pool.acquire()  # relaunched on demand
+            self.assertEqual(pool.launch_count, 2)
+
+    async def test_waiter_launches_into_a_slot_freed_without_replacement(self):
+        gib = 1024 ** 3
+        with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 100), \
+             patch.object(settings, "CAMOUFOX_POOL_RECYCLE_SECONDS", 100000), \
+             patch.object(settings, "CAMOUFOX_MEMORY_RECYCLE_PERCENT", 85):
+            pool = FakeCamoufoxPool(1, memory_usage=lambda: (int(1.9 * gib), 2 * gib))
+            inst = await pool.acquire()
+            waiter = asyncio.create_task(pool.acquire(wait_timeout=5))
+            await asyncio.sleep(0.01)
+            started = time.monotonic()
+            await pool.release(inst)  # retired, no warm replacement
+            got = await asyncio.wait_for(waiter, timeout=1)
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertIsNot(got, inst)
+        self.assertEqual(pool._created, 1)
+        self.assertEqual(pool.idle_count, 0)
+
+    async def test_unclaimed_freed_slot_is_not_reported_idle(self):
+        gib = 1024 ** 3
+        with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 100), \
+             patch.object(settings, "CAMOUFOX_MEMORY_RECYCLE_PERCENT", 85):
+            pool = FakeCamoufoxPool(1, memory_usage=lambda: (int(1.9 * gib), 2 * gib))
+            await pool.release(await pool.acquire())
+            self.assertEqual(pool.idle_count, 0)
+            await pool.maintain()  # keeps the wake-up token
+            await pool.acquire()
+            self.assertEqual(pool.launch_count, 2)
+            self.assertEqual(pool.idle_count, 0)
+
+    async def test_recycle_with_headroom_relaunches_warm(self):
+        gib = 1024 ** 3
+        with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 1), \
+             patch.object(settings, "CAMOUFOX_MEMORY_RECYCLE_PERCENT", 85):
+            pool = FakeCamoufoxPool(1, memory_usage=lambda: (1 * gib, 8 * gib))
+            inst = await pool.acquire()
+            await pool.release(inst)
+            self.assertEqual(pool.memory_recycles_total, 0)
+            self.assertEqual(pool.launch_count, 2)
+            self.assertEqual(pool._idle.qsize(), 1)
+
+    async def test_memory_reader_failure_is_ignored(self):
+        def broken():
+            raise OSError("no cgroup")
+        with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 100), \
+             patch.object(settings, "CAMOUFOX_POOL_RECYCLE_SECONDS", 100000):
+            pool = FakeCamoufoxPool(1, memory_usage=broken)
+            inst = await pool.acquire()
+            await pool.release(inst)
+            self.assertEqual(pool._idle.qsize(), 1)
+
+    async def test_maintain_retires_idle_and_reclaims_dead(self):
+        with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 100), \
+             patch.object(settings, "CAMOUFOX_POOL_RECYCLE_SECONDS", 100000), \
+             patch.object(settings, "CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS", 60):
+            pool = FakeCamoufoxPool(3)
+            a, b, c = await pool.acquire(), await pool.acquire(), await pool.acquire()
+            for inst in (a, b, c):
+                await pool.release(inst)
+            a.last_used_at = time.monotonic() - 120  # idle past the timeout
+            b.browser = _DeadBrowser()
+            await pool.maintain()
+            self.assertEqual(pool.idle_retired_total, 1)
+            self.assertEqual(pool.dead_reclaimed_total, 1)
+            self.assertEqual(pool._created, 1)
+            self.assertEqual(pool._idle.qsize(), 1)
+            self.assertIs(await pool.acquire(), c)
+
+    async def test_maintain_keeps_idle_instances_when_timeout_disabled(self):
+        with patch.object(settings, "CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS", 0):
+            pool = FakeCamoufoxPool(1)
+            inst = await pool.acquire()
+            with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 100):
+                await pool.release(inst)
+            inst.last_used_at = time.monotonic() - 10 ** 6
+            await pool.maintain()
+            self.assertEqual(pool._idle.qsize(), 1)
+            self.assertEqual(pool.idle_retired_total, 0)
 
 
 class FakePage:
@@ -167,6 +295,17 @@ class TestEphemeralCamoufoxGeoip(unittest.IsolatedAsyncioTestCase):
     async def test_geoip_disabled_without_proxy(self):
         await self._solve(pw_proxy=None)
         self.assertFalse(FakeAsyncCamoufoxCtx.captured_kwargs[-1]["geoip"])
+
+    async def test_user_prefs_are_passed_with_proxy_safety_enforced(self):
+        prefs = {"network.dns.blockDotOnion": False, "network.proxy.failover_direct": True, "test.int": 7}
+        with patch.object(settings, "USER_PREFS", prefs):
+            await self._solve(pw_proxy={"server": "http://proxy.example.com:8080"})
+        passed = FakeAsyncCamoufoxCtx.captured_kwargs[-1]["firefox_user_prefs"]
+        self.assertEqual(passed["network.dns.blockDotOnion"], False)
+        self.assertEqual(passed["test.int"], 7)
+        self.assertIs(passed["network.proxy.failover_direct"], False)
+        self.assertIs(passed["network.proxy.socks_remote_dns"], True)
+        self.assertIsNot(passed, prefs)
 
     async def test_geoip_respects_config_toggle(self):
         with patch.object(settings, "CAMOUFOX_GEOIP_ON_PROXY", False):
@@ -424,6 +563,181 @@ class TestSolveFlowWallVersusRealPage(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(err, ChallengeNotSolvedError)
         self.assertTrue(err.ip_blocked)
         self.assertLess(elapsed, 2.0)
+
+
+class TestSolveFlowAnubis(unittest.IsolatedAsyncioTestCase):
+    _run = TestSolveFlowWallVersusRealPage._run
+
+    async def test_anubis_reject_page_fails_at_once(self):
+        from tests.test_challenge_detection import ANUBIS_REJECT_PAGE
+        page = _StaticPage()
+        page.page_title = "Oh noes!"
+        page.html = ANUBIS_REJECT_PAGE
+        err, elapsed = await self._run(page, timeout_s=10.0)
+        self.assertIsInstance(err, ChallengeNotSolvedError)
+        self.assertEqual(err.challenge, "anubis")
+        self.assertFalse(err.ip_blocked)
+        self.assertLess(elapsed, 2.0)
+
+    async def test_anubis_wall_that_never_clears_is_not_returned_as_solved(self):
+        from tests.test_challenge_detection import ANUBIS_CHALLENGE_PAGE
+        page = _StaticPage()
+        page.page_title = "Making sure you're not a bot!"
+        page.html = ANUBIS_CHALLENGE_PAGE
+        err, _ = await self._run(page, timeout_s=1.5)
+        self.assertIsInstance(err, ChallengeNotSolvedError)
+        self.assertEqual(err.challenge, "anubis")
+
+    async def test_anubis_wall_clears_once_its_proof_of_work_redirects(self):
+        from tests.test_challenge_detection import ANUBIS_CHALLENGE_PAGE
+
+        class SolvingPage(_StaticPage):
+            reads = 0
+
+            async def content(self):
+                SolvingPage.reads += 1
+                return ANUBIS_CHALLENGE_PAGE if SolvingPage.reads <= 2 else REAL_HTML
+
+        page = SolvingPage()
+        sol, _ = await self._run(page, timeout_s=6.0)
+        self.assertEqual(sol.status, 200)
+        self.assertEqual(sol.challengeType, "anubis")
+
+    async def test_cap_widget_is_solved_by_its_own_proof_of_work(self):
+        from unittest.mock import AsyncMock
+        page = _StaticPage()
+        page.page_title = "Contact us"
+        page.html = '<html><form><cap-widget data-cap-api-endpoint="/cap/"></cap-widget></form>' + REAL_BODY + "</html>"
+        start = AsyncMock(return_value=True)
+        solved = AsyncMock(side_effect=[False, True, True, True])
+        sol, elapsed = await self._run(page, timeout_s=6.0, start_cap_solve=start, cap_widgets_solved=solved)
+        self.assertEqual(sol.challengeType, "cap")
+        start.assert_awaited()
+        self.assertLess(elapsed, 5.0)
+
+    async def test_meta_refresh_onto_a_wall_is_not_returned_as_solved(self):
+        page = _StaticPage()
+        page.html = REAL_HTML
+
+        async def refresh_to_wall(p, deadline):
+            p.url = "https://example.com/next"
+            p.page_title = "Just a moment..."
+            p.html = CF_WALL_HTML
+
+        pool = BrowserPool()
+        start = time.monotonic()
+        with patch.object(browser_module, "navigate_to_target", return_value=(None, 200)), \
+             patch.object(browser_module, "install_media_blocking", return_value=None), \
+             patch.object(browser_module, "follow_meta_refresh_in_page", side_effect=refresh_to_wall), \
+             patch.multiple(browser_module, SOLVE_FINALIZE_RESERVE_SECONDS=0.2):
+            with self.assertRaises(ChallengeNotSolvedError):
+                await pool._execute_solve_flow(
+                    context=_NoCookieContext(), page=page, url=page.url, method="GET", post_data=None, cookies=None,
+                    timeout_ms=5000, active_ua="ua", headers=None, start_time=start, deadline=start + 5.0,
+                    follow_meta_refresh=True,
+                )
+
+    async def test_google_sorry_page_is_an_ip_block_without_a_paid_solver(self):
+        page = _StaticPage()
+        page.url = "https://www.google.com/sorry/index?continue=x"
+        page.page_title = "https://www.google.com/search?q=x"
+        page.html = '<html><div id="recaptcha" class="g-recaptcha" data-sitekey="k"></div></html>'
+        with patch.object(browser_module.captcha_solver, "api_key", None):
+            err, elapsed = await self._run(page, status=429, timeout_s=10.0)
+        self.assertIsInstance(err, ChallengeNotSolvedError)
+        self.assertEqual(err.challenge, "google")
+        self.assertTrue(err.ip_blocked)
+        self.assertLess(elapsed, 2.0)
+
+
+class TestSolveFlowDataDomeSolver(unittest.IsolatedAsyncioTestCase):
+    WALL = "<html><script>var dd={'rt':'c','cid':'x','host':'geo.captcha-delivery.com'}</script></html>"
+
+    async def _run(self, page, proxy_url, solver_result):
+        from unittest.mock import AsyncMock
+        pool = BrowserPool()
+        navigations = []
+
+        async def nav(*args, **kwargs):
+            navigations.append(1)
+            return None, 403
+
+        solver = AsyncMock(return_value=solver_result)
+        start = time.monotonic()
+        with patch.object(browser_module, "navigate_to_target", side_effect=nav), \
+             patch.object(browser_module, "install_media_blocking", return_value=None), \
+             patch.object(browser_module, "dispatch_challenge_click", return_value=(False, False)), \
+             patch.object(browser_module, "try_datadome_slider_solver", solver), \
+             patch.object(browser_module.captcha_solver, "api_key", "key"), \
+             patch.multiple(browser_module, SOLVE_FINALIZE_RESERVE_SECONDS=0.2, DATADOME_SOLVER_MIN_SECONDS=0.5):
+            try:
+                result = await pool._execute_solve_flow(
+                    context=_NoCookieContext(), page=page, url=page.url, method="GET", post_data=None, cookies=None,
+                    timeout_ms=8000, active_ua="ua", headers=None, start_time=start, deadline=start + 8.0,
+                    proxy_url=proxy_url,
+                )
+            except ChallengeNotSolvedError as e:
+                result = e
+        return result, solver, navigations
+
+    async def test_slider_is_sent_to_the_paid_solver_through_the_proxy(self):
+        wall = self.WALL
+
+        class Page(_StaticPage):
+            solved = False
+
+            async def content(self):
+                return REAL_HTML if Page.solved else wall
+
+        async def solve(*args, **kwargs):
+            Page.solved = True
+            return True
+
+        page = Page()
+        page.page_title = "example.com"
+        result, solver, navigations = await self._run_with(page, solve)
+        self.assertEqual(result.status, 200)
+        self.assertEqual(len(navigations), 2)  # initial load + reload after the cookie
+
+    async def _run_with(self, page, side_effect):
+        from unittest.mock import AsyncMock
+        pool = BrowserPool()
+        navigations = []
+
+        async def nav(*args, **kwargs):
+            navigations.append(1)
+            return None, 200
+
+        solver = AsyncMock(side_effect=side_effect)
+        start = time.monotonic()
+        with patch.object(browser_module, "navigate_to_target", side_effect=nav), \
+             patch.object(browser_module, "install_media_blocking", return_value=None), \
+             patch.object(browser_module, "dispatch_challenge_click", return_value=(False, False)), \
+             patch.object(browser_module, "try_datadome_slider_solver", solver), \
+             patch.object(browser_module.captcha_solver, "api_key", "key"), \
+             patch.multiple(browser_module, SOLVE_FINALIZE_RESERVE_SECONDS=0.2, DATADOME_SOLVER_MIN_SECONDS=0.5):
+            result = await pool._execute_solve_flow(
+                context=_NoCookieContext(), page=page, url=page.url, method="GET", post_data=None, cookies=None,
+                timeout_ms=8000, active_ua="ua", headers=None, start_time=start, deadline=start + 8.0,
+                proxy_url="http://u:p@proxy.test:8080",
+            )
+        return result, solver, navigations
+
+    async def test_without_a_proxy_the_slider_fails_fast_as_before(self):
+        page = _StaticPage()
+        page.page_title = "example.com"
+        page.html = self.WALL
+        err, solver, _ = await self._run(page, None, True)
+        self.assertIsInstance(err, ChallengeNotSolvedError)
+        solver.assert_not_awaited()
+
+    async def test_failed_paid_solve_fails_the_attempt(self):
+        page = _StaticPage()
+        page.page_title = "example.com"
+        page.html = self.WALL
+        err, solver, _ = await self._run(page, "http://proxy.test:8080", False)
+        self.assertIsInstance(err, ChallengeNotSolvedError)
+        solver.assert_awaited_once()
 
 
 CF_WALL_HTML = '<html><h2 id="challenge-running">Checking</h2><script>window._cf_chl_opt={}</script></html>'

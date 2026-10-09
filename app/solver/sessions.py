@@ -3,8 +3,8 @@ import json
 import uuid
 import time
 import logging
-from typing import Dict, List, Optional
-from app.models.flaresolverr import CookieModel
+from typing import Any, Dict, List, Optional
+from app.models.flaresolverr import CookieModel, SolutionModel, V1Request
 from app.config import settings
 from app.logging_config import sanitize_proxy_url
 
@@ -15,6 +15,17 @@ REDIS_KEY_PREFIX = "solverr:session:"
 # Same reconnect cooldown as CookieCache.
 REDIS_RECONNECT_INTERVAL_SECONDS = 30.0
 
+def _clean_storage(raw: Any) -> Dict[str, Dict[str, str]]:
+    """Keep only {origin: {key: value}} string maps from an untrusted or older snapshot."""
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(origin): {str(k): str(v) for k, v in items.items()}
+        for origin, items in raw.items()
+        if isinstance(items, dict)
+    }
+
+
 class Session:
     def __init__(self, session_id: str, proxy: Optional[str] = None, ttl: int = 7200):
         self.session_id: str = session_id
@@ -23,6 +34,10 @@ class Session:
         self.last_accessed: float = time.time()
         self.ttl: int = ttl
         self.cookies: List[CookieModel] = []
+        # Per-origin {key: value} snapshots from the browser tiers, so a session keeps the site's
+        # localStorage/sessionStorage across requests (and replicas, via Redis) like a real browser.
+        self.local_storage: Dict[str, Dict[str, str]] = {}
+        self.session_storage: Dict[str, Dict[str, str]] = {}
 
     def touch(self):
         self.last_accessed = time.time()
@@ -40,6 +55,33 @@ class Session:
             c for c in self.cookies if _cookie_key(c) not in existing_keys
         ] + new_cookies
 
+    def update_storage(self, storage: Optional[Dict[str, Any]]) -> bool:
+        """Merge a browser snapshot ({"local": {origin: {k: v}}, "session": {...}}); each origin it
+        names is replaced whole, since the snapshot is that origin's full state. Returns False (and
+        keeps the old state) when the result would exceed SESSION_STORAGE_MAX_KB."""
+        if not storage:
+            return True
+        # An origin snapshotted as {} was emptied by the site, so it drops out instead of being restored.
+        local = {o: v for o, v in {**self.local_storage, **_clean_storage(storage.get("local"))}.items() if v}
+        session = {o: v for o, v in {**self.session_storage, **_clean_storage(storage.get("session"))}.items() if v}
+        size = len(json.dumps([local, session]))
+        limit = settings.SESSION_STORAGE_MAX_KB * 1024
+        if limit > 0 and size > limit:
+            logger.warning(
+                f"[SessionManager] Session '{self.session_id}' browser storage ({size // 1024}KB) exceeds "
+                f"SESSION_STORAGE_MAX_KB={settings.SESSION_STORAGE_MAX_KB}; keeping the previous snapshot"
+            )
+            return False
+        self.local_storage = local
+        self.session_storage = session
+        self.touch()
+        return True
+
+    def storage_payload(self) -> Optional[Dict[str, Dict[str, Dict[str, str]]]]:
+        if not self.local_storage and not self.session_storage:
+            return None
+        return {"local": self.local_storage, "session": self.session_storage}
+
     def to_dict(self) -> dict:
         return {
             "session_id": self.session_id,
@@ -47,7 +89,9 @@ class Session:
             "created_at": self.created_at,
             "last_accessed": self.last_accessed,
             "ttl": self.ttl,
-            "cookies": [c.model_dump() for c in self.cookies]
+            "cookies": [c.model_dump() for c in self.cookies],
+            "local_storage": self.local_storage,
+            "session_storage": self.session_storage,
         }
 
     @classmethod
@@ -56,6 +100,8 @@ class Session:
         sess.created_at = data.get("created_at", time.time())
         sess.last_accessed = data.get("last_accessed", time.time())
         sess.cookies = [CookieModel(**c) for c in data.get("cookies", [])]
+        sess.local_storage = _clean_storage(data.get("local_storage"))
+        sess.session_storage = _clean_storage(data.get("session_storage"))
         return sess
 
 class SessionManager:
@@ -192,6 +238,14 @@ class SessionManager:
         self._persist(sess)
         return sess
 
+    def update_session_storage(self, session_id: str, storage: Optional[Dict[str, Any]]) -> Optional[Session]:
+        sess = self.get_session(session_id)
+        if not sess:
+            return None
+        if sess.update_storage(storage):
+            self._persist(sess)
+        return sess
+
     def _delete(self, session_id: str):
         self._sessions.pop(session_id, None)
         redis_client = self._redis()
@@ -240,6 +294,10 @@ class SessionManager:
         async with self._async_lock:
             return await asyncio.to_thread(self.update_session_cookies, session_id, cookies)
 
+    async def update_session_storage_async(self, session_id: str, storage: Optional[Dict[str, Any]]) -> Optional[Session]:
+        async with self._async_lock:
+            return await asyncio.to_thread(self.update_session_storage, session_id, storage)
+
     async def create_session_async(self, session_id: Optional[str] = None, proxy: Optional[str] = None, ttl: int = 7200) -> str:
         async with self._async_lock:
             return await asyncio.to_thread(self.create_session, session_id, proxy, ttl)
@@ -258,3 +316,28 @@ class SessionManager:
 
 
 session_manager = SessionManager()
+
+
+async def apply_session(req: V1Request) -> Optional[Dict[str, Any]]:
+    """Load a request's FlareSolverr session into it (cookies, and the session's proxy unless the
+    request names one). Returns the session's browser storage, for process_request(browser_storage=)."""
+    if not req.session:
+        return None
+    sess = await session_manager.get_session_async(req.session)
+    if not sess:
+        return None
+    if sess.cookies:
+        req.cookies = (req.cookies or []) + sess.cookies
+    if sess.proxy and not req.proxy:
+        req.proxy = {"url": sess.proxy}
+    return sess.storage_payload()
+
+
+async def persist_session(req: V1Request, solution: SolutionModel) -> None:
+    """Save what a solve learned back into the request's session."""
+    if not req.session:
+        return
+    if solution.cookies:
+        await session_manager.update_session_cookies_async(req.session, solution.cookies)
+    if solution.storage:
+        await session_manager.update_session_storage_async(req.session, solution.storage)

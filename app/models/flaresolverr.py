@@ -74,6 +74,12 @@ class V1Request(BaseModel):
     wait_selector: Optional[str] = None
     wait_delay_ms: Optional[int] = None
     skip_cache: Optional[bool] = False
+    # None falls back to FOLLOW_META_REFRESH.
+    followMetaRefresh: Optional[bool] = None
+
+    def follows_meta_refresh(self) -> bool:
+        from app.config import settings
+        return settings.FOLLOW_META_REFRESH if self.followMetaRefresh is None else bool(self.followMetaRefresh)
 
     def get_proxy_url(self) -> Optional[str]:
         if not self.proxy:
@@ -120,6 +126,8 @@ class SolutionModel(BaseModel):
     extracted: Optional[Dict[str, Any]] = None
     challengeType: Optional[str] = None
     tier: Optional[str] = None
+    # Browser localStorage/sessionStorage snapshot for the request's session; never sent to clients.
+    storage: Optional[Dict[str, Any]] = Field(default=None, exclude=True)
 
 class V1Response(BaseModel):
     status: str = "ok"  # "ok" or "error"
@@ -157,6 +165,7 @@ class ScrapeRequest(BaseModel):
     maxTimeout: Optional[int] = 60000
     userAgent: Optional[str] = None
     skip_cache: Optional[bool] = False
+    followMetaRefresh: Optional[bool] = None
 
     def to_v1_request(self) -> V1Request:
         force_browser = (self.tier in ["tier3_browser", "tier4_proxy", "browser"])
@@ -179,7 +188,8 @@ class ScrapeRequest(BaseModel):
             extract_records=self.extract_records,
             wait_selector=self.wait_selector,
             wait_delay_ms=self.wait_delay_ms,
-            skip_cache=self.skip_cache
+            skip_cache=self.skip_cache,
+            followMetaRefresh=self.followMetaRefresh,
         )
 
 class ScrapeResponse(BaseModel):

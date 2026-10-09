@@ -37,6 +37,20 @@ async def periodic_session_cleanup():
         except Exception as e:
             logger.warning(f"Error in session cleanup task: {e}")
 
+# Short enough that a browser that died while idle is reclaimed before most solves would meet it.
+POOL_MAINTENANCE_INTERVAL_SECONDS = 30
+
+
+async def periodic_pool_maintenance():
+    while True:
+        try:
+            await asyncio.sleep(POOL_MAINTENANCE_INTERVAL_SECONDS)
+            await browser_pool.maintain()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning(f"Error in browser pool maintenance task: {e}")
+
 # Built at import so session_manager exists; the lifespan enters its run() because mounting doesn't.
 mcp_asgi_app = None
 if settings.ENABLE_MCP:
@@ -49,6 +63,7 @@ async def lifespan(app: FastAPI):
         logger.info(f"Initializing Solverr Engine v{settings.DISPLAY_VERSION}...")
         logger.info(f"Configuration | Host: {settings.HOST}:{settings.PORT} | Log Level: {settings.LOG_LEVEL.upper()} | Workers: {settings.MAX_BROWSER_WORKERS} | Fast TLS: {settings.ENABLE_FAST_TLS}")
         cleanup_task = asyncio.create_task(periodic_session_cleanup())
+        maintenance_task = asyncio.create_task(periodic_pool_maintenance())
         if CAMOUFOX_AVAILABLE:
             logger.info("Camoufox stealth engine ready; the warm browser pool launches lazily on first solve.")
         else:
@@ -59,6 +74,7 @@ async def lifespan(app: FastAPI):
         yield
         logger.info("Shutting down Solverr Engine...")
         cleanup_task.cancel()
+        maintenance_task.cancel()
         await browser_pool.close()
         await fast_tls_engine.close()
 

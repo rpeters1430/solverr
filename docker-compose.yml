@@ -33,6 +33,9 @@ services:
       # - REDIS_URL=redis://redis:6379/0  # Shared cookie cache for horizontal scaling (see profile below)
       # - API_KEY=change-me                # Optional API key authentication for all endpoints
       # - CAPTCHA_SOLVER_API_KEY=          # Optional 2Captcha/CapSolver key for paid image challenge escalation
+      # - CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS=900  # Optional: close warm browsers unused this long to free RAM
+      # - FOLLOW_META_REFRESH=true         # Optional: follow short-delay <meta http-equiv="refresh"> redirects
+      # - 'USER_PREFS={"network.dns.blockDotOnion": false}'  # Optional extra Firefox prefs (JSON)
     volumes:
       - ./data:/app/data
     healthcheck:

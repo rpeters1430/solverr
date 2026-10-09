@@ -97,5 +97,87 @@ class TestCaptchaSolverClient(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(client.enabled)
 
 
+class TestCaptchaSolverTaskOptions(unittest.IsolatedAsyncioTestCase):
+    async def _submitted(self, call):
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/in.php":
+                from urllib.parse import parse_qs
+                seen.update({k: v[0] for k, v in parse_qs(request.content.decode()).items()})
+                return httpx.Response(200, json={"status": 1, "request": "t"})
+            return httpx.Response(200, json={"status": 1, "request": "TOKEN"})
+
+        client = make_client()
+        with mocked_http(handler):
+            self.assertEqual(await call(client), "TOKEN")
+        return seen
+
+    async def test_recaptcha_enterprise_invisible_and_data_s(self):
+        seen = await self._submitted(lambda c: c.solve_recaptcha_v2(
+            "k", "https://e.test", enterprise=True, invisible=True, data_s="S"))
+        self.assertEqual((seen["enterprise"], seen["invisible"], seen["data-s"]), ("1", "1", "S"))
+
+    async def test_plain_recaptcha_sends_no_extra_fields(self):
+        seen = await self._submitted(lambda c: c.solve_recaptcha_v2("k", "https://e.test"))
+        self.assertNotIn("enterprise", seen)
+        self.assertNotIn("data-s", seen)
+
+    async def test_turnstile_action_and_cdata(self):
+        seen = await self._submitted(lambda c: c.solve_turnstile("k", "https://e.test", action="login", cdata="xyz"))
+        self.assertEqual((seen["action"], seen["data"]), ("login", "xyz"))
+
+
+class TestDataDomeSliderTask(unittest.IsolatedAsyncioTestCase):
+    async def test_creates_v2_task_through_the_proxy_and_returns_cookie(self):
+        import json
+        bodies = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            bodies.append((request.url.path, body))
+            if request.url.path == "/createTask":
+                return httpx.Response(200, json={"errorId": 0, "taskId": 7})
+            return httpx.Response(200, json={"errorId": 0, "status": "ready",
+                                             "solution": {"cookie": "datadome=abc; Domain=.e.test; Path=/; Secure"}})
+
+        client = make_client()
+        client.api_v2_url = "https://fake-v2.test"
+        with mocked_http(handler):
+            cookie = await client.solve_datadome_slider(
+                "https://geo.captcha-delivery.com/captcha/?initialCid=x", "https://e.test/", "UA",
+                "http://user:p%40ss@proxy.test:3128")
+        self.assertEqual(cookie, "datadome=abc; Domain=.e.test; Path=/; Secure")
+        task = bodies[0][1]["task"]
+        self.assertEqual(task["type"], "DataDomeSliderTask")
+        self.assertEqual((task["proxyType"], task["proxyAddress"], task["proxyPort"]), ("http", "proxy.test", 3128))
+        self.assertEqual((task["proxyLogin"], task["proxyPassword"]), ("user", "p@ss"))
+
+    async def test_no_proxy_means_no_task(self):
+        client = make_client()
+
+        def handler(request):
+            raise AssertionError("must not call the service")
+
+        with mocked_http(handler):
+            self.assertIsNone(await client.solve_datadome_slider("u", "https://e.test/", "UA", ""))
+
+    async def test_task_error_returns_none(self):
+        def handler(request):
+            return httpx.Response(200, json={"errorId": 1, "errorCode": "ERROR_PROXY_CONNECTION_FAILED"})
+
+        client = make_client()
+        with mocked_http(handler):
+            self.assertIsNone(await client.solve_datadome_slider("u", "https://e.test/", "UA", "http://p.test:8080"))
+
+    def test_proxy_task_fields(self):
+        from app.solver.captcha_solver import proxy_task_fields
+        self.assertEqual(proxy_task_fields("socks5://h.test:1080"),
+                         {"proxyType": "socks5", "proxyAddress": "h.test", "proxyPort": 1080})
+        self.assertIsNone(proxy_task_fields("http://h.test"))  # no port
+        self.assertIsNone(proxy_task_fields("ftp://h.test:21"))
+        self.assertIsNone(proxy_task_fields(None))
+
+
 if __name__ == "__main__":
     unittest.main()

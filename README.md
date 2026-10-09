@@ -12,9 +12,9 @@
   - **Tier 1 (Fast TLS)**: Level 1 & 2 JA3 / TLS Impersonation (`curl_cffi`) with **Adaptive Domain Scoring** solves requests in **30ms – 120ms** without browser overhead.
   - **Tier 2 (Clearance Cache)**: Instant `cf_clearance` & domain cookie jar reuse (**< 50ms**) with granular per-cookie TTL expiration and Netscape export.
   - **Tier 3 (Stealth Browser)**: Warm Camoufox (Stealth Firefox) pool with per-page isolated Bézier human mouse curves and **Deep Shadow DOM traversal**, escalating to a fresh Camoufox instance (new fingerprint) if the pooled attempt fails.
-  - **Tier 3.5 (Paid Captcha Escalation)**: Optional 2Captcha-protocol escalation for interactive image puzzles (`CAPTCHA_SOLVER_API_KEY`).
+  - **Tier 3.5 (Paid Captcha Escalation)**: Optional 2Captcha-protocol escalation for interactive image puzzles (`CAPTCHA_SOLVER_API_KEY`): reCAPTCHA v2 (incl. Enterprise and invisible), hCaptcha, Turnstile (with the widget's action/cData), and DataDome's slider when the request goes through a proxy.
   - **Tier 4 (Fallback Proxy)**: Automatic residential / fallback proxy escalation for rate-limited indexers.
-- **🛡️ Multi-WAF & CAPTCHA Solver Suite**: Automated solving for **Cloudflare Turnstile**, **Cloudflare 5s Interstitial**, **Google reCAPTCHA v2 / Enterprise**, **hCaptcha**, **GeeTest**, **Imperva / Incapsula**, **DataDome**, **Akamai**, and **AWS WAF**.
+- **🛡️ Multi-WAF & CAPTCHA Solver Suite**: Automated solving for **Cloudflare Turnstile**, **Cloudflare 5s Interstitial**, **Google reCAPTCHA v2 / Enterprise**, **hCaptcha**, **GeeTest**, **Imperva / Incapsula**, **DataDome**, **Akamai**, **AWS WAF**, and the **Anubis** and **Cap** proof-of-work challenges. Google's `/sorry/` rate-limit page is treated as an IP block and sent straight to Tier 4.
 - **🌐 Deep Shadow DOM & Web Component Traversal**: In-page recursive DOM walker locates Turnstile and CAPTCHA checkboxes nested inside `#shadow-root` nodes across custom web components.
 - **📈 Adaptive TLS Profile Learning**: Fast TLS automatically learns which browser TLS fingerprints (`firefox147`, `firefox144`, `firefox133`, `chrome150`, etc.) succeed per domain, penalizing failing fingerprints and picking optimal JA3 profiles.
 - **🖱️ Isolated Humanized Bézier Curve Movement**: Emulates organic human mouse trajectories with micro-jitters, variable velocities, and natural pauses — fully isolated per page using weakref cursor tracking for multi-worker concurrency.
@@ -184,6 +184,13 @@ Every request Solverr handles is a self-contained request/response - there's no 
 
 If a challenge wall is still up when the request's `maxTimeout` runs out, the response is `"status": "error"` with the reason in `message` (for example `Error solving the challenge: cloudflare_turnstile challenge not solved: still present after 38s`), never the challenge page returned as a solution. A captcha widget embedded in an otherwise real page (a login form's reCAPTCHA, say) is not a wall: Solverr tries it for up to 15 seconds and then returns the page.
 
+JSON, XML/RSS and plain-text documents come back as the server's own body with its real `content-type`, also when the browser tier had to fetch them (not wrapped in Firefox's viewer markup).
+
+Solverr extensions accepted on `request.get`/`request.post` (and `/scrape`):
+- `followMetaRefresh` (bool): follow short-delay `<meta http-equiv="refresh">` redirects (delay up to 10s, at most 3 hops, each hop SSRF-checked). Defaults to `FOLLOW_META_REFRESH`.
+
+Sessions (`sessions.create`, then `session` on later requests, including `/scrape`, `/proxy` and MCP) keep cookies **and** the site's `localStorage`/`sessionStorage` from browser-tier solves, so a site that keeps its state in web storage behaves like a returning browser. With `REDIS_URL` set, both survive restarts and are shared across replicas.
+
 ### 2. Native Scrape API (`POST /scrape`)
 ```json
 {
@@ -260,6 +267,10 @@ On by default; set `ENABLE_MCP=false` to disable.
 | `CAMOUFOX_POOL_ENABLED` | `true` | Reuse warm Camoufox processes across no-proxy solves instead of spawning one per request |
 | `CAMOUFOX_POOL_RECYCLE_USES` | `40` | Recycle a pooled browser instance after this many solves |
 | `CAMOUFOX_POOL_RECYCLE_SECONDS` | `1800` | Recycle a pooled browser instance after this many seconds, whichever comes first |
+| `CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS` | `0` | Close warm browsers left unused this long (`0` keeps them until recycled); the pool relaunches on the next solve. Frees RAM on a NAS between bursts |
+| `CAMOUFOX_MEMORY_RECYCLE_PERCENT` | `85` | Under a container memory limit, retire a pooled browser on release once the cgroup working set passes this share of the limit (`0` disables) |
+| `CAMOUFOX_MIN_REPLACE_HEADROOM_MB` | `512` | Below this much free container memory, a retired browser is not replaced warm; the next solve launches one instead |
+| `USER_PREFS` | (empty) | Extra Firefox prefs for every Camoufox launch as a JSON object, e.g. `{"network.dns.blockDotOnion": false}`. Values must be strings, booleans or 32-bit integers; invalid JSON fails startup. `network.proxy.failover_direct=false` and `network.proxy.socks_remote_dns=true` are always enforced |
 | `CAMOUFOX_GEOIP_ON_PROXY` | `true` | When a request carries its own proxy (or Tier 4 fallback-proxy escalation fires), derive Camoufox's timezone/locale/geolocation/WebRTC-visible IP from that proxy's actual exit IP instead of the container's real location - avoids the classic "proxy IP in one country, browser fingerprint in another" mismatch. Costs one extra request through the proxy at launch time |
 | `REDIS_URL` | `None` | Optional Redis URL for distributed cookie cache & sessions - required when running multiple replicas, see [Horizontal Scaling](#-horizontal-scaling) |
 | `COOKIE_CACHE_TTL` | `7200` | Clearance cookie cache TTL in seconds |
@@ -269,6 +280,9 @@ On by default; set `ENABLE_MCP=false` to disable.
 | `MAX_CACHE_DOMAINS` | `1000` | Local (non-Redis) cookie cache: max distinct domains before the oldest is evicted |
 | `MAX_COOKIES_PER_DOMAIN` | `100` | Local (non-Redis) cookie cache: max cookies per domain before the oldest are evicted |
 | `MAX_SESSIONS` | `500` | Max in-memory sessions before the oldest (by last access) is evicted |
+| `SESSION_STORAGE_MAX_KB` | `512` | Cap on one session's saved `localStorage`/`sessionStorage`; a larger snapshot is not saved (`0` disables the cap) |
+| `FOLLOW_META_REFRESH` | `false` | Default for requests that don't set `followMetaRefresh` |
+| `ESCALATE_HTTP_429` | `true` | Send a 429 with no challenge markers to the browser tier. `false` returns plain rate limiting to the caller as-is, with `Retry-After` passed through on `/proxy`, so Prowlarr/Jackett can back off |
 | `FALLBACK_PROXY_URL` | `None` | Optional Tier 4 fallback proxy URL |
 | `API_KEY` | `None` | When set, requires a matching `X-Api-Key` header (header only - never a query param) on every endpoint except `/health`, and `/metrics` unless `METRICS_REQUIRE_AUTH=true` |
 | `METRICS_REQUIRE_AUTH` | `false` | Require `X-Api-Key` on `/metrics` too, instead of leaving it open for Prometheus scrapers |
@@ -280,6 +294,7 @@ On by default; set `ENABLE_MCP=false` to disable.
 | `MAX_SCREENSHOT_MB` | `8` | Drop a captured screenshot instead of returning it if it exceeds this size |
 | `CAPTCHA_SOLVER_API_KEY` | `None` | Optional 2Captcha-compatible API key for the Tier 3.5 paid-solver escalation on interactive image challenges |
 | `CAPTCHA_SOLVER_BASE_URL` | `https://2captcha.com` | API base URL - point at another provider's 2captcha-compatible endpoint (e.g. CapSolver) here |
+| `CAPTCHA_SOLVER_API_V2_URL` | `https://api.2captcha.com` | 2Captcha API v2 (`createTask`) base URL, used for the DataDome slider. That task only runs when the request has a proxy (its own or Tier 4's), since DataDome binds the cookie to the solving IP |
 | `ENABLE_MCP` | `true` | Mount the MCP (Model Context Protocol) server at `/mcp` for AI agents - see [MCP Server](#6-mcp-server-post-mcp) |
 | `MCP_ALLOWED_HOSTS` | (empty) | Comma-separated Host header values (`host:port` or `host:*`) `/mcp` accepts beyond `localhost`/`127.0.0.1`. Only consulted when `API_KEY` is unset |
 | `MCP_ALLOWED_ORIGINS` | (empty) | Comma-separated Origin header values `/mcp` accepts beyond `localhost`/`127.0.0.1`. Only consulted when `API_KEY` is unset |

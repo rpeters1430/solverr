@@ -1,14 +1,20 @@
+import asyncio
 import html
 import json
 import logging
+import time
 from typing import Any, Optional, Tuple
 from urllib.parse import parse_qsl
 
 from playwright.async_api import BrowserContext, Page
 
 from app.security import SSRFBlockedError, check_target_url_async
+from app.solver.meta_refresh import MAX_REFRESH_HOPS, meta_refresh_target
 
 logger = logging.getLogger("solverr.browser")
+
+# How long past a refresh's own delay to wait for Firefox to fire it before loading it by hand.
+META_REFRESH_FIRE_GRACE_SECONDS = 2.0
 
 
 async def install_media_blocking(context: BrowserContext) -> None:
@@ -101,3 +107,46 @@ async def navigate_to_target(
             initial_status = 0
 
     return response, initial_status
+
+
+async def follow_meta_refresh(page: Page, deadline: float) -> None:
+    """Follow short-delay meta refresh redirects, at most MAX_REFRESH_HOPS, within `deadline`.
+
+    Firefox fires a refresh by itself, so each hop first waits for that; only one that never fires
+    is loaded by hand. Navigation stays in this context, so cookies, proxy and the request route
+    (with its SSRF check) all still apply."""
+    visited = set()
+    for hop in range(1, MAX_REFRESH_HOPS + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.5:
+            return
+        current = page.url
+        try:
+            html = await asyncio.wait_for(page.content(), timeout=min(2.0, remaining))
+        except Exception:
+            return
+        refresh = meta_refresh_target(html, current)
+        if not refresh or refresh[1] in visited:
+            return
+        visited.add(current)
+        delay, target = refresh
+        try:
+            await check_target_url_async(target, label="Redirect target")
+        except SSRFBlockedError as exc:
+            logger.warning(f"[BrowserPool] Not following meta refresh: {exc}")
+            return
+        logger.info(f"[BrowserPool] Following meta refresh (hop {hop}/{MAX_REFRESH_HOPS}) -> {target}")
+        wait_s = min(deadline - time.monotonic(), delay + META_REFRESH_FIRE_GRACE_SECONDS)
+        try:
+            await page.wait_for_url(lambda u: u != current, wait_until="domcontentloaded", timeout=max(1.0, wait_s) * 1000)
+        except Exception:
+            remaining_ms = int((deadline - time.monotonic()) * 1000)
+            if remaining_ms < 1000:
+                return
+            try:
+                await page.goto(target, wait_until="domcontentloaded", timeout=remaining_ms)
+            except Exception as nav_err:
+                logger.warning(f"[BrowserPool] Meta refresh navigation notice: {nav_err}")
+                return
+        if page.url == current:
+            return

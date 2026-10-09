@@ -1,6 +1,7 @@
 import os
+import json
 import math
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import psutil
 
 
@@ -17,6 +18,44 @@ def _cgroup_memory_limit_bytes() -> Optional[int]:
                     return n
         except (OSError, ValueError):
             continue
+    return None
+
+
+def _read_int(path: str) -> Optional[int]:
+    try:
+        with open(path) as f:
+            val = f.read().strip()
+        return None if val in ("", "max") else int(val)
+    except (OSError, ValueError):
+        return None
+
+
+def cgroup_memory_usage() -> Optional[Tuple[int, int]]:
+    """(working_set_bytes, limit_bytes) for this container, or None without a memory limit.
+
+    The working set leaves out inactive page cache, which the kernel reclaims before it OOM-kills,
+    the same way `docker stats` and the kubelet count it."""
+    limit = _cgroup_memory_limit_bytes()
+    if not limit:
+        return None
+    for usage_path, stat_path, inactive_key in (
+        ("/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.stat", "inactive_file"),
+        ("/sys/fs/cgroup/memory/memory.usage_in_bytes", "/sys/fs/cgroup/memory/memory.stat", "total_inactive_file"),
+    ):
+        usage = _read_int(usage_path)
+        if usage is None:
+            continue
+        inactive = 0
+        try:
+            with open(stat_path) as f:
+                for line in f:
+                    key, _, value = line.partition(" ")
+                    if key == inactive_key:
+                        inactive = int(value)
+                        break
+        except (OSError, ValueError):
+            pass
+        return max(0, usage - inactive), limit
     return None
 
 
@@ -40,6 +79,26 @@ def _cgroup_cpu_limit() -> Optional[float]:
     except (OSError, ValueError):
         pass
     return None
+
+
+def parse_user_prefs(value: Optional[str]) -> dict:
+    """USER_PREFS: a JSON object of extra Firefox prefs. A bad value fails startup rather than
+    silently launching browsers without the prefs the operator asked for."""
+    if not value or not value.strip():
+        return {}
+    try:
+        prefs = json.loads(value)
+    except ValueError as e:
+        raise ValueError("USER_PREFS must contain valid JSON") from e
+    if not isinstance(prefs, dict):
+        raise ValueError("USER_PREFS must be a JSON object of pref name to value")
+    for name, pref in prefs.items():
+        if isinstance(pref, (str, bool)):
+            continue
+        if isinstance(pref, int) and -2**31 <= pref < 2**31:
+            continue
+        raise ValueError(f"USER_PREFS['{name}'] must be a string, boolean or signed 32-bit integer")
+    return prefs
 
 
 class Settings:
@@ -101,6 +160,8 @@ class Settings:
     MAX_CACHE_DOMAINS: int = int(os.getenv("MAX_CACHE_DOMAINS", "1000"))
     MAX_COOKIES_PER_DOMAIN: int = int(os.getenv("MAX_COOKIES_PER_DOMAIN", "100"))
     MAX_SESSIONS: int = int(os.getenv("MAX_SESSIONS", "500"))
+    # Cap on one session's saved localStorage/sessionStorage (0 disables); it is stored in Redis per session.
+    SESSION_STORAGE_MAX_KB: int = int(os.getenv("SESSION_STORAGE_MAX_KB", "512"))
     
     # Target and UA must name the same Firefox version; a TLS/UA mismatch is a WAF signal.
     FAST_TLS_TARGET: str = os.getenv("FAST_TLS_TARGET", "firefox147")
@@ -116,6 +177,17 @@ class Settings:
     CAMOUFOX_POOL_ENABLED: bool = os.getenv("CAMOUFOX_POOL_ENABLED", "true").lower() in ("true", "1", "yes")
     CAMOUFOX_POOL_RECYCLE_USES: int = int(os.getenv("CAMOUFOX_POOL_RECYCLE_USES", "40"))
     CAMOUFOX_POOL_RECYCLE_SECONDS: int = int(os.getenv("CAMOUFOX_POOL_RECYCLE_SECONDS", "1800"))
+    # Close warm instances left unused this long (0 keeps them until recycled); the pool relaunches
+    # lazily on the next solve. Frees RAM on a NAS between bursts of indexer traffic.
+    CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS: int = int(os.getenv("CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS", "0"))
+    # Under a container memory limit: retire an instance on release once the working set passes this
+    # share of the limit (0 disables), and skip warm replacements below MIN_REPLACE_HEADROOM_MB.
+    CAMOUFOX_MEMORY_RECYCLE_PERCENT: float = float(os.getenv("CAMOUFOX_MEMORY_RECYCLE_PERCENT", "85"))
+    CAMOUFOX_MIN_REPLACE_HEADROOM_MB: int = int(os.getenv("CAMOUFOX_MIN_REPLACE_HEADROOM_MB", "512"))
+
+    # Extra Firefox prefs for every Camoufox launch, as JSON (e.g. {"network.dns.blockDotOnion": false}).
+    # The proxy fail-closed prefs in browser/pool.py always win.
+    USER_PREFS: dict = parse_user_prefs(os.getenv("USER_PREFS"))
 
     # Match timezone/locale/geolocation to the proxy's exit IP; costs one extra request per launch.
     CAMOUFOX_GEOIP_ON_PROXY: bool = os.getenv("CAMOUFOX_GEOIP_ON_PROXY", "true").lower() in ("true", "1", "yes")
@@ -139,6 +211,8 @@ class Settings:
     # Paid 2Captcha-compatible fallback for image challenges clicks can't clear. Off without a key.
     CAPTCHA_SOLVER_API_KEY: Optional[str] = os.getenv("CAPTCHA_SOLVER_API_KEY", None)
     CAPTCHA_SOLVER_BASE_URL: str = os.getenv("CAPTCHA_SOLVER_BASE_URL", "https://2captcha.com")
+    # 2Captcha API v2 (createTask), used for task types the legacy in.php protocol lacks (DataDome slider).
+    CAPTCHA_SOLVER_API_V2_URL: str = os.getenv("CAPTCHA_SOLVER_API_V2_URL", "https://api.2captcha.com")
     CAPTCHA_SOLVER_TIMEOUT: int = int(os.getenv("CAPTCHA_SOLVER_TIMEOUT", "120"))
     CAPTCHA_SOLVER_POLL_INTERVAL: int = int(os.getenv("CAPTCHA_SOLVER_POLL_INTERVAL", "5"))
 
@@ -147,6 +221,14 @@ class Settings:
     FAST_TLS_POOL_SIZE: int = int(os.getenv("FAST_TLS_POOL_SIZE", "50"))
     # Bounds the per-domain TLS profile score dict, which otherwise grows forever.
     MAX_FAST_TLS_DOMAIN_SCORES: int = int(os.getenv("MAX_FAST_TLS_DOMAIN_SCORES", "2000"))
+
+    # A 429 with no challenge markers is usually plain rate limiting, which a browser from the same IP
+    # only meets again. false returns it to the caller as-is (with Retry-After) instead of escalating.
+    ESCALATE_HTTP_429: bool = os.getenv("ESCALATE_HTTP_429", "true").lower() in ("true", "1", "yes")
+
+    # Default for requests that don't set followMetaRefresh: follow short-delay
+    # <meta http-equiv="refresh"> redirects (at most 3 hops, delay <= 10s).
+    FOLLOW_META_REFRESH: bool = os.getenv("FOLLOW_META_REFRESH", "false").lower() in ("true", "1", "yes")
 
     ENABLE_MCP: bool = os.getenv("ENABLE_MCP", "true").lower() in ("true", "1", "yes")
     # Without API_KEY, the Host/Origin check is MCP's only DNS-rebinding guard, so it defaults to localhost.

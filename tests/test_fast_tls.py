@@ -369,5 +369,103 @@ class TestFastTLSSessionPool(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mock_session.get.await_count, 1)
         mock_session.close.assert_awaited_once()
 
+    def _refresh_session(self, *responses):
+        from unittest.mock import AsyncMock
+        mock_session = AsyncMock()
+        mock_session.get = AsyncMock(side_effect=list(responses))
+        mock_session.close = AsyncMock()
+        return mock_session
+
+    def _html(self, url, body):
+        from unittest.mock import MagicMock
+        resp = MagicMock(status_code=200, text=body, headers={"content-type": "text/html"}, cookies={})
+        resp.url = url
+        return resp
+
+    async def test_meta_refresh_is_ignored_unless_opted_in(self):
+        from unittest.mock import AsyncMock, patch
+        page = self._html("https://example.com/a", '<meta http-equiv="refresh" content="0;url=/b">')
+        session = self._refresh_session(page)
+        with patch("app.solver.fast_tls.AsyncSession", return_value=session), \
+             patch("app.solver.fast_tls.check_target_url_async", new=AsyncMock()):
+            engine = FastTLSEngine()
+            engine._pool_enabled = False
+            _, solution = await engine.request("https://example.com/a")
+        self.assertEqual(solution.url, "https://example.com/a")
+        self.assertEqual(session.get.await_count, 1)
+
+    async def test_opted_in_meta_refresh_is_followed_and_checked(self):
+        from unittest.mock import AsyncMock, patch
+        first = self._html("https://example.com/a", '<meta http-equiv="refresh" content="0; URL=\'/b\'">')
+        final = self._html("https://example.com/b", "<html><title>B</title><body>landed</body></html>")
+        session = self._refresh_session(first, final)
+        check = AsyncMock()
+        with patch("app.solver.fast_tls.AsyncSession", return_value=session), \
+             patch("app.solver.fast_tls.check_target_url_async", new=check):
+            engine = FastTLSEngine()
+            engine._pool_enabled = False
+            challenged, solution = await engine.request("https://example.com/a", follow_meta_refresh=True)
+        self.assertFalse(challenged)
+        self.assertEqual(solution.url, "https://example.com/b")
+        self.assertIn("https://example.com/b", [c.args[0] for c in check.await_args_list])
+
+    async def test_meta_refresh_loop_and_hop_limit(self):
+        from unittest.mock import AsyncMock, patch
+        from app.solver.meta_refresh import MAX_REFRESH_HOPS
+        a = self._html("https://example.com/a", '<meta http-equiv="refresh" content="0;url=/b">')
+        b = self._html("https://example.com/b", '<meta http-equiv="refresh" content="0;url=/a">')
+        session = self._refresh_session(a, b)
+        with patch("app.solver.fast_tls.AsyncSession", return_value=session), \
+             patch("app.solver.fast_tls.check_target_url_async", new=AsyncMock()):
+            engine = FastTLSEngine()
+            engine._pool_enabled = False
+            _, solution = await engine.request("https://example.com/a", follow_meta_refresh=True)
+        self.assertEqual(solution.url, "https://example.com/b")
+        self.assertEqual(session.get.await_count, 2)
+
+        chain = [self._html(f"https://example.com/{i}", f'<meta http-equiv="refresh" content="0;url=/{i + 1}">')
+                 for i in range(MAX_REFRESH_HOPS + 2)]
+        session = self._refresh_session(*chain)
+        with patch("app.solver.fast_tls.AsyncSession", return_value=session), \
+             patch("app.solver.fast_tls.check_target_url_async", new=AsyncMock()):
+            engine = FastTLSEngine()
+            engine._pool_enabled = False
+            await engine.request("https://example.com/0", follow_meta_refresh=True)
+        self.assertEqual(session.get.await_count, MAX_REFRESH_HOPS + 1)
+
+
+    async def test_plain_429_is_returned_when_escalation_is_off(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.config import settings
+        resp = MagicMock(status_code=429, text="Too many requests", cookies={},
+                         headers={"content-type": "text/html", "retry-after": "60"})
+        resp.url = "https://example.com/api"
+        for escalate, expected in ((True, True), (False, False)):
+            session = self._refresh_session(resp)
+            with patch("app.solver.fast_tls.AsyncSession", return_value=session), \
+                 patch("app.solver.fast_tls.check_target_url_async", new=AsyncMock()), \
+                 patch.object(settings, "ESCALATE_HTTP_429", escalate):
+                engine = FastTLSEngine()
+                engine._pool_enabled = False
+                challenged, solution = await engine.request("https://example.com/api")
+            self.assertEqual(challenged, expected)
+            self.assertEqual(solution.status, 429)
+
+    async def test_429_challenge_page_still_escalates_when_escalation_is_off(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.config import settings
+        resp = MagicMock(status_code=429, text="<html><title>Just a moment...</title></html>", cookies={},
+                         headers={"content-type": "text/html"})
+        resp.url = "https://example.com/"
+        session = self._refresh_session(resp)
+        with patch("app.solver.fast_tls.AsyncSession", return_value=session), \
+             patch("app.solver.fast_tls.check_target_url_async", new=AsyncMock()), \
+             patch.object(settings, "ESCALATE_HTTP_429", False):
+            engine = FastTLSEngine()
+            engine._pool_enabled = False
+            challenged, _ = await engine.request("https://example.com/")
+        self.assertTrue(challenged)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 import logging
 import time
 from typing import Dict, List, Optional, Any
@@ -10,13 +11,16 @@ from app.models.flaresolverr import CookieModel, SolutionModel
 from app.solver.captcha_solver import captcha_solver
 from app.logging_config import sanitize_proxy_url
 
-from app.solver.browser.pool import CamoufoxPool, CAMOUFOX_AVAILABLE
+from app.solver.browser.pool import CamoufoxPool, CAMOUFOX_AVAILABLE, browser_is_connected, firefox_user_prefs
 from app.solver.browser.challenges import (
+    ANUBIS_REJECTED_REASON,
     IP_BLOCKED_REASON,
     UNSOLVABLE_CAPTCHA_REASON,
     WIDGET_CHALLENGES,
     ChallengeNotSolvedError,
+    anubis_state,
     detect_challenge,
+    is_anubis_verification_url,
     is_challenge_title,
     is_challenge_wall,
     ip_block_provider,
@@ -24,14 +28,17 @@ from app.solver.browser.challenges import (
     has_age_gate_marker,
     is_browser_error,
 )
-from app.solver.browser.captcha import CAPTCHA_SOLVER_WIDGETS, try_captcha_solver_escalation
+from app.solver.browser.captcha import CAPTCHA_SOLVER_WIDGETS, try_captcha_solver_escalation, try_datadome_slider_solver
 from app.solver.browser.cookies import build_playwright_cookies, read_context_cookies, extract_captured_cookies
-from app.solver.browser.navigation import install_media_blocking, navigate_to_target
+from app.solver.browser.content import decode_browser_body, is_non_html_text
+from app.solver.browser.navigation import follow_meta_refresh as follow_meta_refresh_in_page, install_media_blocking, navigate_to_target
 from app.solver.browser.interactions import (
     AKAMAI_HOLD_SECONDS,
     akamai_press_and_hold,
+    cap_widgets_solved,
     describe_challenge_frames,
     dispatch_challenge_click,
+    start_cap_solve,
     wander_mouse,
 )
 from app.solver.browser.clearance import BLOCK_PAGE_COOKIES, has_earned_sensor_cookie, host_of, sensor_snapshot
@@ -66,6 +73,8 @@ WIDGET_SOLVE_WINDOW_SECONDS = 15.0
 # How long a wall may stay up after its sensor cookie is issued before the target is reloaded by
 # hand. Providers normally redirect within 2-3s; some never do.
 SENSOR_REDIRECT_GRACE_SECONDS = 5.0
+# The paid DataDome slider solve needs at least this much of the attempt left to be worth starting.
+DATADOME_SOLVER_MIN_SECONDS = 15.0
 # After that reload, a wall still up this long is the site refusing the cookie it just issued.
 POST_RENAVIGATE_GRACE_SECONDS = 10.0
 
@@ -81,6 +90,97 @@ def _describe_solve_error(e: BaseException, tier_timeout: float, tier_label: str
         except Exception:
             return RuntimeError(msg)
     return e
+
+
+def _context_options(browser_storage: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """new_context() options; a session's saved localStorage is restored through storage_state,
+    which applies it once at context creation exactly as a returning browser would have it."""
+    opts: Dict[str, Any] = {"service_workers": "block"}
+    local = (browser_storage or {}).get("local") or {}
+    if local:
+        opts["storage_state"] = {
+            "cookies": [],
+            "origins": [
+                {"origin": origin, "localStorage": [{"name": k, "value": v} for k, v in items.items()]}
+                for origin, items in local.items()
+            ],
+        }
+    return opts
+
+
+# Restores a session's sessionStorage for an origin the first time a document of it loads in this
+# context; a page that already wrote its own (a redirect back to the origin) is left alone.
+_RESTORE_SESSION_STORAGE_JS = """(entries) => {
+    const values = entries[location.origin];
+    if (!values) return;
+    try {
+        if (sessionStorage.length) return;
+        for (const [key, value] of Object.entries(values)) sessionStorage.setItem(key, value);
+    } catch (e) {}
+}"""
+
+
+async def _capture_storage(context: Any, page: Page) -> Optional[Dict[str, Any]]:
+    """This context's localStorage per origin, plus the final page's sessionStorage.
+
+    The final page's origin is always reported, as {} when its store is empty, so a site that
+    cleared its storage (a logout) replaces the saved state instead of having it restored."""
+    local: Dict[str, Dict[str, str]] = {}
+    session: Dict[str, Dict[str, str]] = {}
+    try:
+        state = await asyncio.wait_for(context.storage_state(), timeout=3.0)
+        for origin in state.get("origins", []) or []:
+            items = {i["name"]: i["value"] for i in origin.get("localStorage", []) or []}
+            if items:
+                local[origin["origin"]] = items
+    except Exception as e:
+        logger.debug(f"[BrowserPool] localStorage capture notice: {e}")
+    try:
+        snap = await asyncio.wait_for(page.evaluate("""() => {
+            const read = (store) => {
+                const out = {};
+                for (let i = 0; i < store.length; i++) {
+                    const k = store.key(i);
+                    out[k] = store.getItem(k);
+                }
+                return out;
+            };
+            try {
+                return {origin: location.origin, local: read(localStorage), items: read(sessionStorage)};
+            } catch (e) { return null; }
+        }"""), timeout=2.0)
+        if isinstance(snap, dict) and str(snap.get("origin", "")).startswith("http"):
+            origin = snap["origin"]
+            session[origin] = snap.get("items") or {}
+            if isinstance(snap.get("local"), dict):
+                local[origin] = snap["local"]
+    except Exception as e:
+        logger.debug(f"[BrowserPool] sessionStorage capture notice: {e}")
+    if not local and not session:
+        return None
+    return {"local": local, "session": session}
+
+
+async def _safe_title(page: Page) -> str:
+    try:
+        return await page.title()
+    except Exception:
+        return ""
+
+
+def _header_value(headers: Dict[str, str], name: str) -> str:
+    for key, value in headers.items():
+        if key.lower() == name:
+            return value
+    return ""
+
+
+def _raise_if_ip_blocked(content: str, url: str) -> None:
+    blocked_by = ip_block_provider(content, url)
+    # Google's /sorry/ page is a reCAPTCHA; with a paid solver configured it is worth a try
+    # before giving the budget to another IP.
+    if blocked_by and not (blocked_by == "google" and captcha_solver.enabled):
+        raise ChallengeNotSolvedError(blocked_by, IP_BLOCKED_REASON, ip_blocked=True)
 
 
 def _is_solution_acceptable(sol: Optional[SolutionModel]) -> bool:
@@ -100,13 +200,7 @@ def _pooled_attempt_budget_ms(timeout_ms: int) -> int:
     return timeout_ms - reserve_ms
 
 
-def _browser_is_connected(browser: Any) -> bool:
-    """Playwright exposes is_connected(); keep compatibility with test doubles."""
-    try:
-        probe = getattr(browser, "is_connected", None)
-        return bool(probe()) if callable(probe) else True
-    except Exception:
-        return False
+_browser_is_connected = browser_is_connected
 
 
 def _is_browser_disconnected(exc: BaseException) -> bool:
@@ -172,10 +266,15 @@ class BrowserPool:
                 logger.warning(f"[CamoufoxPool] Shutdown notice: {e}")
         logger.info("Browser Pool stopped.")
 
+    async def maintain(self) -> None:
+        """Periodic upkeep: reclaim dead idle browsers and retire long-idle ones."""
+        if self.camoufox_pool:
+            await self.camoufox_pool.maintain()
+
     def pool_stats(self) -> Dict[str, Any]:
         cp = self.camoufox_pool
         created = cp._created if cp else 0
-        idle = cp._idle.qsize() if cp else 0
+        idle = cp.idle_count if cp else 0
         avg_wait = (self._queue_wait_total_s / self._queue_wait_count) if self._queue_wait_count else 0.0
         return {
             "pool_size": cp.size if cp else 0,
@@ -183,6 +282,9 @@ class BrowserPool:
             "busy": max(0, created - idle),
             "idle": idle,
             "recycles_total": cp.recycles_total if cp else 0,
+            "memory_recycles_total": cp.memory_recycles_total if cp else 0,
+            "dead_reclaimed_total": cp.dead_reclaimed_total if cp else 0,
+            "idle_retired_total": cp.idle_retired_total if cp else 0,
             "crashes_total": self._crashes_total,
             "avg_queue_wait_seconds": round(avg_wait, 3),
             "queue_wait_samples": self._queue_wait_count,
@@ -219,6 +321,7 @@ class BrowserPool:
             headless=settings.HEADLESS,
             os="linux",
             config={'forceScopeAccess': True},
+            firefox_user_prefs=firefox_user_prefs(),
             i_know_what_im_doing=True
         ) as browser_instance:
             context = await browser_instance.new_context(service_workers="block") if hasattr(browser_instance, "new_context") else browser_instance
@@ -252,6 +355,9 @@ class BrowserPool:
         screenshot_full_page: bool = False,
         screenshot_selector: Optional[str] = None,
         extract_records: Optional[Dict[str, Any]] = None,
+        follow_meta_refresh: bool = False,
+        browser_storage: Optional[Dict[str, Any]] = None,
+        capture_storage: bool = False,
     ) -> SolutionModel:
         wait_start = time.monotonic()
         self._queued_at.add(wait_start)
@@ -290,6 +396,8 @@ class BrowserPool:
                             wait_delay_ms=wait_delay_ms, capture_screenshot=capture_screenshot,
                             screenshot_full_page=screenshot_full_page, screenshot_selector=screenshot_selector,
                             extract_records=extract_records,
+                            follow_meta_refresh=follow_meta_refresh,
+                            browser_storage=browser_storage, capture_storage=capture_storage,
                         ),
                         timeout=tier_timeout
                     )
@@ -325,6 +433,8 @@ class BrowserPool:
                         start_time=start_time, wait_selector=wait_selector, wait_delay_ms=wait_delay_ms,
                         capture_screenshot=capture_screenshot, screenshot_full_page=screenshot_full_page,
                         screenshot_selector=screenshot_selector, extract_records=extract_records,
+                        follow_meta_refresh=follow_meta_refresh,
+                        browser_storage=browser_storage, capture_storage=capture_storage,
                     ),
                     timeout=tier_timeout
                 )
@@ -356,6 +466,9 @@ class BrowserPool:
         screenshot_full_page: bool = False,
         screenshot_selector: Optional[str] = None,
         extract_records: Optional[Dict[str, Any]] = None,
+        follow_meta_refresh: bool = False,
+        browser_storage: Optional[Dict[str, Any]] = None,
+        capture_storage: bool = False,
     ) -> SolutionModel:
         # Leave the ephemeral retry its minimum window (plus launch slack) out of the caller's budget.
         remaining_s = timeout_ms / 1000.0 - (time.monotonic() - start_time)
@@ -374,7 +487,7 @@ class BrowserPool:
         try:
             logger.info(f"[CamoufoxPool] Checked out warm instance (use #{inst.uses}) for {url}...")
             if hasattr(inst.browser, "new_context"):
-                context = await inst.browser.new_context(service_workers="block")
+                context = await inst.browser.new_context(**_context_options(browser_storage))
             elif inst.browser.contexts:
                 context = inst.browser.contexts[0]
             else:
@@ -399,6 +512,8 @@ class BrowserPool:
                 wait_delay_ms=wait_delay_ms,
                 capture_screenshot=capture_screenshot, screenshot_full_page=screenshot_full_page,
                 screenshot_selector=screenshot_selector, extract_records=extract_records,
+                follow_meta_refresh=follow_meta_refresh,
+                browser_storage=browser_storage, capture_storage=capture_storage,
             )
         except BaseException as exc:
             disconnected = _is_browser_disconnected(exc)
@@ -454,6 +569,9 @@ class BrowserPool:
         screenshot_full_page: bool = False,
         screenshot_selector: Optional[str] = None,
         extract_records: Optional[Dict[str, Any]] = None,
+        follow_meta_refresh: bool = False,
+        browser_storage: Optional[Dict[str, Any]] = None,
+        capture_storage: bool = False,
     ) -> SolutionModel:
         """Non-pooled launch for requests with their own proxy or user_agent, both fixed at launch."""
         # timeout_ms is what's left when this attempt starts, so its clock starts here (launch included).
@@ -468,10 +586,11 @@ class BrowserPool:
             disable_coop=True,
             os="linux",
             config={'forceScopeAccess': True},
+            firefox_user_prefs=firefox_user_prefs(),
             i_know_what_im_doing=True
         ) as browser_instance:
             if hasattr(browser_instance, "new_context"):
-                context_opts: Dict[str, Any] = {"service_workers": "block"}
+                context_opts: Dict[str, Any] = _context_options(browser_storage)
                 if user_agent:
                     context_opts["user_agent"] = user_agent
                 context = await browser_instance.new_context(**context_opts)
@@ -497,12 +616,15 @@ class BrowserPool:
                 timeout_ms=timeout_ms,
                 deadline=deadline,
                 active_ua=active_ua,
+                proxy_url=pw_proxy["server"] if pw_proxy else None,
                 headers=headers,
                 start_time=start_time,
                 wait_selector=wait_selector,
                 wait_delay_ms=wait_delay_ms,
                 capture_screenshot=capture_screenshot, screenshot_full_page=screenshot_full_page,
                 screenshot_selector=screenshot_selector, extract_records=extract_records,
+                follow_meta_refresh=follow_meta_refresh,
+                browser_storage=browser_storage, capture_storage=capture_storage,
             )
 
     async def _execute_solve_flow(
@@ -524,6 +646,10 @@ class BrowserPool:
         screenshot_selector: Optional[str] = None,
         extract_records: Optional[Dict[str, Any]] = None,
         deadline: Optional[float] = None,
+        follow_meta_refresh: bool = False,
+        browser_storage: Optional[Dict[str, Any]] = None,
+        capture_storage: bool = False,
+        proxy_url: Optional[str] = None,
     ) -> SolutionModel:
         # Navigation and the challenge loop share one deadline; the loop used to get a fresh full
         # timeout_ms after navigation, overrunning the tier's wait_for and starving the ephemeral retry.
@@ -539,6 +665,15 @@ class BrowserPool:
 
         await install_media_blocking(context)
 
+        saved_session_storage = (browser_storage or {}).get("session") or {}
+        if saved_session_storage:
+            try:
+                await context.add_init_script(
+                    script=f"({_RESTORE_SESSION_STORAGE_JS})({json.dumps(saved_session_storage)})"
+                )
+            except Exception as e:
+                logger.debug(f"[BrowserPool] sessionStorage restore notice: {e}")
+
         # Sensor cookies already in the context (cached ones replayed above) are not proof of a pass
         # during this solve: if a wall is up despite them, the site has stopped honouring them.
         target_host = host_of(url)
@@ -548,6 +683,9 @@ class BrowserPool:
         last_main_status: Dict[str, Optional[int]] = {"code": None}
         # Providers declare some walls only in response headers (cf-mitigated, x-amzn-waf-action, x-dd-b).
         last_main_headers: Dict[str, str] = {}
+        # Kept so a non-HTML document (JSON, XML, plain text) is returned as its own bytes rather
+        # than as the viewer page Firefox renders around it.
+        last_main_response: Dict[str, Any] = {}
 
         def _on_response(resp):
             try:
@@ -556,6 +694,7 @@ class BrowserPool:
                     last_main_status["code"] = resp.status
                     last_main_headers.clear()
                     last_main_headers.update(resp.headers)
+                    last_main_response["resp"] = resp
             except Exception:
                 pass
 
@@ -602,6 +741,7 @@ class BrowserPool:
         sensor_earned_at: Optional[float] = None
         renavigated_at: Optional[float] = None
         akamai_held = False
+        datadome_solver_tried = False
         cleared = False
 
         while time.monotonic() < loop_deadline:
@@ -628,9 +768,9 @@ class BrowserPool:
             content_lower = content.lower() if content else ""
 
             if check_content:
-                blocked_by = ip_block_provider(content, curr_url)
-                if blocked_by:
-                    raise ChallengeNotSolvedError(blocked_by, IP_BLOCKED_REASON, ip_blocked=True)
+                _raise_if_ip_blocked(content, curr_url)
+                if anubis_state(content) == "blocked":
+                    raise ChallengeNotSolvedError("anubis", ANUBIS_REJECTED_REASON)
 
             active_challenge = detect_challenge(
                 title, content, check_content, headers=last_main_headers, status=last_main_status["code"]
@@ -642,6 +782,9 @@ class BrowserPool:
                 if active_challenge and not active_wall and active_challenge not in WIDGET_CHALLENGES:
                     # A provider's telemetry script on the real page, not a challenge.
                     active_challenge = None
+            if not active_challenge and is_anubis_verification_url(curr_url):
+                # Between a solved proof-of-work and the redirect back to the page asked for.
+                active_challenge = "anubis"
             if active_challenge:
                 last_detected_challenge = active_challenge
             elif not check_content and last_detected_challenge:
@@ -658,6 +801,19 @@ class BrowserPool:
                     # Two readings, so a page caught mid-transition isn't written off.
                     unsolvable_passes += 1
                     if unsolvable_passes >= 2:
+                        solver_window = loop_deadline - time.monotonic() - 5.0
+                        if (
+                            active_challenge == "datadome" and not datadome_solver_tried and captcha_solver.enabled
+                            and proxy_url and solver_window >= DATADOME_SOLVER_MIN_SECONDS
+                        ):
+                            # Tier 3.5 for the slider: only through a proxy, which the service must share.
+                            datadome_solver_tried = True
+                            if await try_datadome_slider_solver(page, context, url, active_ua, proxy_url, solver_window):
+                                await navigate_to_target(
+                                    page, url, method, post_data, max(1000, int((deadline - time.monotonic()) * 1000))
+                                )
+                                unsolvable_passes = 0
+                                continue
                         raise ChallengeNotSolvedError(active_challenge, UNSOLVABLE_CAPTCHA_REASON)
                 else:
                     unsolvable_passes = 0
@@ -708,7 +864,10 @@ class BrowserPool:
                         except Exception:
                             pass
 
-                    if not challenge_cleared:
+                    if not challenge_cleared and active_challenge == "cap":
+                        challenge_cleared = await cap_widgets_solved(page)
+
+                    if not challenge_cleared and active_challenge != "cap":
                         try:
                             widget_solved = await page.evaluate("""() => {
                                 const ts = document.querySelector('[name="cf-turnstile-response"], input[name*="turnstile-response"]');
@@ -727,7 +886,10 @@ class BrowserPool:
             if challenge_cleared:
                 # Avoid returning a hollow mid-redirect snapshot.
                 page_ready = False
-                if title and title.strip():
+                if is_non_html_text(_header_value(last_main_headers, "content-type")):
+                    # A short JSON or text answer has no title and a tiny body; it is complete as served.
+                    page_ready = True
+                elif title and title.strip():
                     try:
                         page_ready = await page.evaluate("""() => {
                             return (document.body && document.body.innerHTML.trim().length > 100) || document.readyState === 'complete';
@@ -763,6 +925,12 @@ class BrowserPool:
                     akamai_held = await akamai_press_and_hold(page)
                 await wander_mouse(page)
                 next_click_at = time.monotonic() + CHALLENGE_CLICK_RETRY_SECONDS
+            elif active_challenge == "anubis":
+                # The page's own JS computes Anubis's proof-of-work and redirects; nothing to click.
+                pass
+            elif now_ts >= next_click_at and (now_ts - loop_start) > 0.6 and active_challenge == "cap":
+                started = await start_cap_solve(page)
+                next_click_at = time.monotonic() + (CHALLENGE_CLICK_COOLDOWN_SECONDS if started else CHALLENGE_CLICK_RETRY_SECONDS)
             elif now_ts >= next_click_at and (now_ts - loop_start) > 0.6:
                 clicked, age_gate_clicked = await dispatch_challenge_click(page, active_challenge, title, age_gate_clicked)
                 next_click_at = time.monotonic() + (CHALLENGE_CLICK_COOLDOWN_SECONDS if clicked else CHALLENGE_CLICK_RETRY_SECONDS)
@@ -787,6 +955,13 @@ class BrowserPool:
                         logger.info(f"[CaptchaSolver] Page settled after token injection. Final Title: '{settle_title}'")
                         break
                     await asyncio.sleep(0.3)
+
+        if follow_meta_refresh and not is_browser_error(await _safe_title(page), page.url or ""):
+            url_before_refresh = page.url
+            await follow_meta_refresh_in_page(page, deadline - SOLVE_FINALIZE_RESERVE_SECONDS)
+            if page.url != url_before_refresh:
+                # The loop cleared the page it saw, not this one: run the final wall check on it.
+                cleared = False
 
         if wait_selector:
             try:
@@ -848,13 +1023,24 @@ class BrowserPool:
                 final_title = final_title or ""
                 html_content = ""
 
+        response_headers = {"content-type": "text/html"}
+        main_content_type = _header_value(last_main_headers, "content-type")
+        main_resp = last_main_response.get("resp")
+        if main_resp is not None and is_non_html_text(main_content_type):
+            try:
+                raw = await asyncio.wait_for(main_resp.body(), timeout=5.0)
+                html_content = decode_browser_body(raw, main_content_type)
+                response_headers = {"content-type": main_content_type}
+            except Exception as e:
+                logger.debug(f"[BrowserPool] Raw body read notice: {e}")
+
         # A wall that outlived the attempt is a failed solve, not a page to hand back as solved.
         if not cleared and not is_browser_error(final_title, final_url):
             final_status = last_main_status["code"]
             final_challenge = detect_challenge(final_title, html_content, True, headers=last_main_headers, status=final_status)
-            blocked_by = ip_block_provider(html_content, final_url)
-            if blocked_by:
-                raise ChallengeNotSolvedError(blocked_by, IP_BLOCKED_REASON, ip_blocked=True)
+            _raise_if_ip_blocked(html_content, final_url)
+            if anubis_state(html_content) == "blocked":
+                raise ChallengeNotSolvedError("anubis", ANUBIS_REJECTED_REASON)
             if is_challenge_wall(final_challenge, final_title, html_content, status=final_status, headers=last_main_headers):
                 raise ChallengeNotSolvedError(
                     final_challenge or last_detected_challenge or "unrecognized",
@@ -863,6 +1049,7 @@ class BrowserPool:
 
         raw_cookies = await read_context_cookies(context)
         captured_cookies = extract_captured_cookies(raw_cookies)
+        captured_storage = await _capture_storage(context, page) if capture_storage else None
 
         # Prefer the last main-frame status, then the initial response, then a guess.
         if is_browser_error(final_title, final_url):
@@ -882,11 +1069,12 @@ class BrowserPool:
         solution = SolutionModel(
             url=final_url,
             status=status_code,
-            headers={"content-type": "text/html"},
+            headers=response_headers,
             response=html_content,
             cookies=captured_cookies,
             userAgent=active_ua,
-            challengeType=last_detected_challenge
+            challengeType=last_detected_challenge,
+            storage=captured_storage,
         )
 
         if screenshot_b64:

@@ -209,3 +209,79 @@ class TestSessionManager(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSessionBrowserStorage(unittest.TestCase):
+    def _session(self):
+        from app.solver.sessions import Session
+        return Session("s1")
+
+    def test_snapshot_replaces_each_named_origin_and_keeps_others(self):
+        sess = self._session()
+        sess.update_storage({"local": {"https://a.test": {"x": "1", "y": "2"}, "https://b.test": {"k": "v"}}})
+        sess.update_storage({"local": {"https://a.test": {"x": "3"}}, "session": {"https://a.test": {"s": "1"}}})
+        self.assertEqual(sess.local_storage, {"https://a.test": {"x": "3"}, "https://b.test": {"k": "v"}})
+        self.assertEqual(sess.storage_payload()["session"], {"https://a.test": {"s": "1"}})
+
+    def test_emptied_origin_is_dropped_not_restored(self):
+        sess = self._session()
+        sess.update_storage({"local": {"https://a.test": {"token": "t"}, "https://b.test": {"k": "v"}},
+                             "session": {"https://a.test": {"s": "1"}}})
+        sess.update_storage({"local": {"https://a.test": {}}, "session": {"https://a.test": {}}})
+        self.assertEqual(sess.local_storage, {"https://b.test": {"k": "v"}})
+        self.assertEqual(sess.session_storage, {})
+
+    def test_round_trips_through_redis_json(self):
+        import json
+        from app.solver.sessions import Session
+        sess = self._session()
+        sess.update_storage({"local": {"https://a.test": {"x": "1"}}, "session": {"https://a.test": {"y": "2"}}})
+        restored = Session.from_dict(json.loads(json.dumps(sess.to_dict())))
+        self.assertEqual(restored.storage_payload(), sess.storage_payload())
+
+    def test_older_snapshot_without_storage_loads(self):
+        from app.solver.sessions import Session
+        restored = Session.from_dict({"session_id": "old", "cookies": []})
+        self.assertIsNone(restored.storage_payload())
+
+    def test_oversized_snapshot_is_refused(self):
+        sess = self._session()
+        sess.update_storage({"local": {"https://a.test": {"x": "1"}}})
+        with patch.object(settings, "SESSION_STORAGE_MAX_KB", 1):
+            self.assertFalse(sess.update_storage({"local": {"https://a.test": {"big": "z" * 4096}}}))
+        self.assertEqual(sess.local_storage, {"https://a.test": {"x": "1"}})
+
+    def test_malformed_snapshot_is_cleaned(self):
+        sess = self._session()
+        sess.update_storage({"local": {"https://a.test": ["not", "a", "map"], "https://b.test": {"n": 1}}})
+        self.assertEqual(sess.local_storage, {"https://b.test": {"n": "1"}})
+
+
+class TestApplyAndPersistSession(unittest.IsolatedAsyncioTestCase):
+    async def test_session_feeds_the_request_and_learns_from_the_solution(self):
+        from app.models.flaresolverr import SolutionModel, V1Request
+        from app.solver import sessions as sessions_module
+        manager = SessionManager(redis_url="")
+        with patch.object(sessions_module, "session_manager", manager):
+            sid = await manager.create_session_async("s1", proxy="http://proxy.test:8080")
+            await manager.update_session_storage_async(sid, {"local": {"https://a.test": {"k": "v"}}})
+            req = V1Request(cmd="request.get", url="https://a.test/", session=sid)
+            storage = await sessions_module.apply_session(req)
+            self.assertEqual(req.get_proxy_url(), "http://proxy.test:8080")
+            self.assertEqual(storage["local"], {"https://a.test": {"k": "v"}})
+
+            sol = SolutionModel(url="https://a.test/", status=200, storage={"local": {"https://a.test": {"k": "new"}}})
+            await sessions_module.persist_session(req, sol)
+            sess = await manager.get_session_async(sid)
+            self.assertEqual(sess.local_storage, {"https://a.test": {"k": "new"}})
+
+    def test_storage_is_never_serialized_to_clients(self):
+        from app.models.flaresolverr import SolutionModel, V1Response
+        sol = SolutionModel(url="https://a.test/", status=200, storage={"local": {"o": {"k": "v"}}})
+        self.assertNotIn("storage", V1Response(solution=sol).model_dump()["solution"])
+        self.assertNotIn("storage", V1Response(solution=sol).model_dump_json())
+
+    def test_clients_cannot_inject_browser_storage(self):
+        from app.models.flaresolverr import V1Request
+        req = V1Request(cmd="request.get", url="https://a.test/", browser_storage={"local": {"x": {}}})
+        self.assertNotIn("browser_storage", req.model_dump())

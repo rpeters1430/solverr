@@ -7,7 +7,8 @@ from typing import Dict, List, Optional
 from app.models.flaresolverr import V1Request, SolutionModel, CookieModel
 from app.solver.cache import cookie_cache
 from app.solver.fast_tls import fast_tls_engine
-from app.solver.browser import browser_pool
+from app.solver.browser import IP_BLOCKED_REASON, ChallengeNotSolvedError, browser_pool, is_google_sorry_url
+from app.solver.captcha_solver import captcha_solver
 from app.config import settings
 from app.events import event_broadcaster
 from app.history import request_history
@@ -62,7 +63,9 @@ class PerformanceMetrics:
             "imperva": 0,
             "datadome": 0,
             "akamai": 0,
-            "aws_waf": 0
+            "aws_waf": 0,
+            "anubis": 0,
+            "cap": 0,
         }
 
     def record_fast(self, duration_ms: float):
@@ -194,7 +197,14 @@ class HybridSolverEngine:
         except Exception:
             logger.warning("Request history could not be persisted", exc_info=True)
 
-    async def process_request(self, req: V1Request, bypass_cookie_cache: bool = False) -> SolutionModel:
+    async def process_request(
+        self,
+        req: V1Request,
+        bypass_cookie_cache: bool = False,
+        browser_storage: Optional[Dict[str, Dict[str, Dict[str, str]]]] = None,
+    ) -> SolutionModel:
+        """`browser_storage` is the request's session web storage (from apply_session()), restored
+        into the browser tiers; it is never taken from the client."""
         budget = RequestBudget(req.maxTimeout or settings.BROWSER_TIMEOUT_MS)
         url = req.url
         method = req.cmd.split(".")[-1].upper() if "." in req.cmd else "GET"
@@ -225,6 +235,7 @@ class HybridSolverEngine:
             "extract_records": req.extract_records,
             "maxTimeout": req.maxTimeout,
             "bypassCookieCache": bypass_cookie_cache,
+            "followMetaRefresh": req.follows_meta_refresh(),
         }
         inflight_key = hashlib.sha256(
             json.dumps(fingerprint, sort_keys=True, default=str).encode()
@@ -247,7 +258,7 @@ class HybridSolverEngine:
         self._inflight[inflight_key] = future
 
         try:
-            res = await self._do_process_request(req, budget, url, method, bypass_cookie_cache)
+            res = await self._do_process_request(req, budget, url, method, bypass_cookie_cache, browser_storage)
             _cap_response_body(res)
             await self._record_history(url, budget, solution=res)
             if not future.done():
@@ -274,7 +285,13 @@ class HybridSolverEngine:
                 self._inflight.pop(inflight_key, None)
 
     async def _do_process_request(
-        self, req: V1Request, budget: RequestBudget, url: str, method: str, bypass_cookie_cache: bool = False
+        self,
+        req: V1Request,
+        budget: RequestBudget,
+        url: str,
+        method: str,
+        bypass_cookie_cache: bool = False,
+        browser_storage: Optional[Dict[str, Dict[str, Dict[str, str]]]] = None,
     ) -> SolutionModel:
         proxy_url = req.get_proxy_url()
 
@@ -309,6 +326,9 @@ class HybridSolverEngine:
         if not fast_tls_ua and had_cache and fast_tls_engine.is_compatible_user_agent(cached_ua):
             fast_tls_ua = cached_ua
 
+        # Set when Tier 1 already met a verdict on the egress IP, which a browser from that IP can't change.
+        tier1_ip_block: Optional[str] = None
+
         # Tiers 1 and 2
         if settings.ENABLE_FAST_TLS and not req.forceBrowser:
             tls_timeout = max(1, min(10, int(budget.remaining_s)))
@@ -323,12 +343,14 @@ class HybridSolverEngine:
                 proxy=proxy_url,
                 timeout=tls_timeout,
                 user_agent=fast_tls_ua,
-                session_id=req.session
+                session_id=req.session,
+                follow_meta_refresh=req.follows_meta_refresh(),
             )
 
             is_valid_http_response = (
                 solution.status < 400
                 or solution.status in (400, 401, 404, 405, 410, 422)
+                or (solution.status == 429 and not settings.ESCALATE_HTTP_429)
             ) if solution else False
             if not is_cf_challenge and solution and is_valid_http_response:
                 elapsed_ms = budget.elapsed_ms
@@ -372,6 +394,10 @@ class HybridSolverEngine:
                     event_broadcaster.emit("solve_error", {"url": url, "error": "Fast TLS path failed"})
                     raise RuntimeError(f"Fast TLS path failed for {url}")
 
+            # Google's /sorry/ page is a reCAPTCHA only a paid solver could clear from this IP.
+            if solution and is_google_sorry_url(solution.url) and not captcha_solver.enabled:
+                tier1_ip_block = "google"
+
             if is_cf_challenge:
                 logger.info(f"[HybridEngine] Fast TLS detected WAF challenge (Status: {solution.status if solution else 'N/A'}). Escalating to Level 3 Stealth Browser...")
             else:
@@ -387,6 +413,9 @@ class HybridSolverEngine:
 
         browser_timeout_ms = max(3000, budget.remaining_ms)
         try:
+            if tier1_ip_block:
+                logger.info(f"[HybridEngine] {tier1_ip_block} refused this IP at Tier 1; skipping the same-IP browser solve.")
+                raise ChallengeNotSolvedError(tier1_ip_block, IP_BLOCKED_REASON, ip_blocked=True)
             solution = await browser_pool.solve(
                 url=url,
                 method=method,
@@ -402,6 +431,9 @@ class HybridSolverEngine:
                 screenshot_full_page=req.screenshot_full_page,
                 screenshot_selector=req.screenshot_selector,
                 extract_records=req.extract_records,
+                follow_meta_refresh=req.follows_meta_refresh(),
+                browser_storage=browser_storage,
+                capture_storage=bool(req.session),
             )
             
             elapsed_ms = budget.elapsed_ms
@@ -448,6 +480,9 @@ class HybridSolverEngine:
                         screenshot_full_page=req.screenshot_full_page,
                         screenshot_selector=req.screenshot_selector,
                         extract_records=req.extract_records,
+                        follow_meta_refresh=req.follows_meta_refresh(),
+                        browser_storage=browser_storage,
+                        capture_storage=bool(req.session),
                     )
                     elapsed_ms = budget.elapsed_ms
                     metrics.record_fallback_proxy(elapsed_ms)

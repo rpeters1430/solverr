@@ -244,3 +244,62 @@ async def describe_challenge_frames(page: Page) -> str:
     except Exception:
         iframes = []
     return f"Child frames: {frames or 'none'} | iframes in DOM: {iframes or 'none'}"
+
+
+# Cap's token lands in the widget's tokenValue and a hidden input (data-cap-hidden-field-name,
+# default "cap-token"); only widgets that render are counted, since a hidden one is never redeemed.
+_CAP_JS_HELPERS = """
+    const capVisible = (el) => {
+        const box = el.getBoundingClientRect();
+        return box.width > 0 && box.height > 0 && getComputedStyle(el).visibility !== 'hidden';
+    };
+    const capToken = (el) => {
+        const name = el.getAttribute('data-cap-hidden-field-name') || 'cap-token';
+        const field = [...el.querySelectorAll("input[type='hidden']")].find((i) => i.name === name)
+            || [...document.querySelectorAll("input[type='hidden']")].find((i) => i.name === name && el.contains(i));
+        const token = el.tokenValue || (field && field.value);
+        return typeof token === 'string' && token.length > 0;
+    };
+"""
+
+
+async def cap_widgets_solved(page: Page) -> bool:
+    """True once every visible Cap widget holds a token (False when there is none)."""
+    try:
+        return bool(await page.evaluate("() => {" + _CAP_JS_HELPERS + """
+            const widgets = [...document.querySelectorAll('cap-widget')].filter(capVisible);
+            return widgets.length > 0 && widgets.every(capToken);
+        }"""))
+    except Exception:
+        return False
+
+
+async def start_cap_solve(page: Page) -> bool:
+    """Start the proof-of-work on the first visible Cap widget still without a token.
+
+    The widget does the work itself; the surrounding form is never submitted. Widgets are solved
+    one at a time so several PoW workers don't run at once. Returns whether one was started."""
+    try:
+        started = await page.evaluate("() => {" + _CAP_JS_HELPERS + """
+            const widget = [...document.querySelectorAll('cap-widget')].filter(capVisible).find((el) => !capToken(el));
+            if (!widget) return false;
+            if (typeof widget.solve === 'function') {
+                widget.solve().catch(() => {});
+                return {started: true};
+            }
+            // Firefox can hide component methods from the evaluation world; click its trigger instead.
+            const trigger = widget.shadowRoot && widget.shadowRoot.querySelector('.captcha-trigger, [part=trigger]');
+            if (!trigger || trigger.hasAttribute('disabled')) return false;
+            trigger.scrollIntoView({block: 'center', inline: 'nearest'});
+            const box = trigger.getBoundingClientRect();
+            return box.width > 0 && box.height > 0 ? {x: box.x + box.width / 2, y: box.y + box.height / 2} : false;
+        }""")
+    except Exception as e:
+        logger.debug(f"[Cap] Solve start notice: {e}")
+        return False
+    if not started:
+        return False
+    if "x" in started and "y" in started:
+        await human_click(page, started["x"], started["y"])
+    logger.info("[Cap] Started the proof-of-work on a Cap widget.")
+    return True

@@ -80,5 +80,34 @@ class TestInjectCaptchaToken(unittest.IsolatedAsyncioTestCase):
         await inject_captcha_token(page, ["g-recaptcha-response"], "TOKEN", None)
 
 
+class TestWidgetParamsAndSolverCookie(unittest.IsolatedAsyncioTestCase):
+    async def test_extracts_render_parameters(self):
+        from app.solver.browser.captcha import extract_widget_params
+        page = FakePage({".cf-turnstile": FakeLocator(count=1, attrs={
+            "data-sitekey": "K", "data-action": "login", "data-cdata": "C", "data-callback": "cb"})})
+        params = await extract_widget_params(page, [".cf-turnstile"])
+        self.assertEqual((params["sitekey"], params["action"], params["cdata"], params["callback"]), ("K", "login", "C", "cb"))
+        self.assertIsNone(params["s"])
+
+    async def test_escalation_passes_turnstile_action_and_cdata(self):
+        from unittest.mock import AsyncMock, patch
+        from app.solver.browser import captcha as captcha_module
+        recorder = []
+        page = FakePage({".cf-turnstile": FakeLocator(count=1, attrs={"data-sitekey": "K", "data-action": "login"})},
+                        evaluate_recorder=recorder)
+        solve = AsyncMock(return_value="TOKEN")
+        with patch.object(captcha_module.captcha_solver, "solve_turnstile", solve):
+            self.assertTrue(await captcha_module.try_captcha_solver_escalation(page, "https://e.test", "cloudflare_turnstile"))
+        solve.assert_awaited_once_with("K", "https://e.test", action="login", cdata=None)
+
+    def test_parse_solver_cookie(self):
+        from app.solver.browser.captcha import parse_solver_cookie
+        cookie = parse_solver_cookie("datadome=abc~1; Max-Age=31536000; Domain=.e.test; Path=/; Secure; SameSite=Lax", "www.e.test")
+        self.assertEqual(cookie, {"name": "datadome", "value": "abc~1", "domain": ".e.test", "path": "/",
+                                  "secure": True, "sameSite": "Lax"})
+        self.assertEqual(parse_solver_cookie("datadome=x", "www.e.test")["domain"], "www.e.test")
+        self.assertIsNone(parse_solver_cookie("", "e.test"))
+
+
 if __name__ == "__main__":
     unittest.main()
