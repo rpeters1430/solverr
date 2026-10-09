@@ -10,7 +10,7 @@ from app.models.flaresolverr import CookieModel, SolutionModel
 from app.solver.captcha_solver import captcha_solver
 from app.logging_config import sanitize_proxy_url
 
-from app.solver.browser.pool import CamoufoxPool, CAMOUFOX_AVAILABLE
+from app.solver.browser.pool import CamoufoxPool, CAMOUFOX_AVAILABLE, browser_is_connected
 from app.solver.browser.challenges import (
     ANUBIS_REJECTED_REASON,
     IP_BLOCKED_REASON,
@@ -128,13 +128,7 @@ def _pooled_attempt_budget_ms(timeout_ms: int) -> int:
     return timeout_ms - reserve_ms
 
 
-def _browser_is_connected(browser: Any) -> bool:
-    """Playwright exposes is_connected(); keep compatibility with test doubles."""
-    try:
-        probe = getattr(browser, "is_connected", None)
-        return bool(probe()) if callable(probe) else True
-    except Exception:
-        return False
+_browser_is_connected = browser_is_connected
 
 
 def _is_browser_disconnected(exc: BaseException) -> bool:
@@ -200,6 +194,11 @@ class BrowserPool:
                 logger.warning(f"[CamoufoxPool] Shutdown notice: {e}")
         logger.info("Browser Pool stopped.")
 
+    async def maintain(self) -> None:
+        """Periodic upkeep: reclaim dead idle browsers and retire long-idle ones."""
+        if self.camoufox_pool:
+            await self.camoufox_pool.maintain()
+
     def pool_stats(self) -> Dict[str, Any]:
         cp = self.camoufox_pool
         created = cp._created if cp else 0
@@ -211,6 +210,9 @@ class BrowserPool:
             "busy": max(0, created - idle),
             "idle": idle,
             "recycles_total": cp.recycles_total if cp else 0,
+            "memory_recycles_total": cp.memory_recycles_total if cp else 0,
+            "dead_reclaimed_total": cp.dead_reclaimed_total if cp else 0,
+            "idle_retired_total": cp.idle_retired_total if cp else 0,
             "crashes_total": self._crashes_total,
             "avg_queue_wait_seconds": round(avg_wait, 3),
             "queue_wait_samples": self._queue_wait_count,

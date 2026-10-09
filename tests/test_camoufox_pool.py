@@ -13,8 +13,8 @@ class FakeCamoufoxPool(CamoufoxPool):
     cheap fakes, so pool bookkeeping (acquire/release/recycle/capacity) can
     be tested without spawning a real browser process."""
 
-    def __init__(self, size):
-        super().__init__(size)
+    def __init__(self, size, memory_usage=lambda: None):
+        super().__init__(size, memory_usage=memory_usage)
         self.launch_count = 0
         self.close_count = 0
 
@@ -87,6 +87,105 @@ class TestCamoufoxPool(unittest.IsolatedAsyncioTestCase):
         await pool.close()
         self.assertEqual(pool.close_count, 2)
         self.assertEqual(pool._created, 0)
+
+
+class _DeadBrowser:
+    def is_connected(self):
+        return False
+
+
+class TestCamoufoxPoolResilience(unittest.IsolatedAsyncioTestCase):
+    async def test_dead_idle_browser_is_never_handed_out(self):
+        with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 100), \
+             patch.object(settings, "CAMOUFOX_POOL_RECYCLE_SECONDS", 100000):
+            pool = FakeCamoufoxPool(1)
+            inst = await pool.acquire()
+            await pool.release(inst)
+            inst.browser = _DeadBrowser()  # Firefox crashed while idle
+            fresh = await pool.acquire()
+            self.assertIsNot(fresh, inst)
+            self.assertEqual(pool.launch_count, 2)
+            self.assertEqual(pool.close_count, 1)
+            self.assertEqual(pool.dead_reclaimed_total, 1)
+            self.assertEqual(pool._created, 1)
+
+    async def test_dead_browser_returned_by_a_peer_is_replaced_for_the_waiter(self):
+        pool = FakeCamoufoxPool(1)
+        inst = await pool.acquire()
+        waiter = asyncio.create_task(pool.acquire(wait_timeout=2))
+        await asyncio.sleep(0.01)
+        inst.browser = _DeadBrowser()
+        with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 100), \
+             patch.object(settings, "CAMOUFOX_POOL_RECYCLE_SECONDS", 100000):
+            await pool.release(inst)
+            got = await waiter
+        self.assertIsNot(got, inst)
+        self.assertEqual(pool._created, 1)
+
+    async def test_memory_pressure_retires_on_release_without_warm_replacement(self):
+        gib = 1024 ** 3
+        with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 100), \
+             patch.object(settings, "CAMOUFOX_POOL_RECYCLE_SECONDS", 100000), \
+             patch.object(settings, "CAMOUFOX_MEMORY_RECYCLE_PERCENT", 85), \
+             patch.object(settings, "CAMOUFOX_MIN_REPLACE_HEADROOM_MB", 512):
+            pool = FakeCamoufoxPool(2, memory_usage=lambda: (int(1.9 * gib), 2 * gib))
+            inst = await pool.acquire()
+            await pool.release(inst)
+            self.assertEqual(pool.memory_recycles_total, 1)
+            self.assertEqual(pool.close_count, 1)
+            self.assertEqual(pool.launch_count, 1)  # no warm replacement at 100MB headroom
+            self.assertEqual(pool._created, 0)
+            await pool.acquire()  # relaunched on demand
+            self.assertEqual(pool.launch_count, 2)
+
+    async def test_recycle_with_headroom_relaunches_warm(self):
+        gib = 1024 ** 3
+        with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 1), \
+             patch.object(settings, "CAMOUFOX_MEMORY_RECYCLE_PERCENT", 85):
+            pool = FakeCamoufoxPool(1, memory_usage=lambda: (1 * gib, 8 * gib))
+            inst = await pool.acquire()
+            await pool.release(inst)
+            self.assertEqual(pool.memory_recycles_total, 0)
+            self.assertEqual(pool.launch_count, 2)
+            self.assertEqual(pool._idle.qsize(), 1)
+
+    async def test_memory_reader_failure_is_ignored(self):
+        def broken():
+            raise OSError("no cgroup")
+        with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 100), \
+             patch.object(settings, "CAMOUFOX_POOL_RECYCLE_SECONDS", 100000):
+            pool = FakeCamoufoxPool(1, memory_usage=broken)
+            inst = await pool.acquire()
+            await pool.release(inst)
+            self.assertEqual(pool._idle.qsize(), 1)
+
+    async def test_maintain_retires_idle_and_reclaims_dead(self):
+        with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 100), \
+             patch.object(settings, "CAMOUFOX_POOL_RECYCLE_SECONDS", 100000), \
+             patch.object(settings, "CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS", 60):
+            pool = FakeCamoufoxPool(3)
+            a, b, c = await pool.acquire(), await pool.acquire(), await pool.acquire()
+            for inst in (a, b, c):
+                await pool.release(inst)
+            a.last_used_at = time.monotonic() - 120  # idle past the timeout
+            b.browser = _DeadBrowser()
+            await pool.maintain()
+            self.assertEqual(pool.idle_retired_total, 1)
+            self.assertEqual(pool.dead_reclaimed_total, 1)
+            self.assertEqual(pool._created, 1)
+            self.assertEqual(pool._idle.qsize(), 1)
+            self.assertIs(await pool.acquire(), c)
+
+    async def test_maintain_keeps_idle_instances_when_timeout_disabled(self):
+        with patch.object(settings, "CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS", 0):
+            pool = FakeCamoufoxPool(1)
+            inst = await pool.acquire()
+            with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 100):
+                await pool.release(inst)
+            inst.last_used_at = time.monotonic() - 10 ** 6
+            await pool.maintain()
+            self.assertEqual(pool._idle.qsize(), 1)
+            self.assertEqual(pool.idle_retired_total, 0)
 
 
 class FakePage:

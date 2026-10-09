@@ -1,6 +1,6 @@
 import os
 import math
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import psutil
 
 
@@ -17,6 +17,44 @@ def _cgroup_memory_limit_bytes() -> Optional[int]:
                     return n
         except (OSError, ValueError):
             continue
+    return None
+
+
+def _read_int(path: str) -> Optional[int]:
+    try:
+        with open(path) as f:
+            val = f.read().strip()
+        return None if val in ("", "max") else int(val)
+    except (OSError, ValueError):
+        return None
+
+
+def cgroup_memory_usage() -> Optional[Tuple[int, int]]:
+    """(working_set_bytes, limit_bytes) for this container, or None without a memory limit.
+
+    The working set leaves out inactive page cache, which the kernel reclaims before it OOM-kills,
+    the same way `docker stats` and the kubelet count it."""
+    limit = _cgroup_memory_limit_bytes()
+    if not limit:
+        return None
+    for usage_path, stat_path, inactive_key in (
+        ("/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.stat", "inactive_file"),
+        ("/sys/fs/cgroup/memory/memory.usage_in_bytes", "/sys/fs/cgroup/memory/memory.stat", "total_inactive_file"),
+    ):
+        usage = _read_int(usage_path)
+        if usage is None:
+            continue
+        inactive = 0
+        try:
+            with open(stat_path) as f:
+                for line in f:
+                    key, _, value = line.partition(" ")
+                    if key == inactive_key:
+                        inactive = int(value)
+                        break
+        except (OSError, ValueError):
+            pass
+        return max(0, usage - inactive), limit
     return None
 
 
@@ -116,6 +154,13 @@ class Settings:
     CAMOUFOX_POOL_ENABLED: bool = os.getenv("CAMOUFOX_POOL_ENABLED", "true").lower() in ("true", "1", "yes")
     CAMOUFOX_POOL_RECYCLE_USES: int = int(os.getenv("CAMOUFOX_POOL_RECYCLE_USES", "40"))
     CAMOUFOX_POOL_RECYCLE_SECONDS: int = int(os.getenv("CAMOUFOX_POOL_RECYCLE_SECONDS", "1800"))
+    # Close warm instances left unused this long (0 keeps them until recycled); the pool relaunches
+    # lazily on the next solve. Frees RAM on a NAS between bursts of indexer traffic.
+    CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS: int = int(os.getenv("CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS", "0"))
+    # Under a container memory limit: retire an instance on release once the working set passes this
+    # share of the limit (0 disables), and skip warm replacements below MIN_REPLACE_HEADROOM_MB.
+    CAMOUFOX_MEMORY_RECYCLE_PERCENT: float = float(os.getenv("CAMOUFOX_MEMORY_RECYCLE_PERCENT", "85"))
+    CAMOUFOX_MIN_REPLACE_HEADROOM_MB: int = int(os.getenv("CAMOUFOX_MIN_REPLACE_HEADROOM_MB", "512"))
 
     # Match timezone/locale/geolocation to the proxy's exit IP; costs one extra request per launch.
     CAMOUFOX_GEOIP_ON_PROXY: bool = os.getenv("CAMOUFOX_GEOIP_ON_PROXY", "true").lower() in ("true", "1", "yes")

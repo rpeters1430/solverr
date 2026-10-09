@@ -8,3 +8,5 @@ class _PooledCamoufox:
     browser: Any
     created_at: float
     uses: int = 0
+    # time.monotonic() of the last check-in, for idle retirement.
+    last_used_at: float = 0.0
