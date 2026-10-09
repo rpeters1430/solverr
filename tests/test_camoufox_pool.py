@@ -267,6 +267,17 @@ class TestEphemeralCamoufoxGeoip(unittest.IsolatedAsyncioTestCase):
         await self._solve(pw_proxy=None)
         self.assertFalse(FakeAsyncCamoufoxCtx.captured_kwargs[-1]["geoip"])
 
+    async def test_user_prefs_are_passed_with_proxy_safety_enforced(self):
+        prefs = {"network.dns.blockDotOnion": False, "network.proxy.failover_direct": True, "test.int": 7}
+        with patch.object(settings, "USER_PREFS", prefs):
+            await self._solve(pw_proxy={"server": "http://proxy.example.com:8080"})
+        passed = FakeAsyncCamoufoxCtx.captured_kwargs[-1]["firefox_user_prefs"]
+        self.assertEqual(passed["network.dns.blockDotOnion"], False)
+        self.assertEqual(passed["test.int"], 7)
+        self.assertIs(passed["network.proxy.failover_direct"], False)
+        self.assertIs(passed["network.proxy.socks_remote_dns"], True)
+        self.assertIsNot(passed, prefs)
+
     async def test_geoip_respects_config_toggle(self):
         with patch.object(settings, "CAMOUFOX_GEOIP_ON_PROXY", False):
             await self._solve(pw_proxy={"server": "http://proxy.example.com:8080"})

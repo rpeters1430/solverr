@@ -112,6 +112,19 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sol.tier, "tier3_stealth_browser")
             browser_mock.assert_called_once()
 
+    async def test_tier_calls_match_the_real_signatures(self):
+        from app.solver.engine import browser_pool, fast_tls_engine
+        with patch.object(fast_tls_engine, "request", autospec=True, return_value=(True, _sol(503))) as fast_mock, \
+             patch.object(browser_pool, "solve", autospec=True, return_value=_sol(200)) as browser_mock:
+            req = V1Request(cmd="request.get", url="https://example.com", session="s1", followMetaRefresh=True)
+            req._browser_storage = {"local": {"https://example.com": {"k": "v"}}}
+            await self.engine.process_request(req)
+        self.assertTrue(fast_mock.call_args.kwargs["follow_meta_refresh"])
+        kwargs = browser_mock.call_args.kwargs
+        self.assertTrue(kwargs["follow_meta_refresh"])
+        self.assertTrue(kwargs["capture_storage"])
+        self.assertEqual(kwargs["browser_storage"], {"local": {"https://example.com": {"k": "v"}}})
+
     async def test_browser_failure_without_fallback_proxy_raises(self):
         with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \
              patch("app.solver.engine.browser_pool.solve", new=AsyncMock(side_effect=RuntimeError("boom"))), \

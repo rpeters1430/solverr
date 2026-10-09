@@ -418,6 +418,8 @@ class HybridSolverEngine:
                 screenshot_selector=req.screenshot_selector,
                 extract_records=req.extract_records,
                 follow_meta_refresh=req.follows_meta_refresh(),
+                browser_storage=req._browser_storage,
+                capture_storage=bool(req.session),
             )
             
             elapsed_ms = budget.elapsed_ms
@@ -465,6 +467,8 @@ class HybridSolverEngine:
                         screenshot_selector=req.screenshot_selector,
                         extract_records=req.extract_records,
                         follow_meta_refresh=req.follows_meta_refresh(),
+                        browser_storage=req._browser_storage,
+                        capture_storage=bool(req.session),
                     )
                     elapsed_ms = budget.elapsed_ms
                     metrics.record_fallback_proxy(elapsed_ms)

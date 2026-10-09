@@ -20,6 +20,19 @@ CAMOUFOX_LAUNCH_TIMEOUT_SECONDS = 30
 CAMOUFOX_CLOSE_TIMEOUT_SECONDS = 10
 
 
+# Never let a request meant for a proxy leave directly when the proxy fails, and resolve SOCKS
+# hostnames on the proxy, not locally. Applied over USER_PREFS so they can't be switched off.
+PROXY_SAFETY_PREFS = {
+    "network.proxy.failover_direct": False,
+    "network.proxy.socks_remote_dns": True,
+}
+
+
+def firefox_user_prefs() -> dict:
+    """A fresh dict per launch: Camoufox adds its own defaults to the one it is given."""
+    return {**settings.USER_PREFS, **PROXY_SAFETY_PREFS}
+
+
 def browser_is_connected(browser: Any) -> bool:
     """Playwright exposes is_connected(); keep compatibility with test doubles."""
     try:
@@ -195,6 +208,7 @@ class CamoufoxPool:
             disable_coop=True,
             os="linux",
             config={'forceScopeAccess': True},
+            firefox_user_prefs=firefox_user_prefs(),
             i_know_what_im_doing=True
         )
         try:

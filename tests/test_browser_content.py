@@ -120,5 +120,79 @@ class TestRawNonHtmlBodies(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sol.headers["content-type"], "text/html")
 
 
+
+class TestSessionStorageInBrowser(unittest.IsolatedAsyncioTestCase):
+    def test_context_options_restore_local_storage(self):
+        from app.solver.browser.browser import _context_options
+        self.assertEqual(_context_options(None), {"service_workers": "block"})
+        opts = _context_options({"local": {"https://a.test": {"k": "v"}}, "session": {}})
+        self.assertEqual(opts["storage_state"]["origins"], [
+            {"origin": "https://a.test", "localStorage": [{"name": "k", "value": "v"}]}
+        ])
+
+    async def test_capture_reads_local_and_session_storage(self):
+        from app.solver.browser.browser import _capture_storage
+
+        class Ctx:
+            async def storage_state(self):
+                return {"cookies": [], "origins": [
+                    {"origin": "https://a.test", "localStorage": [{"name": "k", "value": "v"}]},
+                    {"origin": "https://empty.test", "localStorage": []},
+                ]}
+
+        class Page:
+            async def evaluate(self, script):
+                return {"origin": "https://a.test", "items": {"s": "1"}}
+
+        self.assertEqual(await _capture_storage(Ctx(), Page()), {
+            "local": {"https://a.test": {"k": "v"}},
+            "session": {"https://a.test": {"s": "1"}},
+        })
+
+    async def test_capture_ignores_opaque_origins_and_failures(self):
+        from app.solver.browser.browser import _capture_storage
+
+        class Ctx:
+            async def storage_state(self):
+                raise RuntimeError("closed")
+
+        class Page:
+            async def evaluate(self, script):
+                return {"origin": "null", "items": {"s": "1"}}
+
+        self.assertIsNone(await _capture_storage(Ctx(), Page()))
+
+    async def test_saved_session_storage_is_installed_as_init_script(self):
+        scripts = []
+
+        class Ctx(_NoCookies):
+            async def add_init_script(self, script=None, path=None):
+                scripts.append(script)
+
+            async def storage_state(self):
+                return {"origins": [{"origin": "https://api.example.com", "localStorage": [{"name": "a", "value": "b"}]}]}
+
+        page = _ViewerPage()
+        resp = _Resp(page.main_frame, 200, {"content-type": "application/json"}, b"{}")
+
+        async def nav(*args, **kwargs):
+            for handler in page.handlers:
+                handler(resp)
+            return resp, 200
+
+        start = time.monotonic()
+        with patch.object(browser_module, "navigate_to_target", side_effect=nav), \
+             patch.object(browser_module, "install_media_blocking", return_value=None), \
+             patch.multiple(browser_module, SOLVE_FINALIZE_RESERVE_SECONDS=0.2):
+            sol = await BrowserPool()._execute_solve_flow(
+                context=Ctx(), page=page, url=page.url, method="GET", post_data=None, cookies=None,
+                timeout_ms=5000, active_ua="ua", headers=None, start_time=start, deadline=start + 5.0,
+                browser_storage={"session": {"https://api.example.com": {"tok": "x\"y"}}}, capture_storage=True,
+            )
+        self.assertEqual(len(scripts), 1)
+        self.assertIn('"tok": "x\\"y"', scripts[0])
+        self.assertEqual(sol.storage["local"], {"https://api.example.com": {"a": "b"}})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,5 @@
 import os
+import json
 import math
 from typing import List, Optional, Tuple
 import psutil
@@ -80,6 +81,26 @@ def _cgroup_cpu_limit() -> Optional[float]:
     return None
 
 
+def parse_user_prefs(value: Optional[str]) -> dict:
+    """USER_PREFS: a JSON object of extra Firefox prefs. A bad value fails startup rather than
+    silently launching browsers without the prefs the operator asked for."""
+    if not value or not value.strip():
+        return {}
+    try:
+        prefs = json.loads(value)
+    except ValueError as e:
+        raise ValueError("USER_PREFS must contain valid JSON") from e
+    if not isinstance(prefs, dict):
+        raise ValueError("USER_PREFS must be a JSON object of pref name to value")
+    for name, pref in prefs.items():
+        if isinstance(pref, (str, bool)):
+            continue
+        if isinstance(pref, int) and -2**31 <= pref < 2**31:
+            continue
+        raise ValueError(f"USER_PREFS['{name}'] must be a string, boolean or signed 32-bit integer")
+    return prefs
+
+
 class Settings:
     PORT: int = int(os.getenv("PORT", "8191"))
     HOST: str = os.getenv("HOST", "0.0.0.0")  # nosec B104
@@ -139,6 +160,8 @@ class Settings:
     MAX_CACHE_DOMAINS: int = int(os.getenv("MAX_CACHE_DOMAINS", "1000"))
     MAX_COOKIES_PER_DOMAIN: int = int(os.getenv("MAX_COOKIES_PER_DOMAIN", "100"))
     MAX_SESSIONS: int = int(os.getenv("MAX_SESSIONS", "500"))
+    # Cap on one session's saved localStorage/sessionStorage (0 disables); it is stored in Redis per session.
+    SESSION_STORAGE_MAX_KB: int = int(os.getenv("SESSION_STORAGE_MAX_KB", "512"))
     
     # Target and UA must name the same Firefox version; a TLS/UA mismatch is a WAF signal.
     FAST_TLS_TARGET: str = os.getenv("FAST_TLS_TARGET", "firefox147")
@@ -161,6 +184,10 @@ class Settings:
     # share of the limit (0 disables), and skip warm replacements below MIN_REPLACE_HEADROOM_MB.
     CAMOUFOX_MEMORY_RECYCLE_PERCENT: float = float(os.getenv("CAMOUFOX_MEMORY_RECYCLE_PERCENT", "85"))
     CAMOUFOX_MIN_REPLACE_HEADROOM_MB: int = int(os.getenv("CAMOUFOX_MIN_REPLACE_HEADROOM_MB", "512"))
+
+    # Extra Firefox prefs for every Camoufox launch, as JSON (e.g. {"network.dns.blockDotOnion": false}).
+    # The proxy fail-closed prefs in browser/pool.py always win.
+    USER_PREFS: dict = parse_user_prefs(os.getenv("USER_PREFS"))
 
     # Match timezone/locale/geolocation to the proxy's exit IP; costs one extra request per launch.
     CAMOUFOX_GEOIP_ON_PROXY: bool = os.getenv("CAMOUFOX_GEOIP_ON_PROXY", "true").lower() in ("true", "1", "yes")

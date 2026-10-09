@@ -5,7 +5,7 @@ from typing import Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, Request as FastAPIRequest, Response
 from app.models.flaresolverr import V1Request, V1Response, ScrapeRequest, ScrapeResponse
 from app.solver.engine import solver_engine
-from app.solver.sessions import session_manager
+from app.solver.sessions import apply_session, persist_session, session_manager
 from app.config import settings
 from app.logging_config import sanitize_proxy_url, get_request_id
 from app.security import check_target_url_async, SSRFBlockedError
@@ -86,19 +86,11 @@ async def flaresolverr_api(req: V1Request):
                 endTimestamp=int(time.time() * 1000)
             )
         
-        if req.session:
-            sess = await session_manager.get_session_async(req.session)
-            if sess:
-                if sess.cookies:
-                    req.cookies = (req.cookies or []) + sess.cookies
-                if sess.proxy and not req.proxy:
-                    req.proxy = {"url": sess.proxy}
+        await apply_session(req)
 
         try:
             solution = await solver_engine.process_request(req)
-            
-            if req.session and solution.cookies:
-                await session_manager.update_session_cookies_async(req.session, solution.cookies)
+            await persist_session(req, solution)
 
             if req.returnOnlyCookies:
                 solution.response = ""
@@ -200,7 +192,9 @@ async def native_scrape_api(req: ScrapeRequest):
     v1_req = req.to_v1_request()
 
     try:
+        await apply_session(v1_req)
         solution = await solver_engine.process_request(v1_req)
+        await persist_session(v1_req, solution)
         duration_ms = round((time.time() - start_ts) * 1000, 2)
 
         tier_used = solution.tier or "tier1_fast_tls"
@@ -282,7 +276,9 @@ async def transparent_proxy(
     )
 
     try:
+        await apply_session(v1_req)
         solution = await solver_engine.process_request(v1_req)
+        await persist_session(v1_req, solution)
         media_type = solution.headers.get("content-type", "text/html")
         if ";" in media_type:
             media_type = media_type.split(";")[0].strip()

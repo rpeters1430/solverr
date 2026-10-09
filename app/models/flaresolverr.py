@@ -1,5 +1,5 @@
 from typing import List, Dict, Any, Optional, Union
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator
 import time
 
 class CookieModel(BaseModel):
@@ -76,6 +76,8 @@ class V1Request(BaseModel):
     skip_cache: Optional[bool] = False
     # None falls back to FOLLOW_META_REFRESH.
     followMetaRefresh: Optional[bool] = None
+    # Set by apply_session() from the request's session, never by the client.
+    _browser_storage: Optional[Dict[str, Any]] = PrivateAttr(default=None)
 
     def follows_meta_refresh(self) -> bool:
         from app.config import settings
@@ -126,6 +128,8 @@ class SolutionModel(BaseModel):
     extracted: Optional[Dict[str, Any]] = None
     challengeType: Optional[str] = None
     tier: Optional[str] = None
+    # Browser localStorage/sessionStorage snapshot for the request's session; never sent to clients.
+    storage: Optional[Dict[str, Any]] = Field(default=None, exclude=True)
 
 class V1Response(BaseModel):
     status: str = "ok"  # "ok" or "error"

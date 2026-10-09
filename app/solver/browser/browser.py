@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 import logging
 import time
 from typing import Dict, List, Optional, Any
@@ -10,7 +11,7 @@ from app.models.flaresolverr import CookieModel, SolutionModel
 from app.solver.captcha_solver import captcha_solver
 from app.logging_config import sanitize_proxy_url
 
-from app.solver.browser.pool import CamoufoxPool, CAMOUFOX_AVAILABLE, browser_is_connected
+from app.solver.browser.pool import CamoufoxPool, CAMOUFOX_AVAILABLE, browser_is_connected, firefox_user_prefs
 from app.solver.browser.challenges import (
     ANUBIS_REJECTED_REASON,
     IP_BLOCKED_REASON,
@@ -87,6 +88,66 @@ def _describe_solve_error(e: BaseException, tier_timeout: float, tier_label: str
         except Exception:
             return RuntimeError(msg)
     return e
+
+
+def _context_options(browser_storage: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """new_context() options; a session's saved localStorage is restored through storage_state,
+    which applies it once at context creation exactly as a returning browser would have it."""
+    opts: Dict[str, Any] = {"service_workers": "block"}
+    local = (browser_storage or {}).get("local") or {}
+    if local:
+        opts["storage_state"] = {
+            "cookies": [],
+            "origins": [
+                {"origin": origin, "localStorage": [{"name": k, "value": v} for k, v in items.items()]}
+                for origin, items in local.items()
+            ],
+        }
+    return opts
+
+
+# Restores a session's sessionStorage for an origin the first time a document of it loads in this
+# context; a page that already wrote its own (a redirect back to the origin) is left alone.
+_RESTORE_SESSION_STORAGE_JS = """(entries) => {
+    const values = entries[location.origin];
+    if (!values) return;
+    try {
+        if (sessionStorage.length) return;
+        for (const [key, value] of Object.entries(values)) sessionStorage.setItem(key, value);
+    } catch (e) {}
+}"""
+
+
+async def _capture_storage(context: Any, page: Page) -> Optional[Dict[str, Any]]:
+    """This context's localStorage per origin, plus the final page's sessionStorage."""
+    local: Dict[str, Dict[str, str]] = {}
+    session: Dict[str, Dict[str, str]] = {}
+    try:
+        state = await asyncio.wait_for(context.storage_state(), timeout=3.0)
+        for origin in state.get("origins", []) or []:
+            items = {i["name"]: i["value"] for i in origin.get("localStorage", []) or []}
+            if items:
+                local[origin["origin"]] = items
+    except Exception as e:
+        logger.debug(f"[BrowserPool] localStorage capture notice: {e}")
+    try:
+        snap = await asyncio.wait_for(page.evaluate("""() => {
+            try {
+                const out = {};
+                for (let i = 0; i < sessionStorage.length; i++) {
+                    const k = sessionStorage.key(i);
+                    out[k] = sessionStorage.getItem(k);
+                }
+                return {origin: location.origin, items: out};
+            } catch (e) { return null; }
+        }"""), timeout=2.0)
+        if isinstance(snap, dict) and snap.get("items") and str(snap.get("origin", "")).startswith("http"):
+            session[snap["origin"]] = snap["items"]
+    except Exception as e:
+        logger.debug(f"[BrowserPool] sessionStorage capture notice: {e}")
+    if not local and not session:
+        return None
+    return {"local": local, "session": session}
 
 
 async def _safe_title(page: Page) -> str:
@@ -249,6 +310,7 @@ class BrowserPool:
             headless=settings.HEADLESS,
             os="linux",
             config={'forceScopeAccess': True},
+            firefox_user_prefs=firefox_user_prefs(),
             i_know_what_im_doing=True
         ) as browser_instance:
             context = await browser_instance.new_context(service_workers="block") if hasattr(browser_instance, "new_context") else browser_instance
@@ -283,6 +345,8 @@ class BrowserPool:
         screenshot_selector: Optional[str] = None,
         extract_records: Optional[Dict[str, Any]] = None,
         follow_meta_refresh: bool = False,
+        browser_storage: Optional[Dict[str, Any]] = None,
+        capture_storage: bool = False,
     ) -> SolutionModel:
         wait_start = time.monotonic()
         self._queued_at.add(wait_start)
@@ -322,6 +386,7 @@ class BrowserPool:
                             screenshot_full_page=screenshot_full_page, screenshot_selector=screenshot_selector,
                             extract_records=extract_records,
                             follow_meta_refresh=follow_meta_refresh,
+                            browser_storage=browser_storage, capture_storage=capture_storage,
                         ),
                         timeout=tier_timeout
                     )
@@ -358,6 +423,7 @@ class BrowserPool:
                         capture_screenshot=capture_screenshot, screenshot_full_page=screenshot_full_page,
                         screenshot_selector=screenshot_selector, extract_records=extract_records,
                         follow_meta_refresh=follow_meta_refresh,
+                        browser_storage=browser_storage, capture_storage=capture_storage,
                     ),
                     timeout=tier_timeout
                 )
@@ -390,6 +456,8 @@ class BrowserPool:
         screenshot_selector: Optional[str] = None,
         extract_records: Optional[Dict[str, Any]] = None,
         follow_meta_refresh: bool = False,
+        browser_storage: Optional[Dict[str, Any]] = None,
+        capture_storage: bool = False,
     ) -> SolutionModel:
         # Leave the ephemeral retry its minimum window (plus launch slack) out of the caller's budget.
         remaining_s = timeout_ms / 1000.0 - (time.monotonic() - start_time)
@@ -408,7 +476,7 @@ class BrowserPool:
         try:
             logger.info(f"[CamoufoxPool] Checked out warm instance (use #{inst.uses}) for {url}...")
             if hasattr(inst.browser, "new_context"):
-                context = await inst.browser.new_context(service_workers="block")
+                context = await inst.browser.new_context(**_context_options(browser_storage))
             elif inst.browser.contexts:
                 context = inst.browser.contexts[0]
             else:
@@ -434,6 +502,7 @@ class BrowserPool:
                 capture_screenshot=capture_screenshot, screenshot_full_page=screenshot_full_page,
                 screenshot_selector=screenshot_selector, extract_records=extract_records,
                 follow_meta_refresh=follow_meta_refresh,
+                browser_storage=browser_storage, capture_storage=capture_storage,
             )
         except BaseException as exc:
             disconnected = _is_browser_disconnected(exc)
@@ -490,6 +559,8 @@ class BrowserPool:
         screenshot_selector: Optional[str] = None,
         extract_records: Optional[Dict[str, Any]] = None,
         follow_meta_refresh: bool = False,
+        browser_storage: Optional[Dict[str, Any]] = None,
+        capture_storage: bool = False,
     ) -> SolutionModel:
         """Non-pooled launch for requests with their own proxy or user_agent, both fixed at launch."""
         # timeout_ms is what's left when this attempt starts, so its clock starts here (launch included).
@@ -504,10 +575,11 @@ class BrowserPool:
             disable_coop=True,
             os="linux",
             config={'forceScopeAccess': True},
+            firefox_user_prefs=firefox_user_prefs(),
             i_know_what_im_doing=True
         ) as browser_instance:
             if hasattr(browser_instance, "new_context"):
-                context_opts: Dict[str, Any] = {"service_workers": "block"}
+                context_opts: Dict[str, Any] = _context_options(browser_storage)
                 if user_agent:
                     context_opts["user_agent"] = user_agent
                 context = await browser_instance.new_context(**context_opts)
@@ -540,6 +612,7 @@ class BrowserPool:
                 capture_screenshot=capture_screenshot, screenshot_full_page=screenshot_full_page,
                 screenshot_selector=screenshot_selector, extract_records=extract_records,
                 follow_meta_refresh=follow_meta_refresh,
+                browser_storage=browser_storage, capture_storage=capture_storage,
             )
 
     async def _execute_solve_flow(
@@ -562,6 +635,8 @@ class BrowserPool:
         extract_records: Optional[Dict[str, Any]] = None,
         deadline: Optional[float] = None,
         follow_meta_refresh: bool = False,
+        browser_storage: Optional[Dict[str, Any]] = None,
+        capture_storage: bool = False,
     ) -> SolutionModel:
         # Navigation and the challenge loop share one deadline; the loop used to get a fresh full
         # timeout_ms after navigation, overrunning the tier's wait_for and starving the ephemeral retry.
@@ -576,6 +651,15 @@ class BrowserPool:
                 logger.warning(f"[BrowserPool] Error pre-loading cookies: {e}")
 
         await install_media_blocking(context)
+
+        saved_session_storage = (browser_storage or {}).get("session") or {}
+        if saved_session_storage:
+            try:
+                await context.add_init_script(
+                    script=f"({_RESTORE_SESSION_STORAGE_JS})({json.dumps(saved_session_storage)})"
+                )
+            except Exception as e:
+                logger.debug(f"[BrowserPool] sessionStorage restore notice: {e}")
 
         # Sensor cookies already in the context (cached ones replayed above) are not proof of a pass
         # during this solve: if a wall is up despite them, the site has stopped honouring them.
@@ -934,6 +1018,7 @@ class BrowserPool:
 
         raw_cookies = await read_context_cookies(context)
         captured_cookies = extract_captured_cookies(raw_cookies)
+        captured_storage = await _capture_storage(context, page) if capture_storage else None
 
         # Prefer the last main-frame status, then the initial response, then a guess.
         if is_browser_error(final_title, final_url):
@@ -957,7 +1042,8 @@ class BrowserPool:
             response=html_content,
             cookies=captured_cookies,
             userAgent=active_ua,
-            challengeType=last_detected_challenge
+            challengeType=last_detected_challenge,
+            storage=captured_storage,
         )
 
         if screenshot_b64:

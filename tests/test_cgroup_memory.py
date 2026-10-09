@@ -44,3 +44,18 @@ class TestCgroupMemoryUsage(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUserPrefsParsing(unittest.TestCase):
+    def test_valid_prefs(self):
+        self.assertEqual(config.parse_user_prefs(""), {})
+        self.assertEqual(config.parse_user_prefs(None), {})
+        self.assertEqual(
+            config.parse_user_prefs('{"a": "x", "b": true, "c": -2147483648}'),
+            {"a": "x", "b": True, "c": -2147483648},
+        )
+
+    def test_invalid_prefs_fail_loudly(self):
+        for bad in ("not json", "[1]", '{"a": 1.5}', '{"a": 2147483648}', '{"a": null}', '{"a": {}}'):
+            with self.assertRaises(ValueError, msg=bad):
+                config.parse_user_prefs(bad)
