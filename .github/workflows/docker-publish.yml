@@ -127,7 +127,7 @@ jobs:
         id: candidate
         env:
           LOCAL_TAG: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-staging-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          DIGEST: ${{ steps.build.outputs.digest || steps.build-retry.outputs.digest }}
+          DIGEST: ${{ steps.build.outcome == 'success' && steps.build.outputs.digest || steps.build-retry.outputs.digest }}
         run: |
           if [ "$PUBLISH" = true ]; then
             test -n "$DIGEST"

@@ -32,7 +32,7 @@ class TestDockerPublishWorkflow(unittest.TestCase):
         candidate = next(step for step in self.steps if step.get("id") == "candidate")
         self.assertEqual(
             candidate["env"]["DIGEST"],
-            "${{ steps.build.outputs.digest || steps.build-retry.outputs.digest }}",
+            "${{ steps.build.outcome == 'success' && steps.build.outputs.digest || steps.build-retry.outputs.digest }}",
         )
         self.assertNotIn("if", candidate)
         self.assertIn('test -n "$DIGEST"', candidate["run"])
