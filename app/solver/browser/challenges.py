@@ -1,5 +1,7 @@
+import json
 import re
-from typing import Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
+from urllib.parse import urlparse
 
 # Keys double as challenge type names in logs and PerformanceMetrics.challenges_solved.
 # Markers are structural (element classes, script paths, provider-owned hosts), never a bare
@@ -25,12 +27,14 @@ CHALLENGE_MARKERS: Dict[str, List[str]] = {
     "akamai": ["ak_bmsc", "akamai-bot-manager", "akamai_bm", "sec-if-cpt-container", "/_sec/cp_challenge/"],
     # AWS WAF inlines its config as window.gokuProps. The aws-waf-token cookie
     # can't be a marker because detection only sees the title and HTML.
-    "aws_waf": ["gokuprops", "awswaf"]
+    "aws_waf": ["gokuprops", "awswaf"],
+    # Cap (capjs.js.org) is a proof-of-work widget, a custom element a site embeds in its own forms.
+    "cap": ["<cap-widget"],
 }
 
 # Captcha widgets a site can embed in its own pages (a login form, a comment box). Finding one
 # doesn't mean the page is blocked; every other type exists only as a provider-served wall.
-WIDGET_CHALLENGES = frozenset({"cloudflare_turnstile", "recaptcha", "hcaptcha", "geetest"})
+WIDGET_CHALLENGES = frozenset({"cloudflare_turnstile", "recaptcha", "hcaptcha", "geetest", "cap"})
 
 # Content that only exists while the provider is serving its own interstitial, as opposed to the
 # markers above, some of which (telemetry scripts, embedded widgets) also ride on real pages.
@@ -78,7 +82,22 @@ _DATADOME_RT_RE = re.compile(r"""["']rt["']\s*:\s*["']([^"']*)["']""")
 _DATADOME_T_RE = re.compile(r"""["']t["']\s*:\s*["']([^"']*)["']""")
 _DATADOME_BLOCK_QUERY_RE = re.compile(r"[?&]t=bv\b")
 
+# Anubis (anubis.techaro.lol) serves every asset from this prefix; its wall is a proof-of-work the
+# page's own JS computes, and its verdict endpoints live under api/.
+_ANUBIS_PATH = "/.within.website/x/cmd/anubis/"
+_ANUBIS_BOOTSTRAP_RE = re.compile(r"/\.within\.website/x/cmd/anubis/static/js/main\.mjs(?:[?#]|$)", re.I)
+_ANUBIS_REJECT_IMG_RE = re.compile(r"/\.within\.website/x/cmd/anubis/static/img/reject\.webp(?:[?#]|$)", re.I)
+# Markup inside these is never executed or shown, so a wall quoted there (docs, a code sample) doesn't count.
+_INERT_BLOCK_RE = re.compile(r"<(template|noscript|textarea|style)\b[^>]*>.*?</\1\s*>", re.I | re.S)
+_SCRIPT_RE = re.compile(r"<script\b([^>]*)>(.*?)</script\s*>", re.I | re.S)
+_IMG_RE = re.compile(r"<img\b([^>]*)>", re.I)
+_ATTR_RE = re.compile(r"""([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))""")
+
+# Google search answers an IP it is rate limiting with a redirect to /sorry/; only another IP clears it.
+_GOOGLE_SEARCH_HOSTS = frozenset({"google.com", "www.google.com", "ipv4.google.com", "ipv6.google.com"})
+
 IP_BLOCKED_REASON = "the site refused this IP address outright"
+ANUBIS_REJECTED_REASON = "the site's Anubis policy rejected this client"
 UNSOLVABLE_CAPTCHA_REASON = "it demands an interactive captcha that Solverr cannot solve"
 
 AGE_GATE_MARKERS = ["disclaimer-dialog", "close_enter_site_button", "btn-agree"]
@@ -142,6 +161,77 @@ def challenge_from_headers(headers: Optional[Mapping[str, str]], status: Optiona
     return None
 
 
+def _attrs(raw: str) -> Dict[str, str]:
+    return {m.group(1).lower(): (m.group(2) or m.group(3) or m.group(4) or "") for m in _ATTR_RE.finditer(raw)}
+
+
+def _get_ci(data: Any, key: str) -> Any:
+    """dict lookup ignoring key case, since some callers hand detection a lowercased page."""
+    if not isinstance(data, dict):
+        return None
+    for k, v in data.items():
+        if str(k).lower() == key:
+            return v
+    return None
+
+
+def anubis_state(content: str) -> Optional[str]:
+    """"challenge" while Anubis's proof-of-work wall is up, "blocked" on its rejection page, else None.
+
+    Structural only: the JSON metadata scripts Anubis renders, or its own bootstrap module. A page
+    that merely mentions or documents Anubis has neither in executable markup."""
+    if not content:
+        return None
+    lowered = content.lower()
+    if "anubis_" not in lowered and _ANUBIS_PATH not in lowered:
+        return None
+    live = _INERT_BLOCK_RE.sub("", content)
+    version = challenge = bootstrap = False
+    for match in _SCRIPT_RE.finditer(live):
+        attrs = _attrs(match.group(1))
+        if _ANUBIS_BOOTSTRAP_RE.search(attrs.get("src", "")):
+            bootstrap = True
+        script_id = attrs.get("id", "").lower()
+        if script_id not in ("anubis_challenge", "anubis_version") or attrs.get("type", "").lower() != "application/json":
+            continue
+        try:
+            data = json.loads(match.group(2))
+        except ValueError:
+            # Broken metadata still counts once the real bootstrap is on the page.
+            continue
+        if script_id == "anubis_version":
+            version = isinstance(data, str) and len(data) > 0
+        else:
+            ch = _get_ci(data, "challenge")
+            challenge = bool(
+                _get_ci(_get_ci(data, "rules"), "algorithm") and _get_ci(ch, "id") and _get_ci(ch, "randomdata")
+            )
+    if version and any(_ANUBIS_REJECT_IMG_RE.search(_attrs(m.group(1)).get("src", "")) for m in _IMG_RE.finditer(live)):
+        return "blocked"
+    if challenge or (version and bootstrap):
+        return "challenge"
+    return None
+
+
+def is_anubis_verification_url(url: str) -> bool:
+    """Anubis's pass-challenge endpoint, which a solved wall passes through on its way back."""
+    try:
+        return f"{_ANUBIS_PATH}api/" in (urlparse(url).path or "")
+    except ValueError:
+        return False
+
+
+def is_google_sorry_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https") or parsed.port or parsed.username or parsed.password:
+        return False
+    host = (parsed.hostname or "").rstrip(".")
+    return host in _GOOGLE_SEARCH_HOSTS and (parsed.path == "/sorry" or parsed.path.startswith("/sorry/"))
+
+
 def detect_challenge(
     title: str,
     content: str,
@@ -155,6 +245,8 @@ def detect_challenge(
     declared = challenge_from_headers(headers, status)
     if declared:
         return declared
+    if check_content and anubis_state(content):
+        return "anubis"
     title_lower = title.lower() if title else ""
     content_lower = content.lower() if content else ""
     for ctype, markers in CHALLENGE_MARKERS.items():
@@ -177,6 +269,9 @@ def is_challenge_wall(
         return True
     if not challenge:
         return False
+    if challenge == "anubis":
+        # Anubis is a reverse proxy: its markup is never part of the page it guards.
+        return anubis_state(content) is not None
     if challenge_from_headers(headers, status):
         return True
     if status in WALL_STATUS_CODES:
@@ -192,11 +287,13 @@ def is_challenge_wall(
 
 
 def ip_block_provider(content: str, url: str = "") -> Optional[str]:
-    """The provider that refused the egress IP outright ("cloudflare" or "datadome"), or None.
+    """The provider that refused the egress IP outright ("cloudflare", "datadome" or "google"), or None.
 
     No amount of waiting or clicking clears these; only a different IP does."""
     if url and "/cdn-cgi/error/" in url:
         return "cloudflare"
+    if url and is_google_sorry_url(url):
+        return "google"
     content_lower = content.lower() if content else ""
     if not content_lower:
         return None

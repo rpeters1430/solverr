@@ -12,6 +12,7 @@ from app.solver.browser import WIDGET_CHALLENGES, detect_challenge, is_challenge
 from app.config import settings
 from app.logging_config import sanitize_proxy_url
 from app.security import check_target_url_async
+from app.solver.meta_refresh import MAX_REFRESH_HOPS, meta_refresh_target
 
 logger = logging.getLogger("solverr.fast_tls")
 
@@ -200,6 +201,59 @@ class FastTLSEngine:
             self._sessions.clear()
             logger.info("[FastTLS] Session pool closed.")
 
+    async def _fetch_following_redirects(
+        self,
+        session: AsyncSession,
+        url: str,
+        method: str,
+        post_data: Optional[str],
+        req_headers: Dict[str, str],
+        cookie_dict: Optional[Dict[str, str]],
+        proxies: Optional[Dict[str, str]],
+        deadline: float,
+        first_label: str = "Target",
+    ):
+        """Follow HTTP redirects by hand so every hop gets the SSRF check, within one deadline."""
+        current_url = url
+        current_method = method
+        current_post_data = post_data
+        resp = None
+
+        for redirect_count in range(MAX_REDIRECTS + 1):
+            await check_target_url_async(
+                current_url,
+                label=first_label if redirect_count == 0 else "Redirect target",
+            )
+            remaining_timeout = deadline - time.monotonic()
+            if remaining_timeout <= 0:
+                raise asyncio.TimeoutError("Fast TLS redirect chain exhausted its timeout")
+            request_kwargs = {
+                "headers": req_headers,
+                "cookies": cookie_dict if redirect_count == 0 else None,
+                "proxies": proxies,
+                "timeout": remaining_timeout,
+                "allow_redirects": False,
+            }
+            if current_method == "POST":
+                resp = await session.post(current_url, data=current_post_data, **request_kwargs)
+            else:
+                resp = await session.get(current_url, **request_kwargs)
+
+            location = resp.headers.get("location")
+            if resp.status_code not in (301, 302, 303, 307, 308) or not location:
+                break
+            if redirect_count >= MAX_REDIRECTS:
+                raise RuntimeError(f"Redirect limit ({MAX_REDIRECTS}) exceeded")
+
+            next_url = urljoin(str(resp.url), location)
+            await check_target_url_async(next_url, label="Redirect target")
+            if resp.status_code == 303 or (resp.status_code in (301, 302) and current_method == "POST"):
+                current_method = "GET"
+                current_post_data = None
+            current_url = next_url
+
+        return resp
+
     async def request(
         self,
         url: str,
@@ -210,7 +264,8 @@ class FastTLSEngine:
         proxy: Optional[str] = None,
         timeout: int = 15,
         user_agent: Optional[str] = None,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        follow_meta_refresh: bool = False,
     ) -> Tuple[bool, Optional[SolutionModel]]:
         # A pinned UA gets the TLS target closest to its own browser version, not a rotated one.
         if user_agent:
@@ -258,43 +313,26 @@ class FastTLSEngine:
         deadline = time.monotonic() + timeout
         try:
             session = await self._get_session(pool_key, impersonate_target)
-            current_url = url
-            current_method = method.upper()
-            current_post_data = post_data
-            resp = None
+            resp = await self._fetch_following_redirects(
+                session, url, method.upper(), post_data, req_headers, cookie_dict, proxies, deadline
+            )
 
-            for redirect_count in range(MAX_REDIRECTS + 1):
-                await check_target_url_async(
-                    current_url,
-                    label="Target" if redirect_count == 0 else "Redirect target",
-                )
-                remaining_timeout = deadline - time.monotonic()
-                if remaining_timeout <= 0:
-                    raise asyncio.TimeoutError("Fast TLS redirect chain exhausted its timeout")
-                request_kwargs = {
-                    "headers": req_headers,
-                    "cookies": cookie_dict if redirect_count == 0 else None,
-                    "proxies": proxies,
-                    "timeout": remaining_timeout,
-                    "allow_redirects": False,
-                }
-                if current_method == "POST":
-                    resp = await session.post(current_url, data=current_post_data, **request_kwargs)
-                else:
-                    resp = await session.get(current_url, **request_kwargs)
-
-                location = resp.headers.get("location")
-                if resp.status_code not in (301, 302, 303, 307, 308) or not location:
+            # Opt-in: a short-delay <meta http-equiv="refresh"> is followed like any other redirect.
+            visited = {url, str(resp.url)}
+            for hop in range(1, MAX_REFRESH_HOPS + 1):
+                if not follow_meta_refresh or not (200 <= resp.status_code < 300):
                     break
-                if redirect_count >= MAX_REDIRECTS:
-                    raise RuntimeError(f"Redirect limit ({MAX_REDIRECTS}) exceeded")
-
-                next_url = urljoin(str(resp.url), location)
-                await check_target_url_async(next_url, label="Redirect target")
-                if resp.status_code == 303 or (resp.status_code in (301, 302) and current_method == "POST"):
-                    current_method = "GET"
-                    current_post_data = None
-                current_url = next_url
+                if "html" not in (resp.headers.get("content-type") or "").lower():
+                    break
+                refresh = meta_refresh_target(resp.text or "", str(resp.url))
+                if not refresh or refresh[1] in visited:
+                    break
+                visited.add(refresh[1])
+                logger.info(f"[FastTLS] Following meta refresh (hop {hop}/{MAX_REFRESH_HOPS}) -> {refresh[1]}")
+                resp = await self._fetch_following_redirects(
+                    session, refresh[1], "GET", None, req_headers, None, proxies, deadline, first_label="Redirect target"
+                )
+                visited.add(str(resp.url))
 
             is_cf_challenge = False
             matched_marker = None

@@ -212,3 +212,76 @@ class TestIpBlockProvider(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+ANUBIS_CHALLENGE_PAGE = """<!doctype html><html><head><title>Making sure you&#39;re not a bot!</title>
+<script id="anubis_version" type="application/json">"v1.21.3"</script>
+<script id="anubis_challenge" type="application/json">{"rules":{"algorithm":"fast","difficulty":4},
+"challenge":{"id":"0199abcd","randomData":"9f86d081884c7d65"}}</script>
+<script async type="module" src="/.within.website/x/cmd/anubis/static/js/main.mjs?cacheBuster=v1.21.3"></script>
+</head><body><h1 id="title">Making sure you're not a bot!</h1></body></html>"""
+
+ANUBIS_REJECT_PAGE = """<html><head><title>Oh noes!</title>
+<script id="anubis_version" type="application/json">"v1.21.3"</script></head>
+<body><img src="/.within.website/x/cmd/anubis/static/img/reject.webp?cacheBuster=v1.21.3"><p>Access denied</p></body></html>"""
+
+
+class TestAnubisCapGoogle(unittest.TestCase):
+    def test_anubis_challenge_page(self):
+        from app.solver.browser import anubis_state
+        self.assertEqual(anubis_state(ANUBIS_CHALLENGE_PAGE), "challenge")
+        self.assertEqual(detect_challenge("", ANUBIS_CHALLENGE_PAGE, check_content=True), "anubis")
+        self.assertTrue(is_challenge_wall("anubis", "", ANUBIS_CHALLENGE_PAGE, status=200))
+
+    def test_anubis_detected_in_lowercased_content(self):
+        # Fast TLS hands detection a lowercased body.
+        self.assertEqual(detect_challenge("", ANUBIS_CHALLENGE_PAGE.lower(), check_content=True), "anubis")
+
+    def test_anubis_bootstrap_with_version_is_a_wall_even_without_challenge_metadata(self):
+        from app.solver.browser import anubis_state
+        page = ANUBIS_CHALLENGE_PAGE.replace('"randomData":"9f86d081884c7d65"', '"randomData":""')
+        self.assertEqual(anubis_state(page), "challenge")
+
+    def test_anubis_reject_page_is_blocked(self):
+        from app.solver.browser import anubis_state
+        self.assertEqual(anubis_state(ANUBIS_REJECT_PAGE), "blocked")
+
+    def test_page_documenting_anubis_is_not_a_wall(self):
+        from app.solver.browser import anubis_state
+        docs = (
+            "<html><body><p>Anubis serves /.within.website/x/cmd/anubis/static/js/main.mjs and renders "
+            "anubis_challenge metadata.</p><noscript>" + ANUBIS_CHALLENGE_PAGE + "</noscript>"
+            "<textarea>" + ANUBIS_REJECT_PAGE + "</textarea></body></html>"
+        )
+        self.assertIsNone(anubis_state(docs))
+        self.assertIsNone(detect_challenge("Anubis docs", docs, check_content=True))
+
+    def test_anubis_verification_url(self):
+        from app.solver.browser import is_anubis_verification_url
+        self.assertTrue(is_anubis_verification_url(
+            "https://git.example.org/.within.website/x/cmd/anubis/api/pass-challenge?response=abc"
+        ))
+        self.assertFalse(is_anubis_verification_url("https://git.example.org/repo"))
+
+    def test_cap_widget_is_an_embedded_widget(self):
+        from app.solver.browser import WIDGET_CHALLENGES
+        page = '<form><cap-widget data-cap-api-endpoint="/api/"></cap-widget><button>Send</button></form>'
+        self.assertEqual(detect_challenge("Contact", page, check_content=True), "cap")
+        self.assertIn("cap", WIDGET_CHALLENGES)
+        self.assertFalse(is_challenge_wall("cap", "Contact", page, status=200))
+
+    def test_google_sorry_is_an_ip_block(self):
+        from app.solver.browser import is_google_sorry_url
+        sorry = "https://www.google.com/sorry/index?continue=https://www.google.com/search%3Fq%3Dx"
+        self.assertTrue(is_google_sorry_url(sorry))
+        self.assertTrue(is_google_sorry_url("https://google.com./sorry"))
+        self.assertEqual(ip_block_provider("<html></html>", sorry), "google")
+
+    def test_lookalike_sorry_urls_are_not_google(self):
+        from app.solver.browser import is_google_sorry_url
+        self.assertFalse(is_google_sorry_url("https://www.google.com/sorrybutnot"))
+        self.assertFalse(is_google_sorry_url("https://evil.example/sorry/index"))
+        self.assertFalse(is_google_sorry_url("https://www.google.com.evil.example/sorry/"))
+        self.assertFalse(is_google_sorry_url("https://www.google.com:8443/sorry/"))
+        self.assertFalse(is_google_sorry_url("ftp://www.google.com/sorry/"))
+        self.assertIsNone(ip_block_provider("<html></html>", "https://www.google.com/search?q=x"))

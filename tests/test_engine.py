@@ -79,6 +79,39 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sol.status, 200)
             self.assertEqual(browser_mock.call_count, 2)
 
+    async def test_google_sorry_at_tier1_skips_same_ip_browser_and_goes_to_fallback(self):
+        sorry = SolutionModel(url="https://www.google.com/sorry/index?continue=x", status=429, response="<html></html>")
+        with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, sorry))), \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock(return_value=_sol(200))) as browser_mock, \
+             patch("app.solver.engine.captcha_solver.api_key", None), \
+             patch.object(settings, "FALLBACK_PROXY_URL", "http://example.com:8080"):
+            sol = await self.engine.process_request(V1Request(cmd="request.get", url="https://www.google.com/search?q=x"))
+            self.assertEqual(sol.tier, "tier4_fallback_proxy")
+            browser_mock.assert_called_once()
+            self.assertEqual(browser_mock.call_args.kwargs["proxy"], {"url": "http://example.com:8080"})
+
+    async def test_google_sorry_without_fallback_fails_fast_as_ip_block(self):
+        from app.solver.browser import ChallengeNotSolvedError
+        sorry = SolutionModel(url="https://www.google.com/sorry/index", status=429, response="<html></html>")
+        with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, sorry))), \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock()) as browser_mock, \
+             patch("app.solver.engine.captcha_solver.api_key", None), \
+             patch.object(settings, "FALLBACK_PROXY_URL", None):
+            with self.assertRaises(ChallengeNotSolvedError) as ctx:
+                await self.engine.process_request(V1Request(cmd="request.get", url="https://www.google.com/search?q=x"))
+            self.assertTrue(ctx.exception.ip_blocked)
+            browser_mock.assert_not_called()
+
+    async def test_google_sorry_goes_to_browser_when_paid_solver_is_configured(self):
+        sorry = SolutionModel(url="https://www.google.com/sorry/index", status=429, response="<html></html>")
+        with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, sorry))), \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock(return_value=_sol(200))) as browser_mock, \
+             patch("app.solver.engine.captcha_solver.api_key", "key"), \
+             patch.object(settings, "FALLBACK_PROXY_URL", None):
+            sol = await self.engine.process_request(V1Request(cmd="request.get", url="https://www.google.com/search?q=x"))
+            self.assertEqual(sol.tier, "tier3_stealth_browser")
+            browser_mock.assert_called_once()
+
     async def test_browser_failure_without_fallback_proxy_raises(self):
         with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \
              patch("app.solver.engine.browser_pool.solve", new=AsyncMock(side_effect=RuntimeError("boom"))), \

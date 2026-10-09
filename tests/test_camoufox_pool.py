@@ -426,6 +426,69 @@ class TestSolveFlowWallVersusRealPage(unittest.IsolatedAsyncioTestCase):
         self.assertLess(elapsed, 2.0)
 
 
+class TestSolveFlowAnubis(unittest.IsolatedAsyncioTestCase):
+    _run = TestSolveFlowWallVersusRealPage._run
+
+    async def test_anubis_reject_page_fails_at_once(self):
+        from tests.test_challenge_detection import ANUBIS_REJECT_PAGE
+        page = _StaticPage()
+        page.page_title = "Oh noes!"
+        page.html = ANUBIS_REJECT_PAGE
+        err, elapsed = await self._run(page, timeout_s=10.0)
+        self.assertIsInstance(err, ChallengeNotSolvedError)
+        self.assertEqual(err.challenge, "anubis")
+        self.assertFalse(err.ip_blocked)
+        self.assertLess(elapsed, 2.0)
+
+    async def test_anubis_wall_that_never_clears_is_not_returned_as_solved(self):
+        from tests.test_challenge_detection import ANUBIS_CHALLENGE_PAGE
+        page = _StaticPage()
+        page.page_title = "Making sure you're not a bot!"
+        page.html = ANUBIS_CHALLENGE_PAGE
+        err, _ = await self._run(page, timeout_s=1.5)
+        self.assertIsInstance(err, ChallengeNotSolvedError)
+        self.assertEqual(err.challenge, "anubis")
+
+    async def test_anubis_wall_clears_once_its_proof_of_work_redirects(self):
+        from tests.test_challenge_detection import ANUBIS_CHALLENGE_PAGE
+
+        class SolvingPage(_StaticPage):
+            reads = 0
+
+            async def content(self):
+                SolvingPage.reads += 1
+                return ANUBIS_CHALLENGE_PAGE if SolvingPage.reads <= 2 else REAL_HTML
+
+        page = SolvingPage()
+        sol, _ = await self._run(page, timeout_s=6.0)
+        self.assertEqual(sol.status, 200)
+        self.assertEqual(sol.challengeType, "anubis")
+
+    async def test_cap_widget_is_solved_by_its_own_proof_of_work(self):
+        from unittest.mock import AsyncMock
+        page = _StaticPage()
+        page.page_title = "Contact us"
+        page.html = '<html><form><cap-widget data-cap-api-endpoint="/cap/"></cap-widget></form>' + REAL_BODY + "</html>"
+        start = AsyncMock(return_value=True)
+        solved = AsyncMock(side_effect=[False, True, True, True])
+        sol, elapsed = await self._run(page, timeout_s=6.0, start_cap_solve=start, cap_widgets_solved=solved)
+        self.assertEqual(sol.challengeType, "cap")
+        start.assert_awaited()
+        self.assertLess(elapsed, 5.0)
+
+    async def test_google_sorry_page_is_an_ip_block_without_a_paid_solver(self):
+        page = _StaticPage()
+        page.url = "https://www.google.com/sorry/index?continue=x"
+        page.page_title = "https://www.google.com/search?q=x"
+        page.html = '<html><div id="recaptcha" class="g-recaptcha" data-sitekey="k"></div></html>'
+        with patch.object(browser_module.captcha_solver, "api_key", None):
+            err, elapsed = await self._run(page, status=429, timeout_s=10.0)
+        self.assertIsInstance(err, ChallengeNotSolvedError)
+        self.assertEqual(err.challenge, "google")
+        self.assertTrue(err.ip_blocked)
+        self.assertLess(elapsed, 2.0)
+
+
 CF_WALL_HTML = '<html><h2 id="challenge-running">Checking</h2><script>window._cf_chl_opt={}</script></html>'
 REAL_HTML = "<html>" + REAL_BODY + "</html>"
 

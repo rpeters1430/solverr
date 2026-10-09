@@ -12,11 +12,14 @@ from app.logging_config import sanitize_proxy_url
 
 from app.solver.browser.pool import CamoufoxPool, CAMOUFOX_AVAILABLE
 from app.solver.browser.challenges import (
+    ANUBIS_REJECTED_REASON,
     IP_BLOCKED_REASON,
     UNSOLVABLE_CAPTCHA_REASON,
     WIDGET_CHALLENGES,
     ChallengeNotSolvedError,
+    anubis_state,
     detect_challenge,
+    is_anubis_verification_url,
     is_challenge_title,
     is_challenge_wall,
     ip_block_provider,
@@ -26,12 +29,15 @@ from app.solver.browser.challenges import (
 )
 from app.solver.browser.captcha import CAPTCHA_SOLVER_WIDGETS, try_captcha_solver_escalation
 from app.solver.browser.cookies import build_playwright_cookies, read_context_cookies, extract_captured_cookies
-from app.solver.browser.navigation import install_media_blocking, navigate_to_target
+from app.solver.browser.content import decode_text_body, is_non_html_text
+from app.solver.browser.navigation import follow_meta_refresh as follow_meta_refresh_in_page, install_media_blocking, navigate_to_target
 from app.solver.browser.interactions import (
     AKAMAI_HOLD_SECONDS,
     akamai_press_and_hold,
+    cap_widgets_solved,
     describe_challenge_frames,
     dispatch_challenge_click,
+    start_cap_solve,
     wander_mouse,
 )
 from app.solver.browser.clearance import BLOCK_PAGE_COOKIES, has_earned_sensor_cookie, host_of, sensor_snapshot
@@ -81,6 +87,28 @@ def _describe_solve_error(e: BaseException, tier_timeout: float, tier_label: str
         except Exception:
             return RuntimeError(msg)
     return e
+
+
+async def _safe_title(page: Page) -> str:
+    try:
+        return await page.title()
+    except Exception:
+        return ""
+
+
+def _header_value(headers: Dict[str, str], name: str) -> str:
+    for key, value in headers.items():
+        if key.lower() == name:
+            return value
+    return ""
+
+
+def _raise_if_ip_blocked(content: str, url: str) -> None:
+    blocked_by = ip_block_provider(content, url)
+    # Google's /sorry/ page is a reCAPTCHA; with a paid solver configured it is worth a try
+    # before giving the budget to another IP.
+    if blocked_by and not (blocked_by == "google" and captcha_solver.enabled):
+        raise ChallengeNotSolvedError(blocked_by, IP_BLOCKED_REASON, ip_blocked=True)
 
 
 def _is_solution_acceptable(sol: Optional[SolutionModel]) -> bool:
@@ -252,6 +280,7 @@ class BrowserPool:
         screenshot_full_page: bool = False,
         screenshot_selector: Optional[str] = None,
         extract_records: Optional[Dict[str, Any]] = None,
+        follow_meta_refresh: bool = False,
     ) -> SolutionModel:
         wait_start = time.monotonic()
         self._queued_at.add(wait_start)
@@ -290,6 +319,7 @@ class BrowserPool:
                             wait_delay_ms=wait_delay_ms, capture_screenshot=capture_screenshot,
                             screenshot_full_page=screenshot_full_page, screenshot_selector=screenshot_selector,
                             extract_records=extract_records,
+                            follow_meta_refresh=follow_meta_refresh,
                         ),
                         timeout=tier_timeout
                     )
@@ -325,6 +355,7 @@ class BrowserPool:
                         start_time=start_time, wait_selector=wait_selector, wait_delay_ms=wait_delay_ms,
                         capture_screenshot=capture_screenshot, screenshot_full_page=screenshot_full_page,
                         screenshot_selector=screenshot_selector, extract_records=extract_records,
+                        follow_meta_refresh=follow_meta_refresh,
                     ),
                     timeout=tier_timeout
                 )
@@ -356,6 +387,7 @@ class BrowserPool:
         screenshot_full_page: bool = False,
         screenshot_selector: Optional[str] = None,
         extract_records: Optional[Dict[str, Any]] = None,
+        follow_meta_refresh: bool = False,
     ) -> SolutionModel:
         # Leave the ephemeral retry its minimum window (plus launch slack) out of the caller's budget.
         remaining_s = timeout_ms / 1000.0 - (time.monotonic() - start_time)
@@ -399,6 +431,7 @@ class BrowserPool:
                 wait_delay_ms=wait_delay_ms,
                 capture_screenshot=capture_screenshot, screenshot_full_page=screenshot_full_page,
                 screenshot_selector=screenshot_selector, extract_records=extract_records,
+                follow_meta_refresh=follow_meta_refresh,
             )
         except BaseException as exc:
             disconnected = _is_browser_disconnected(exc)
@@ -454,6 +487,7 @@ class BrowserPool:
         screenshot_full_page: bool = False,
         screenshot_selector: Optional[str] = None,
         extract_records: Optional[Dict[str, Any]] = None,
+        follow_meta_refresh: bool = False,
     ) -> SolutionModel:
         """Non-pooled launch for requests with their own proxy or user_agent, both fixed at launch."""
         # timeout_ms is what's left when this attempt starts, so its clock starts here (launch included).
@@ -503,6 +537,7 @@ class BrowserPool:
                 wait_delay_ms=wait_delay_ms,
                 capture_screenshot=capture_screenshot, screenshot_full_page=screenshot_full_page,
                 screenshot_selector=screenshot_selector, extract_records=extract_records,
+                follow_meta_refresh=follow_meta_refresh,
             )
 
     async def _execute_solve_flow(
@@ -524,6 +559,7 @@ class BrowserPool:
         screenshot_selector: Optional[str] = None,
         extract_records: Optional[Dict[str, Any]] = None,
         deadline: Optional[float] = None,
+        follow_meta_refresh: bool = False,
     ) -> SolutionModel:
         # Navigation and the challenge loop share one deadline; the loop used to get a fresh full
         # timeout_ms after navigation, overrunning the tier's wait_for and starving the ephemeral retry.
@@ -548,6 +584,9 @@ class BrowserPool:
         last_main_status: Dict[str, Optional[int]] = {"code": None}
         # Providers declare some walls only in response headers (cf-mitigated, x-amzn-waf-action, x-dd-b).
         last_main_headers: Dict[str, str] = {}
+        # Kept so a non-HTML document (JSON, XML, plain text) is returned as its own bytes rather
+        # than as the viewer page Firefox renders around it.
+        last_main_response: Dict[str, Any] = {}
 
         def _on_response(resp):
             try:
@@ -556,6 +595,7 @@ class BrowserPool:
                     last_main_status["code"] = resp.status
                     last_main_headers.clear()
                     last_main_headers.update(resp.headers)
+                    last_main_response["resp"] = resp
             except Exception:
                 pass
 
@@ -628,9 +668,9 @@ class BrowserPool:
             content_lower = content.lower() if content else ""
 
             if check_content:
-                blocked_by = ip_block_provider(content, curr_url)
-                if blocked_by:
-                    raise ChallengeNotSolvedError(blocked_by, IP_BLOCKED_REASON, ip_blocked=True)
+                _raise_if_ip_blocked(content, curr_url)
+                if anubis_state(content) == "blocked":
+                    raise ChallengeNotSolvedError("anubis", ANUBIS_REJECTED_REASON)
 
             active_challenge = detect_challenge(
                 title, content, check_content, headers=last_main_headers, status=last_main_status["code"]
@@ -642,6 +682,9 @@ class BrowserPool:
                 if active_challenge and not active_wall and active_challenge not in WIDGET_CHALLENGES:
                     # A provider's telemetry script on the real page, not a challenge.
                     active_challenge = None
+            if not active_challenge and is_anubis_verification_url(curr_url):
+                # Between a solved proof-of-work and the redirect back to the page asked for.
+                active_challenge = "anubis"
             if active_challenge:
                 last_detected_challenge = active_challenge
             elif not check_content and last_detected_challenge:
@@ -708,7 +751,10 @@ class BrowserPool:
                         except Exception:
                             pass
 
-                    if not challenge_cleared:
+                    if not challenge_cleared and active_challenge == "cap":
+                        challenge_cleared = await cap_widgets_solved(page)
+
+                    if not challenge_cleared and active_challenge != "cap":
                         try:
                             widget_solved = await page.evaluate("""() => {
                                 const ts = document.querySelector('[name="cf-turnstile-response"], input[name*="turnstile-response"]');
@@ -727,7 +773,10 @@ class BrowserPool:
             if challenge_cleared:
                 # Avoid returning a hollow mid-redirect snapshot.
                 page_ready = False
-                if title and title.strip():
+                if is_non_html_text(_header_value(last_main_headers, "content-type")):
+                    # A short JSON or text answer has no title and a tiny body; it is complete as served.
+                    page_ready = True
+                elif title and title.strip():
                     try:
                         page_ready = await page.evaluate("""() => {
                             return (document.body && document.body.innerHTML.trim().length > 100) || document.readyState === 'complete';
@@ -763,6 +812,12 @@ class BrowserPool:
                     akamai_held = await akamai_press_and_hold(page)
                 await wander_mouse(page)
                 next_click_at = time.monotonic() + CHALLENGE_CLICK_RETRY_SECONDS
+            elif active_challenge == "anubis":
+                # The page's own JS computes Anubis's proof-of-work and redirects; nothing to click.
+                pass
+            elif now_ts >= next_click_at and (now_ts - loop_start) > 0.6 and active_challenge == "cap":
+                started = await start_cap_solve(page)
+                next_click_at = time.monotonic() + (CHALLENGE_CLICK_COOLDOWN_SECONDS if started else CHALLENGE_CLICK_RETRY_SECONDS)
             elif now_ts >= next_click_at and (now_ts - loop_start) > 0.6:
                 clicked, age_gate_clicked = await dispatch_challenge_click(page, active_challenge, title, age_gate_clicked)
                 next_click_at = time.monotonic() + (CHALLENGE_CLICK_COOLDOWN_SECONDS if clicked else CHALLENGE_CLICK_RETRY_SECONDS)
@@ -787,6 +842,9 @@ class BrowserPool:
                         logger.info(f"[CaptchaSolver] Page settled after token injection. Final Title: '{settle_title}'")
                         break
                     await asyncio.sleep(0.3)
+
+        if follow_meta_refresh and not is_browser_error(await _safe_title(page), page.url or ""):
+            await follow_meta_refresh_in_page(page, deadline - SOLVE_FINALIZE_RESERVE_SECONDS)
 
         if wait_selector:
             try:
@@ -848,13 +906,24 @@ class BrowserPool:
                 final_title = final_title or ""
                 html_content = ""
 
+        response_headers = {"content-type": "text/html"}
+        main_content_type = _header_value(last_main_headers, "content-type")
+        main_resp = last_main_response.get("resp")
+        if main_resp is not None and is_non_html_text(main_content_type):
+            try:
+                raw = await asyncio.wait_for(main_resp.body(), timeout=5.0)
+                html_content = decode_text_body(raw, main_content_type)
+                response_headers = {"content-type": main_content_type}
+            except Exception as e:
+                logger.debug(f"[BrowserPool] Raw body read notice: {e}")
+
         # A wall that outlived the attempt is a failed solve, not a page to hand back as solved.
         if not cleared and not is_browser_error(final_title, final_url):
             final_status = last_main_status["code"]
             final_challenge = detect_challenge(final_title, html_content, True, headers=last_main_headers, status=final_status)
-            blocked_by = ip_block_provider(html_content, final_url)
-            if blocked_by:
-                raise ChallengeNotSolvedError(blocked_by, IP_BLOCKED_REASON, ip_blocked=True)
+            _raise_if_ip_blocked(html_content, final_url)
+            if anubis_state(html_content) == "blocked":
+                raise ChallengeNotSolvedError("anubis", ANUBIS_REJECTED_REASON)
             if is_challenge_wall(final_challenge, final_title, html_content, status=final_status, headers=last_main_headers):
                 raise ChallengeNotSolvedError(
                     final_challenge or last_detected_challenge or "unrecognized",
@@ -882,7 +951,7 @@ class BrowserPool:
         solution = SolutionModel(
             url=final_url,
             status=status_code,
-            headers={"content-type": "text/html"},
+            headers=response_headers,
             response=html_content,
             cookies=captured_cookies,
             userAgent=active_ua,

@@ -148,6 +148,10 @@ class Settings:
     # Bounds the per-domain TLS profile score dict, which otherwise grows forever.
     MAX_FAST_TLS_DOMAIN_SCORES: int = int(os.getenv("MAX_FAST_TLS_DOMAIN_SCORES", "2000"))
 
+    # Default for requests that don't set followMetaRefresh: follow short-delay
+    # <meta http-equiv="refresh"> redirects (at most 3 hops, delay <= 10s).
+    FOLLOW_META_REFRESH: bool = os.getenv("FOLLOW_META_REFRESH", "false").lower() in ("true", "1", "yes")
+
     ENABLE_MCP: bool = os.getenv("ENABLE_MCP", "true").lower() in ("true", "1", "yes")
     # Without API_KEY, the Host/Origin check is MCP's only DNS-rebinding guard, so it defaults to localhost.
     # Hosts are "host:port" or "host:*"; origins are full URLs. Both are ignored once API_KEY is set.

@@ -44,6 +44,7 @@ async def solverr_scrape(
     extract_rules: Optional[Dict[str, str]] = None,
     extract_records: Optional[Dict[str, Any]] = None,
     max_timeout_ms: int = 60000,
+    follow_meta_refresh: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Fetch a URL through Solverr's tiered solver, automatically clearing any
     Cloudflare/CAPTCHA/WAF challenge in the way, and return its content.
@@ -59,6 +60,8 @@ async def solverr_scrape(
     extract_rules: optional {name: rule} map for pulling fields out of the
     returned HTML - rule is a CSS selector (text), "selector@attr" (an
     attribute), "selector[]" (a list of matches), or "regex:pattern".
+    follow_meta_refresh: follow short-delay <meta http-equiv="refresh">
+    redirects (defaults to the server's FOLLOW_META_REFRESH setting).
     """
     if method.upper() not in ("GET", "POST"):
         raise ToolError(f"Unsupported method '{method}' - only GET and POST are supported.")
@@ -72,6 +75,7 @@ async def solverr_scrape(
             wait_selector=wait_selector,
             extract_records=extract_records,
             maxTimeout=max_timeout_ms,
+            followMetaRefresh=follow_meta_refresh,
         ).to_v1_request()
         solution = await solver_engine.process_request(req)
     except Exception as e:
