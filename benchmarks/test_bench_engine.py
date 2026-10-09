@@ -74,7 +74,7 @@ def test_process_request_dispatch(benchmark):
         tier="tier1_fast_tls",
     )
 
-    async def _stub(_req, _budget, _url, _method, _bypass_cookie_cache=False):
+    async def _stub(_req, _budget, _url, _method, _bypass_cookie_cache=False, _browser_storage=None):
         return solution
 
     async def _skip_history(*_args, **_kwargs):
