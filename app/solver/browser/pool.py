@@ -50,7 +50,10 @@ class CamoufoxPool:
 
     def __init__(self, size: int, memory_usage: Optional[Callable[[], Optional[Tuple[int, int]]]] = None):
         self.size = max(1, size)
-        self._idle: "asyncio.Queue[_PooledCamoufox]" = asyncio.Queue()
+        # Holds idle instances, plus a None per slot freed without a replacement: that None wakes an
+        # acquire() blocked at capacity so it launches into the slot instead of waiting out its timeout.
+        self._idle: "asyncio.Queue[Optional[_PooledCamoufox]]" = asyncio.Queue()
+        self._freed_slot_tokens = 0
         self._all_instances: "set[_PooledCamoufox]" = set()
         self._created = 0
         self._lock = asyncio.Lock()
@@ -70,7 +73,10 @@ class CamoufoxPool:
                 inst = self._idle.get_nowait()
             except asyncio.QueueEmpty:
                 inst = None
-            if inst is not None:
+            else:
+                if inst is None:
+                    self._freed_slot_tokens -= 1
+                    continue
                 if browser_is_connected(inst.browser):
                     inst.uses += 1
                     return inst
@@ -90,6 +96,10 @@ class CamoufoxPool:
                 inst = await self._idle.get()
             else:
                 inst = await asyncio.wait_for(self._idle.get(), timeout=max(0.0, deadline - time.monotonic()))
+            if inst is None:
+                # A slot was freed without a replacement: go launch into it.
+                self._freed_slot_tokens -= 1
+                continue
             if browser_is_connected(inst.browser):
                 inst.uses += 1
                 return inst
@@ -116,6 +126,9 @@ class CamoufoxPool:
             if fresh is not None:
                 fresh.last_used_at = time.monotonic()
                 self._idle.put_nowait(fresh)
+            else:
+                self._freed_slot_tokens += 1
+                self._idle.put_nowait(None)
             return
         inst.last_used_at = time.monotonic()
         self._idle.put_nowait(inst)
@@ -134,7 +147,9 @@ class CamoufoxPool:
                 inst = self._idle.get_nowait()
             except asyncio.QueueEmpty:
                 break
-            if not browser_is_connected(inst.browser):
+            if inst is None:
+                keep.append(inst)
+            elif not browser_is_connected(inst.browser):
                 dead.append(inst)
             elif idle_timeout > 0 and now - (inst.last_used_at or inst.created_at) >= idle_timeout:
                 retire.append(inst)
@@ -151,6 +166,11 @@ class CamoufoxPool:
             await self._close_instance(inst)
         if retire:
             logger.info(f"[CamoufoxPool] Retired {len(retire)} idle browser instance(s) after {idle_timeout}s unused.")
+
+    @property
+    def idle_count(self) -> int:
+        """Idle browser instances, not counting freed-slot wake-ups still in the queue."""
+        return max(0, self._idle.qsize() - self._freed_slot_tokens)
 
     async def _drop_dead(self, inst: _PooledCamoufox) -> None:
         self.dead_reclaimed_total += 1
@@ -245,4 +265,5 @@ class CamoufoxPool:
                 await self._close_instance(inst)
             self._all_instances.clear()
             self._created = 0
+            self._freed_slot_tokens = 0
             logger.info("[CamoufoxPool] Pool stopped.")

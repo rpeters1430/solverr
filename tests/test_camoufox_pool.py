@@ -138,6 +138,35 @@ class TestCamoufoxPoolResilience(unittest.IsolatedAsyncioTestCase):
             await pool.acquire()  # relaunched on demand
             self.assertEqual(pool.launch_count, 2)
 
+    async def test_waiter_launches_into_a_slot_freed_without_replacement(self):
+        gib = 1024 ** 3
+        with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 100), \
+             patch.object(settings, "CAMOUFOX_POOL_RECYCLE_SECONDS", 100000), \
+             patch.object(settings, "CAMOUFOX_MEMORY_RECYCLE_PERCENT", 85):
+            pool = FakeCamoufoxPool(1, memory_usage=lambda: (int(1.9 * gib), 2 * gib))
+            inst = await pool.acquire()
+            waiter = asyncio.create_task(pool.acquire(wait_timeout=5))
+            await asyncio.sleep(0.01)
+            started = time.monotonic()
+            await pool.release(inst)  # retired, no warm replacement
+            got = await asyncio.wait_for(waiter, timeout=1)
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertIsNot(got, inst)
+        self.assertEqual(pool._created, 1)
+        self.assertEqual(pool.idle_count, 0)
+
+    async def test_unclaimed_freed_slot_is_not_reported_idle(self):
+        gib = 1024 ** 3
+        with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 100), \
+             patch.object(settings, "CAMOUFOX_MEMORY_RECYCLE_PERCENT", 85):
+            pool = FakeCamoufoxPool(1, memory_usage=lambda: (int(1.9 * gib), 2 * gib))
+            await pool.release(await pool.acquire())
+            self.assertEqual(pool.idle_count, 0)
+            await pool.maintain()  # keeps the wake-up token
+            await pool.acquire()
+            self.assertEqual(pool.launch_count, 2)
+            self.assertEqual(pool.idle_count, 0)
+
     async def test_recycle_with_headroom_relaunches_warm(self):
         gib = 1024 ** 3
         with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 1), \
@@ -585,6 +614,28 @@ class TestSolveFlowAnubis(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sol.challengeType, "cap")
         start.assert_awaited()
         self.assertLess(elapsed, 5.0)
+
+    async def test_meta_refresh_onto_a_wall_is_not_returned_as_solved(self):
+        page = _StaticPage()
+        page.html = REAL_HTML
+
+        async def refresh_to_wall(p, deadline):
+            p.url = "https://example.com/next"
+            p.page_title = "Just a moment..."
+            p.html = CF_WALL_HTML
+
+        pool = BrowserPool()
+        start = time.monotonic()
+        with patch.object(browser_module, "navigate_to_target", return_value=(None, 200)), \
+             patch.object(browser_module, "install_media_blocking", return_value=None), \
+             patch.object(browser_module, "follow_meta_refresh_in_page", side_effect=refresh_to_wall), \
+             patch.multiple(browser_module, SOLVE_FINALIZE_RESERVE_SECONDS=0.2):
+            with self.assertRaises(ChallengeNotSolvedError):
+                await pool._execute_solve_flow(
+                    context=_NoCookieContext(), page=page, url=page.url, method="GET", post_data=None, cookies=None,
+                    timeout_ms=5000, active_ua="ua", headers=None, start_time=start, deadline=start + 5.0,
+                    follow_meta_refresh=True,
+                )
 
     async def test_google_sorry_page_is_an_ip_block_without_a_paid_solver(self):
         page = _StaticPage()

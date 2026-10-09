@@ -121,7 +121,10 @@ _RESTORE_SESSION_STORAGE_JS = """(entries) => {
 
 
 async def _capture_storage(context: Any, page: Page) -> Optional[Dict[str, Any]]:
-    """This context's localStorage per origin, plus the final page's sessionStorage."""
+    """This context's localStorage per origin, plus the final page's sessionStorage.
+
+    The final page's origin is always reported, as {} when its store is empty, so a site that
+    cleared its storage (a logout) replaces the saved state instead of having it restored."""
     local: Dict[str, Dict[str, str]] = {}
     session: Dict[str, Dict[str, str]] = {}
     try:
@@ -134,17 +137,23 @@ async def _capture_storage(context: Any, page: Page) -> Optional[Dict[str, Any]]
         logger.debug(f"[BrowserPool] localStorage capture notice: {e}")
     try:
         snap = await asyncio.wait_for(page.evaluate("""() => {
-            try {
+            const read = (store) => {
                 const out = {};
-                for (let i = 0; i < sessionStorage.length; i++) {
-                    const k = sessionStorage.key(i);
-                    out[k] = sessionStorage.getItem(k);
+                for (let i = 0; i < store.length; i++) {
+                    const k = store.key(i);
+                    out[k] = store.getItem(k);
                 }
-                return {origin: location.origin, items: out};
+                return out;
+            };
+            try {
+                return {origin: location.origin, local: read(localStorage), items: read(sessionStorage)};
             } catch (e) { return null; }
         }"""), timeout=2.0)
-        if isinstance(snap, dict) and snap.get("items") and str(snap.get("origin", "")).startswith("http"):
-            session[snap["origin"]] = snap["items"]
+        if isinstance(snap, dict) and str(snap.get("origin", "")).startswith("http"):
+            origin = snap["origin"]
+            session[origin] = snap.get("items") or {}
+            if isinstance(snap.get("local"), dict):
+                local[origin] = snap["local"]
     except Exception as e:
         logger.debug(f"[BrowserPool] sessionStorage capture notice: {e}")
     if not local and not session:
@@ -265,7 +274,7 @@ class BrowserPool:
     def pool_stats(self) -> Dict[str, Any]:
         cp = self.camoufox_pool
         created = cp._created if cp else 0
-        idle = cp._idle.qsize() if cp else 0
+        idle = cp.idle_count if cp else 0
         avg_wait = (self._queue_wait_total_s / self._queue_wait_count) if self._queue_wait_count else 0.0
         return {
             "pool_size": cp.size if cp else 0,
@@ -948,7 +957,11 @@ class BrowserPool:
                     await asyncio.sleep(0.3)
 
         if follow_meta_refresh and not is_browser_error(await _safe_title(page), page.url or ""):
+            url_before_refresh = page.url
             await follow_meta_refresh_in_page(page, deadline - SOLVE_FINALIZE_RESERVE_SECONDS)
+            if page.url != url_before_refresh:
+                # The loop cleared the page it saw, not this one: run the final wall check on it.
+                cleared = False
 
         if wait_selector:
             try:

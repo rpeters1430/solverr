@@ -61,8 +61,9 @@ class Session:
         keeps the old state) when the result would exceed SESSION_STORAGE_MAX_KB."""
         if not storage:
             return True
-        local = {**self.local_storage, **_clean_storage(storage.get("local"))}
-        session = {**self.session_storage, **_clean_storage(storage.get("session"))}
+        # An origin snapshotted as {} was emptied by the site, so it drops out instead of being restored.
+        local = {o: v for o, v in {**self.local_storage, **_clean_storage(storage.get("local"))}.items() if v}
+        session = {o: v for o, v in {**self.session_storage, **_clean_storage(storage.get("session"))}.items() if v}
         size = len(json.dumps([local, session]))
         limit = settings.SESSION_STORAGE_MAX_KB * 1024
         if limit > 0 and size > limit:

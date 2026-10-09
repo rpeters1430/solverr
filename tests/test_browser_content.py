@@ -147,11 +147,26 @@ class TestSessionStorageInBrowser(unittest.IsolatedAsyncioTestCase):
 
         class Page:
             async def evaluate(self, script):
-                return {"origin": "https://a.test", "items": {"s": "1"}}
+                return {"origin": "https://a.test", "local": {"k": "v"}, "items": {"s": "1"}}
 
         self.assertEqual(await _capture_storage(Ctx(), Page()), {
             "local": {"https://a.test": {"k": "v"}},
             "session": {"https://a.test": {"s": "1"}},
+        })
+
+    async def test_capture_reports_an_emptied_final_origin(self):
+        from app.solver.browser.browser import _capture_storage
+
+        class Ctx:
+            async def storage_state(self):
+                return {"cookies": [], "origins": []}  # Playwright omits empty origins
+
+        class Page:
+            async def evaluate(self, script):
+                return {"origin": "https://a.test", "local": {}, "items": {}}
+
+        self.assertEqual(await _capture_storage(Ctx(), Page()), {
+            "local": {"https://a.test": {}}, "session": {"https://a.test": {}},
         })
 
     async def test_capture_ignores_opaque_origins_and_failures(self):

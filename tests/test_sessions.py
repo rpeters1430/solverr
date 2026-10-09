@@ -223,6 +223,14 @@ class TestSessionBrowserStorage(unittest.TestCase):
         self.assertEqual(sess.local_storage, {"https://a.test": {"x": "3"}, "https://b.test": {"k": "v"}})
         self.assertEqual(sess.storage_payload()["session"], {"https://a.test": {"s": "1"}})
 
+    def test_emptied_origin_is_dropped_not_restored(self):
+        sess = self._session()
+        sess.update_storage({"local": {"https://a.test": {"token": "t"}, "https://b.test": {"k": "v"}},
+                             "session": {"https://a.test": {"s": "1"}}})
+        sess.update_storage({"local": {"https://a.test": {}}, "session": {"https://a.test": {}}})
+        self.assertEqual(sess.local_storage, {"https://b.test": {"k": "v"}})
+        self.assertEqual(sess.session_storage, {})
+
     def test_round_trips_through_redis_json(self):
         import json
         from app.solver.sessions import Session
