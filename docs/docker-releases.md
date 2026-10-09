@@ -45,6 +45,8 @@ requirements (Python). OS packages and Python transitive dependencies still
 resolve during a fresh build; an image digest is the exact deployed artifact.
 The workflows disable Docker build-record artifacts to avoid accumulating them.
 Staging image versions remain in GHCR; they are not release tags.
+The candidate build retries once after 15 seconds to tolerate transient registry
+failures (including the SBOM scanner pull). A second failure blocks the release.
 
 Camoufox's Python package determines its paired browser. The Docker build resets
 explicit selection with `camoufox set --release`, fetches the paired browser,
