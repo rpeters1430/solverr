@@ -98,8 +98,9 @@ jobs:
       # Push only a candidate tag; release tags are updated after validation.
       - name: Build candidate image
         id: build
+        continue-on-error: true
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
-        with:
+        with: &candidate-build
           context: .
           file: ./Dockerfile
           platforms: linux/amd64
@@ -112,11 +113,21 @@ jobs:
           provenance: ${{ env.PUBLISH == 'true' }}
           sbom: ${{ env.PUBLISH == 'true' }}
 
+      - name: Wait before retrying candidate build
+        if: steps.build.outcome == 'failure'
+        run: sleep 15
+
+      - name: Retry candidate image build
+        id: build-retry
+        if: steps.build.outcome == 'failure'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with: *candidate-build
+
       - name: Select exact image for validation
         id: candidate
         env:
           LOCAL_TAG: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-staging-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.build.outputs.digest || steps.build-retry.outputs.digest }}
         run: |
           if [ "$PUBLISH" = true ]; then
             test -n "$DIGEST"
