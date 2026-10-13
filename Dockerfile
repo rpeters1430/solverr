@@ -19,6 +19,12 @@ ENV PYTHONUNBUFFERED=1 \
 FROM base AS deps
 WORKDIR /app
 
+# Python 3.15 does not yet have wheels for every transitive dependency.
+# Keep compiler tools in this build-only stage; the runtime copies only the venv.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
 # Installed before the venv exists so uv never ships in the runtime image.
 # Cache mounts live under /app/.cache because XDG_CACHE_HOME points there.
 RUN --mount=type=cache,target=/app/.cache/pip \
