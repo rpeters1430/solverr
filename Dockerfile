@@ -2,7 +2,7 @@
 # Solverr - Ultra-fast & Lightweight FlareSolverr Alternative
 # Optimized for high-efficiency container deployments (UGREEN NASync / Linux / Docker)
 
-FROM python:3.15-slim-trixie@sha256:ea4f1f290e071bf7d28199cfb3e09f5dbad31b50e9c32fd58f2f2d7be915f3ae AS base
+FROM python:3.14.8-slim-trixie@sha256:c3e521df8b2b498a7a682e7e18676771cb80c6b75b8699af886b2d554ce40151 AS base
 ENV PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -18,12 +18,6 @@ ENV PYTHONUNBUFFERED=1 \
 # Stage 1: Python dependencies and the Camoufox browser.
 FROM base AS deps
 WORKDIR /app
-
-# Python 3.15 does not yet have wheels for every transitive dependency.
-# Keep compiler tools in this build-only stage; the runtime copies only the venv.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential libyaml-dev \
-    && rm -rf /var/lib/apt/lists/*
 
 # Installed before the venv exists so uv never ships in the runtime image.
 # Cache mounts live under /app/.cache because XDG_CACHE_HOME points there.
@@ -96,7 +90,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
-      tini curl ca-certificates gosu libyaml-0-2 \
+      tini curl ca-certificates gosu \
       libatk1.0-0t64 libatk-bridge2.0-0t64 libatspi2.0-0t64 \
       libcairo2 libcairo-gobject2 \
       libdbus-1-3 libdbus-glib-1-2 \
