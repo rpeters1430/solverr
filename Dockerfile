@@ -19,6 +19,13 @@ ENV PYTHONUNBUFFERED=1 \
 FROM base AS deps
 WORKDIR /app
 
+# New Python releases can require source builds before dependency wheels are available.
+# Keep the compiler toolchain in this stage only, not in the runtime image.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update \
+    && apt-get install -y --no-install-recommends build-essential
+
 # Installed before the venv exists so uv never ships in the runtime image.
 # Cache mounts live under /app/.cache because XDG_CACHE_HOME points there.
 RUN --mount=type=cache,target=/app/.cache/pip \
