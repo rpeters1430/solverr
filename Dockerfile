@@ -20,11 +20,12 @@ FROM base AS deps
 WORKDIR /app
 
 # New Python releases can require source builds before dependency wheels are available.
-# Keep the compiler toolchain in this stage only, not in the runtime image.
+# Camoufox also requires PyYAML's CLoader, which needs the LibYAML headers.
+# Keep the compiler toolchain and headers in this stage only, not in the runtime image.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update \
-    && apt-get install -y --no-install-recommends build-essential
+    && apt-get install -y --no-install-recommends build-essential libyaml-dev
 
 # Installed before the venv exists so uv never ships in the runtime image.
 # Cache mounts live under /app/.cache because XDG_CACHE_HOME points there.
@@ -87,9 +88,6 @@ WORKDIR /app
 
 COPY --from=deps /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
-# fpgen's model lives in the root-owned venv and is refetched once its mtime is five weeks
-# old, which a PUID/PGID user can't do. Re-stamp it as root; a no-op when COPY kept mtimes.
-RUN python -c "from camoufox.fpgen_model import ensure_fpgen_model; ensure_fpgen_model()"
 
 # Curated libs for headless Firefox; `playwright install-deps` pulls in far more (Xvfb, fonts).
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -110,11 +108,16 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       libx11-6 libx11-xcb1 libxcb1 libxcb-shm0 \
       libxcomposite1 libxcursor1 libxdamage1 \
       libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 libxss1 libxtst6 \
+      libyaml-0-2 \
       libdrm2 libgbm1 \
       libasound2t64 \
       fonts-liberation \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# fpgen's model lives in the root-owned venv and is refetched once its mtime is five weeks
+# old, which a PUID/PGID user can't do. Re-stamp it as root; a no-op when COPY kept mtimes.
+RUN python -c "from camoufox.fpgen_model import ensure_fpgen_model; ensure_fpgen_model()"
 
 COPY --from=deps /app/.cache/camoufox /app/.cache/camoufox
 

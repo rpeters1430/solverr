@@ -15,12 +15,15 @@ class TestDockerPublishWorkflow(unittest.TestCase):
         dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text(encoding="utf-8")
         base, stages = dockerfile.split("FROM base AS deps", 1)
         deps, runtime = stages.split("FROM base AS runtime", 1)
-        self.assertIn("apt-get install -y --no-install-recommends build-essential", deps)
-        self.assertLess(deps.index("build-essential"), deps.index("uv pip install"))
-        self.assertNotIn("build-essential", base)
-        self.assertNotIn("build-essential", runtime)
+        self.assertIn("apt-get install -y --no-install-recommends build-essential libyaml-dev", deps)
+        for package in ("build-essential", "libyaml-dev"):
+            self.assertLess(deps.index(package), deps.index("uv pip install"))
+            self.assertNotIn(package, base)
+            self.assertNotIn(package, runtime)
         self.assertIn("COPY --from=deps /opt/venv /opt/venv", runtime)
         self.assertNotIn("COPY --from=deps /usr", runtime)
+        self.assertIn("libyaml-0-2", runtime)
+        self.assertLess(runtime.index("libyaml-0-2"), runtime.index("ensure_fpgen_model"))
 
     def test_candidate_retry_is_bounded_and_reuses_build_inputs(self):
         builds = [step for step in self.steps if step.get("id") in {"build", "build-retry"}]
