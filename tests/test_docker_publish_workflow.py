@@ -11,6 +11,20 @@ class TestDockerPublishWorkflow(unittest.TestCase):
         cls.workflow = yaml.safe_load(workflow.read_text(encoding="utf-8"))
         cls.steps = cls.workflow["jobs"]["build-and-push"]["steps"]
 
+    def test_native_build_tools_are_installed_only_in_dependency_stage(self):
+        dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text(encoding="utf-8")
+        base, stages = dockerfile.split("FROM base AS deps", 1)
+        deps, runtime = stages.split("FROM base AS runtime", 1)
+        self.assertIn("apt-get install -y --no-install-recommends build-essential libyaml-dev", deps)
+        for package in ("build-essential", "libyaml-dev"):
+            self.assertLess(deps.index(package), deps.index("uv pip install"))
+            self.assertNotIn(package, base)
+            self.assertNotIn(package, runtime)
+        self.assertIn("COPY --from=deps /opt/venv /opt/venv", runtime)
+        self.assertNotIn("COPY --from=deps /usr", runtime)
+        self.assertIn("libyaml-0-2", runtime)
+        self.assertLess(runtime.index("libyaml-0-2"), runtime.index("ensure_fpgen_model"))
+
     def test_candidate_retry_is_bounded_and_reuses_build_inputs(self):
         builds = [step for step in self.steps if step.get("id") in {"build", "build-retry"}]
         self.assertEqual(len(builds), 2)
