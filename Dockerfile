@@ -2,7 +2,7 @@
 # Solverr - Ultra-fast & Lightweight FlareSolverr Alternative
 # Optimized for high-efficiency container deployments (UGREEN NASync / Linux / Docker)
 
-FROM python:3.14-slim-trixie@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170 AS base
+FROM python:3.15-slim-trixie@sha256:ea4f1f290e071bf7d28199cfb3e09f5dbad31b50e9c32fd58f2f2d7be915f3ae AS base
 ENV PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8 \
     PYTHONDONTWRITEBYTECODE=1 \
