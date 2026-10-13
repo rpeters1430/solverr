@@ -22,7 +22,7 @@ WORKDIR /app
 # Python 3.15 does not yet have wheels for every transitive dependency.
 # Keep compiler tools in this build-only stage; the runtime copies only the venv.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential \
+    && apt-get install -y --no-install-recommends build-essential libyaml-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Installed before the venv exists so uv never ships in the runtime image.
@@ -96,7 +96,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
-      tini curl ca-certificates gosu \
+      tini curl ca-certificates gosu libyaml-0-2 \
       libatk1.0-0t64 libatk-bridge2.0-0t64 libatspi2.0-0t64 \
       libcairo2 libcairo-gobject2 \
       libdbus-1-3 libdbus-glib-1-2 \
