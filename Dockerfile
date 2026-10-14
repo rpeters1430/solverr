@@ -39,6 +39,17 @@ COPY requirements.txt .
 RUN --mount=type=cache,target=/app/.cache/uv \
     uv pip install --python /opt/venv/bin/python -r requirements.txt
 
+# CI resolves one exact version per run and passes it in as a build arg so both
+# candidate-build attempts use the same release. Plain local builds also resolve
+# the newest PyPI prerelease instead of silently keeping the requirements pin.
+ARG CAMOUFOX_VERSION
+RUN --mount=type=cache,target=/app/.cache/uv \
+    if [ -n "$CAMOUFOX_VERSION" ]; then \
+      uv pip install --python /opt/venv/bin/python --prerelease allow --reinstall-package camoufox "camoufox==${CAMOUFOX_VERSION}"; \
+    else \
+      uv pip install --python /opt/venv/bin/python --prerelease allow --reinstall-package camoufox camoufox; \
+    fi
+
 # Every launch pins os="linux", so the macOS/Windows font sets (~890MB) are never used.
 # Follow the browser paired with the installed Python package. Reset any explicit
 # selection BEFORE fetching so a Camoufox update cannot install one browser and
