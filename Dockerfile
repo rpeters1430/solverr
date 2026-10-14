@@ -2,7 +2,7 @@
 # Solverr - Ultra-fast & Lightweight FlareSolverr Alternative
 # Optimized for high-efficiency container deployments (UGREEN NASync / Linux / Docker)
 
-FROM python:3.15.0-slim-trixie@sha256:f48fda6d59b2b3437781d1c3ccf4aa0e26ae871de3cdd758b49ab45ee7291619 AS base
+FROM python:3.14.8-slim-trixie@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170 AS base
 ENV PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -19,6 +19,7 @@ ENV PYTHONUNBUFFERED=1 \
 FROM base AS deps
 WORKDIR /app
 
+# Python 3.14 avoids Python 3.15's stricter Base85 decoding, which Camoufox 0.5.9b3 still triggers during browser startup.
 # New Python releases can require source builds before dependency wheels are available.
 # Camoufox also requires PyYAML's CLoader, which needs the LibYAML headers.
 # Keep the compiler toolchain and headers in this stage only, not in the runtime image.
