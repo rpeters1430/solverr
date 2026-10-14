@@ -35,7 +35,7 @@ jobs:
       - name: Set up Python 3.14
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: "3.15"
+          python-version: "3.14.8"
           cache: "pip"
 
       - name: Install dependencies
@@ -71,6 +71,45 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up Python for Camoufox resolution
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.14.8"
+
+      - name: Resolve latest Camoufox release
+        id: camoufox
+        run: |
+          python -m pip install --quiet packaging
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import sys
+          import urllib.request
+          from packaging.version import InvalidVersion, Version
+
+          request = urllib.request.Request(
+              "https://pypi.org/pypi/camoufox/json",
+              headers={"User-Agent": "solverr-camoufox-resolver"},
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              releases = json.load(response)["releases"]
+
+          candidates = []
+          for raw_version, files in releases.items():
+              try:
+                  version = Version(raw_version)
+              except InvalidVersion:
+                  continue
+              if files and not all(file.get("yanked", False) for file in files):
+                  candidates.append(version)
+
+          if not candidates:
+              raise SystemExit("PyPI did not report an installable Camoufox release")
+
+          version = str(max(candidates))
+          print(f"version={version}")
+          print(f"Resolved latest Camoufox release: {version}", file=sys.stderr)
+          PY
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
@@ -103,6 +142,8 @@ jobs:
         with: &candidate-build
           context: .
           file: ./Dockerfile
+          build-args: |
+            CAMOUFOX_VERSION=${{ steps.camoufox.outputs.version }}
           platforms: linux/amd64
           push: ${{ env.PUBLISH == 'true' }}
           load: ${{ env.PUBLISH != 'true' }}
