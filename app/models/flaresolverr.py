@@ -1,6 +1,17 @@
-from typing import List, Dict, Any, Optional, Union
-from pydantic import BaseModel, Field, field_validator
+from typing import List, Dict, Any, Literal, Optional, Tuple, Union
+from pydantic import BaseModel, Field, field_validator, model_validator
 import time
+
+# Debug capture kinds a browser solve can record (app/solver/browser/debug_capture.py).
+CAPTURE_KINDS = ("console", "network", "redirects")
+
+
+def _validate_capture(kinds: Optional[List[str]]) -> Optional[List[str]]:
+    unknown = sorted(set(kinds or []) - set(CAPTURE_KINDS))
+    if unknown:
+        raise ValueError(f"unknown capture kind(s) {unknown}; allowed: {list(CAPTURE_KINDS)}")
+    return kinds
+
 
 class CookieModel(BaseModel):
     name: str
@@ -54,8 +65,16 @@ class V1Request(BaseModel):
     proxy: Optional[Union[ProxyConfig, Dict[str, Any], str]] = None
     session: Optional[str] = None
     session_ttl: Optional[int] = None
+    # FlareSolverr's name: on a request command, a session older than this is recreated.
+    session_ttl_minutes: Optional[int] = None
     userAgent: Optional[str] = None
     headers: Optional[Dict[str, Any]] = None
+    # FlareSolverr 3.x request options, mapped onto Solverr's own fields in _map_flaresolverr_options.
+    returnScreenshot: Optional[bool] = False
+    waitInSeconds: Optional[int] = None
+    disableMedia: Optional[bool] = False
+    # Accepted for compatibility only: Solverr locates the Turnstile checkbox itself, not by tabbing to it.
+    tabs_till_verify: Optional[int] = None
 
     @field_validator("headers", mode="before")
     @classmethod
@@ -67,6 +86,8 @@ class V1Request(BaseModel):
     # Solverr extensions beyond the FlareSolverr API.
     fastTlsOnly: Optional[bool] = False
     forceBrowser: Optional[bool] = False
+    # Skip Tiers 1-3 and solve straight through the fallback proxy pool (/scrape's tier="tier4_proxy").
+    forceFallbackProxy: Optional[bool] = False
     screenshot: Optional[bool] = False
     screenshot_full_page: bool = False
     screenshot_selector: Optional[str] = None
@@ -76,6 +97,27 @@ class V1Request(BaseModel):
     skip_cache: Optional[bool] = False
     # None falls back to FOLLOW_META_REFRESH.
     followMetaRefresh: Optional[bool] = None
+    # Browser debug capture: any of "console", "network", "redirects". Forces the browser tier.
+    capture: Optional[List[str]] = None
+
+    @field_validator("capture")
+    @classmethod
+    def _check_capture(cls, v):
+        return _validate_capture(v)
+
+    @model_validator(mode="after")
+    def _map_flaresolverr_options(self):
+        if self.returnScreenshot:
+            self.screenshot = True
+        if self.waitInSeconds and self.waitInSeconds > 0 and not self.wait_delay_ms:
+            self.wait_delay_ms = self.waitInSeconds * 1000
+        # Screenshots and debug capture only exist in the browser; FlareSolverr always used one.
+        if self.screenshot or self.capture or self.forceFallbackProxy:
+            self.forceBrowser = True
+        return self
+
+    def debug_capture(self) -> Optional[Tuple[str, ...]]:
+        return tuple(sorted(set(self.capture))) if self.capture else None
 
     def follows_meta_refresh(self) -> bool:
         from app.config import settings
@@ -126,6 +168,8 @@ class SolutionModel(BaseModel):
     extracted: Optional[Dict[str, Any]] = None
     challengeType: Optional[str] = None
     tier: Optional[str] = None
+    # Opt-in debug capture (console / network / redirects), present only when requested.
+    debug: Optional[Dict[str, Any]] = None
     # Browser localStorage/sessionStorage snapshot for the request's session; never sent to clients.
     storage: Optional[Dict[str, Any]] = Field(default=None, exclude=True)
 
@@ -138,6 +182,10 @@ class V1Response(BaseModel):
     solution: Optional[SolutionModel] = None
     sessions: Optional[List[str]] = None
     session: Optional[str] = None
+
+# /scrape tier overrides; "fast_tls" and "browser" are aliases of tier1_tls and tier3_browser.
+SCRAPE_TIERS = {"auto", "tier1_tls", "fast_tls", "tier2_cache", "tier3_browser", "browser", "tier4_proxy"}
+
 
 class ScrapeRequest(BaseModel):
     url: str
@@ -154,7 +202,7 @@ class ScrapeRequest(BaseModel):
     cookies: Optional[List[CookieModel]] = None
     proxy: Optional[Union[ProxyConfig, Dict[str, Any], str]] = None
     session: Optional[str] = None
-    tier: Optional[str] = "auto"  # "auto", "tier1_tls", "tier2_cache", "tier3_browser", "tier4_proxy"
+    tier: Optional[str] = "auto"
     wait_selector: Optional[str] = None
     wait_delay_ms: Optional[int] = None
     extract_rules: Optional[Dict[str, str]] = None
@@ -166,10 +214,27 @@ class ScrapeRequest(BaseModel):
     userAgent: Optional[str] = None
     skip_cache: Optional[bool] = False
     followMetaRefresh: Optional[bool] = None
+    capture: Optional[List[str]] = None
+    disable_media: bool = False
+    # "markdown"/"text" convert an HTML page after extraction; other content types pass through.
+    format: Literal["html", "markdown", "text"] = "html"
+
+    @field_validator("capture")
+    @classmethod
+    def _check_capture(cls, v):
+        return _validate_capture(v)
+
+    @field_validator("tier")
+    @classmethod
+    def _check_tier(cls, v):
+        if v is not None and v not in SCRAPE_TIERS:
+            raise ValueError(f"unknown tier '{v}'; allowed: {sorted(SCRAPE_TIERS)}")
+        return v
 
     def to_v1_request(self) -> V1Request:
-        force_browser = (self.tier in ["tier3_browser", "tier4_proxy", "browser"])
-        fast_tls_only = (self.tier in ["tier1_tls", "fast_tls"])
+        force_browser = (self.tier in ["tier3_browser", "browser"])
+        # Tier 2 is Tier 1 replaying cached clearance cookies; neither may escalate to a browser.
+        fast_tls_only = (self.tier in ["tier1_tls", "fast_tls", "tier2_cache"])
         return V1Request(
             cmd=f"request.{self.method.lower()}",
             url=self.url,
@@ -190,6 +255,9 @@ class ScrapeRequest(BaseModel):
             wait_delay_ms=self.wait_delay_ms,
             skip_cache=self.skip_cache,
             followMetaRefresh=self.followMetaRefresh,
+            forceFallbackProxy=self.tier == "tier4_proxy",
+            capture=self.capture,
+            disableMedia=self.disable_media,
         )
 
 class ScrapeResponse(BaseModel):
@@ -203,6 +271,7 @@ class ScrapeResponse(BaseModel):
     content: str = ""
     extracted: Optional[Dict[str, Any]] = None
     screenshot: Optional[str] = None
+    debug: Optional[Dict[str, Any]] = None
 
 class TestRequestModel(BaseModel):
     url: str

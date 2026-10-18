@@ -147,6 +147,11 @@ class Settings:
     BROWSER_TIMEOUT_MS: int = int(os.getenv("BROWSER_TIMEOUT", "30000"))
     ENABLE_FAST_TLS: bool = os.getenv("ENABLE_FAST_TLS", "true").lower() in ("true", "1", "yes")
     FALLBACK_PROXY_URL: Optional[str] = os.getenv("FALLBACK_PROXY_URL", None)
+    # More Tier 4 proxies, comma-separated; merged with FALLBACK_PROXY_URL and rotated (app/solver/proxy_pool.py).
+    FALLBACK_PROXY_URLS: str = os.getenv("FALLBACK_PROXY_URLS", "")
+    FALLBACK_PROXY_COOLDOWN_SECONDS: float = float(os.getenv("FALLBACK_PROXY_COOLDOWN_SECONDS", "60"))
+    # Proxies tried per request while the budget lasts, each a fresh Camoufox through a different proxy.
+    FALLBACK_PROXY_MAX_ATTEMPTS: int = max(1, int(os.getenv("FALLBACK_PROXY_MAX_ATTEMPTS", "2")))
     
     REDIS_URL: Optional[str] = os.getenv("REDIS_URL", None)
     COOKIE_CACHE_PERSISTENT: bool = os.getenv("COOKIE_CACHE_PERSISTENT", "true").lower() in ("true", "1", "yes")
@@ -237,7 +242,7 @@ class Settings:
     MCP_ALLOWED_ORIGINS: List[str] = [o.strip() for o in os.getenv("MCP_ALLOWED_ORIGINS", "").split(",") if o.strip()]
 
     # Plain semver, no "v" prefix or edition suffix, so callers can add their own.
-    VERSION: str = "1.7.0"
+    VERSION: str = "1.8.0"
     EDITION: str = "ultra"
     DISPLAY_VERSION: str = f"{VERSION}-{EDITION}"
 

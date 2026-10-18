@@ -22,7 +22,7 @@
 - **📡 Real-time Live Event Streaming (SSE)**: Server-Sent Events stream (`/api/events`) broadcasts real-time solve feeds, tier transitions, and telemetry directly to the interactive dashboard.
 - **🔌 100% FlareSolverr v1 & v2 Compatibility**: Standard `POST /v1` and `POST /v2` endpoints compatible out-of-the-box with **Prowlarr**, **Jackett**, **Sonarr**, **Radarr**, and **FlexGet**.
 - **🚀 Native High-Performance `POST /scrape` API**: Full programmatic control with tier overrides, DOM selector waiting (`wait_selector`), data extraction (`extract_rules`), and debug screenshots.
-- **🤖 MCP Server for AI Agents (`/mcp`)**: First-class [Model Context Protocol](https://modelcontextprotocol.io) tools (`solverr_scrape`, `solverr_screenshot`, `solverr_get_cookies`, `solverr_get_stats`) so an agent can drive Solverr directly, gated by the same `X-Api-Key` as the rest of the API. On by default; disable with `ENABLE_MCP=false`.
+- **🤖 MCP Server for AI Agents (`/mcp`)**: First-class [Model Context Protocol](https://modelcontextprotocol.io) tools (`solverr_scrape`, `solverr_screenshot`, `solverr_inspect`, `solverr_get_cookies`, `solverr_get_stats`) so an agent can drive Solverr directly, gated by the same `X-Api-Key` as the rest of the API. On by default; disable with `ENABLE_MCP=false`.
 - **📊 Native Prometheus Metrics (`GET /metrics`)**: Standard Prometheus exposition format for 1-click scraping in Grafana, Prometheus, or VictoriaMetrics.
 - **🗂️ Persistent Request History**: A bounded SQLite history at `GET /api/history` records domains, tier, result, duration, and sanitized failure type across restarts. The dashboard shows recent requests and a short activity trend.
 - **🧠 Dual-Mode Caching**: Zero-dependency local JSON file persistence by default, with automatic **Redis** cluster backend support via `REDIS_URL`.
@@ -42,7 +42,7 @@
 | **Prometheus Telemetry** | ❌ None | ⚠️ External exporter | **✅ Built-in Native `/metrics` endpoint** |
 | **Cursor Emulation** | Direct click | Linear cursor | **Realistic Cubic Bézier Curves + Jitter** |
 | **Web Dashboard** | Plain text | Local metrics dashboard with persistent history | **Live test bench and bounded persistent request history** |
-| **AI Agent Support (MCP)** | ❌ None | ✅ Read, scrape, structured extraction, screenshots, inspect | **✅ `/mcp` Streamable HTTP server** (`solverr_scrape`/`solverr_screenshot`/`solverr_get_cookies`/`solverr_get_stats`) |
+| **AI Agent Support (MCP)** | ❌ None | ✅ Read, scrape, structured extraction, screenshots, inspect | **✅ `/mcp` Streamable HTTP server** (`solverr_scrape`/`solverr_screenshot`/`solverr_inspect`/`solverr_get_cookies`/`solverr_get_stats`), Markdown output |
 
 ---
 
@@ -154,6 +154,7 @@ Or double-click **`run_native.bat`** in Windows Explorer.
 Every request Solverr handles is a self-contained request/response - there's no job queue or shared in-process state that needs coordinating, so scaling out is just running more replicas behind a load balancer:
 
 1. **Share the cookie cache & sessions.** Point every replica at the same Redis instance (`REDIS_URL=redis://redis:6379/0`) so a `cf_clearance` cookie earned by one replica is immediately reusable by the others, and FlareSolverr `session`s work no matter which replica handles a given request. Without Redis, each replica's cache/sessions are local to that process. The bundled `docker-compose.yml` has a `redis` service behind the `distributed` profile: `docker compose --profile distributed up --scale solverr=3`.
+   Session proxy URLs, credentials included, are stored in Redis as plain text alongside the session's cookies (the same trust level as the cookie cache file on disk). Keep Redis on a private network, require a password (`redis://:password@redis:6379/0`), and don't share it with untrusted services.
 2. **Put a load balancer in front.** Any round-robin proxy works (nginx, Traefik, an internal DNS record, or your orchestrator's own Service object) - requests are stateless from the balancer's point of view once Redis is shared.
 3. **Each replica keeps its own local browser pool.** `MAX_BROWSER_WORKERS` and the Camoufox pool are per-process by design (a warm Firefox process can't be shared across containers), so total capacity is `replicas × MAX_BROWSER_WORKERS`. Scale by adding replicas rather than raising one replica's worker count past what its CPU/RAM can actually support.
 4. **`/metrics` is per-replica.** Prometheus scrapes each container as its own target and tags it with an `instance` label automatically - aggregate across replicas with a `sum by (...)` query in Grafana rather than expecting one `/metrics` endpoint to report a cluster-wide total.
@@ -186,8 +187,16 @@ If a challenge wall is still up when the request's `maxTimeout` runs out, the re
 
 JSON, XML/RSS and plain-text documents come back as the server's own body with its real `content-type`, also when the browser tier had to fetch them (not wrapped in Firefox's viewer markup).
 
+FlareSolverr 3.x request options are accepted too:
+- `returnScreenshot` (bool): solve in the browser and return a JPEG screenshot as base64 in `solution.screenshot`.
+- `waitInSeconds` (int): wait this long after the challenge clears before reading the page.
+- `disableMedia` (bool): also block images, stylesheets and fonts in the browser (video/audio is always blocked). Faster, but a few challenge widgets need their CSS, so leave it off for sites that fail with it.
+- `session_ttl_minutes` (int): on a request command, a session older than this is recreated (same id and proxy, empty cookies). On `sessions.create` it sets the session's TTL when `session_ttl` isn't given.
+- `tabs_till_verify` (int): accepted and ignored; Solverr finds the Turnstile checkbox itself.
+
 Solverr extensions accepted on `request.get`/`request.post` (and `/scrape`):
 - `followMetaRefresh` (bool): follow short-delay `<meta http-equiv="refresh">` redirects (delay up to 10s, at most 3 hops, each hop SSRF-checked). Defaults to `FOLLOW_META_REFRESH`.
+- `capture` (list): any of `"console"`, `"network"`, `"redirects"`. Forces the browser tier and returns what it saw in `solution.debug`: console messages and page errors, every network request with its status (failed ones with the reason), and the main-frame redirect chain including challenge hops. Bounded to 200 console, 500 network and 50 redirect entries; `debug.truncated` counts anything dropped.
 
 Sessions (`sessions.create`, then `session` on later requests, including `/scrape`, `/proxy` and MCP) keep cookies **and** the site's `localStorage`/`sessionStorage` from browser-tier solves, so a site that keeps its state in web storage behaves like a returning browser. With `REDIS_URL` set, both survive restarts and are shared across replicas.
 
@@ -197,6 +206,7 @@ Sessions (`sessions.create`, then `session` on later requests, including `/scrap
   "url": "https://nowsecure.nl",
   "method": "GET",
   "tier": "auto",
+  "format": "markdown",
   "wait_selector": "body",
   "screenshot": true,
   "extract_rules": {
@@ -214,6 +224,20 @@ Sessions (`sessions.create`, then `session` on later requests, including `/scrap
 For screenshots, set `screenshot: true` and optionally `screenshot_full_page: true`
 or `screenshot_selector: ".result"`. Full-page and element captures are height
 limited by `MAX_SCREENSHOT_HEIGHT_PX` and byte limited by `MAX_SCREENSHOT_MB`.
+
+`tier` picks where the solve starts; an unknown value is a 422:
+
+| `tier` | Behaviour |
+| :--- | :--- |
+| `auto` (default) | Escalate Tier 1 → 2 → 3 → 4 only as needed |
+| `tier1_tls` / `fast_tls` | Fast TLS only; a challenge comes back as-is instead of escalating |
+| `tier2_cache` | Fast TLS replaying cached clearance cookies, never a browser |
+| `tier3_browser` / `browser` | Straight to the stealth browser (Tier 4 still follows if it fails) |
+| `tier4_proxy` | Straight to the stealth browser through the fallback proxy pool. A 400 if no fallback proxy is configured or the request has its own `proxy` |
+
+`format` is `html` (default), `markdown` or `text`. Markdown keeps headings, links, lists, tables and code and drops scripts and styles, which makes a page far smaller for an LLM to read. It applies to HTML pages only (JSON and other documents are returned unchanged), and `extract_rules` always run on the original HTML.
+
+`capture` and `disable_media` work as on `/v1` (see above); the capture comes back in the response's `debug` field.
 
 ### 3. Prometheus Metrics (`GET /metrics`)
 Scrape endpoint for Grafana, Prometheus, or VictoriaMetrics:
@@ -239,9 +263,9 @@ curl -N http://localhost:8191/api/events
 
 ### 6. MCP Server (`POST /mcp`)
 Streamable HTTP [MCP](https://modelcontextprotocol.io) endpoint for AI agents - point an MCP-compatible client at `http://localhost:8191/mcp` (an `X-Api-Key` header is required if `API_KEY` is set, exactly like every other endpoint). Exposes:
-- `solverr_scrape` - fetch a URL through the tiered solver, with optional `extract_rules`
-- `solverr_screenshot` - solve and return a JPEG screenshot of the resulting page
-- `solverr_screenshot` accepts optional `full_page` or `selector` capture modes
+- `solverr_scrape` - fetch a URL through the tiered solver, with optional `extract_rules`, a `tier`, and `format` (`html`, `markdown` or `text`; markdown is the most compact for an agent to read)
+- `solverr_screenshot` - solve and return a JPEG screenshot of the resulting page, with optional `full_page` or `selector` capture modes
+- `solverr_inspect` - debug a page: solve it in the browser and return its console messages, network requests and redirect chain (and, with `include_content`, the page as markdown)
 - `solverr_get_cookies` - read cached clearance cookies for a domain without a new request
 - `solverr_get_stats` - engine/browser-pool health
 
@@ -284,6 +308,9 @@ On by default; set `ENABLE_MCP=false` to disable.
 | `FOLLOW_META_REFRESH` | `false` | Default for requests that don't set `followMetaRefresh` |
 | `ESCALATE_HTTP_429` | `true` | Send a 429 with no challenge markers to the browser tier. `false` returns plain rate limiting to the caller as-is, with `Retry-After` passed through on `/proxy`, so Prowlarr/Jackett can back off |
 | `FALLBACK_PROXY_URL` | `None` | Optional Tier 4 fallback proxy URL |
+| `FALLBACK_PROXY_URLS` | (empty) | More Tier 4 fallback proxies, comma-separated. Merged with `FALLBACK_PROXY_URL` and rotated round-robin; a proxy that fails cools down before it is picked again. Health is in `/api/stats` (`fallback_proxies`) and `/metrics` (`solverr_fallback_proxies`) |
+| `FALLBACK_PROXY_COOLDOWN_SECONDS` | `60` | How long a failed fallback proxy sits out, doubling per consecutive failure up to 8x. When every proxy is cooling down, the one that recovers first is used |
+| `FALLBACK_PROXY_MAX_ATTEMPTS` | `2` | Fallback proxies tried per request while its timeout budget lasts, each through a fresh browser |
 | `API_KEY` | `None` | When set, requires a matching `X-Api-Key` header (header only - never a query param) on every endpoint except `/health`, and `/metrics` unless `METRICS_REQUIRE_AUTH=true` |
 | `METRICS_REQUIRE_AUTH` | `false` | Require `X-Api-Key` on `/metrics` too, instead of leaving it open for Prometheus scrapers |
 | `ALLOW_PRIVATE_NETWORKS` | `false` | Allow initial targets, redirects, and browser subresources that resolve to loopback/RFC1918/link-local/cloud-metadata addresses. |

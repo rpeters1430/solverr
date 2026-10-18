@@ -275,6 +275,25 @@ class TestApplyAndPersistSession(unittest.IsolatedAsyncioTestCase):
             sess = await manager.get_session_async(sid)
             self.assertEqual(sess.local_storage, {"https://a.test": {"k": "new"}})
 
+    async def test_session_ttl_minutes_recreates_an_older_session(self):
+        from app.models.flaresolverr import V1Request
+        from app.solver import sessions as sessions_module
+        manager = SessionManager(redis_url="")
+        with patch.object(sessions_module, "session_manager", manager):
+            sid = await manager.create_session_async("old", proxy="http://proxy.test:8080")
+            await manager.update_session_cookies_async(sid, [CookieModel(name="a", value="1", domain="a.test")])
+            (await manager.get_session_async(sid)).created_at = time.time() - 600
+
+            fresh = V1Request(cmd="request.get", url="https://a.test/", session=sid, session_ttl_minutes=60)
+            await sessions_module.apply_session(fresh)
+            self.assertEqual([c.name for c in fresh.cookies], ["a"], "a session within its TTL is kept")
+
+            expired = V1Request(cmd="request.get", url="https://a.test/", session=sid, session_ttl_minutes=5)
+            await sessions_module.apply_session(expired)
+            self.assertFalse(expired.cookies)
+            self.assertEqual(expired.get_proxy_url(), "http://proxy.test:8080")
+            self.assertEqual((await manager.get_session_async(sid)).cookies, [])
+
     def test_storage_is_never_serialized_to_clients(self):
         from app.models.flaresolverr import SolutionModel, V1Response
         sol = SolutionModel(url="https://a.test/", status=200, storage={"local": {"o": {"k": "v"}}})

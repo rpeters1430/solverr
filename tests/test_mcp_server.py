@@ -35,7 +35,7 @@ class TestMCPServer(unittest.TestCase):
         names = {t["name"] for t in resp.json()["result"]["tools"]}
         self.assertEqual(
             names,
-            {"solverr_scrape", "solverr_screenshot", "solverr_get_cookies", "solverr_get_stats"},
+            {"solverr_scrape", "solverr_screenshot", "solverr_inspect", "solverr_get_cookies", "solverr_get_stats"},
         )
 
     def test_get_cookies_reads_the_shared_cache_without_a_network_request(self):
@@ -108,6 +108,44 @@ class TestMCPServer(unittest.TestCase):
         text = result["content"][0]["text"]
         self.assertNotIn(secret, text)
         self.assertIn("Scrape failed", text)
+
+    def test_scrape_markdown_format(self):
+        from app.models.flaresolverr import SolutionModel
+        sol = SolutionModel(url="https://example.com/", status=200, headers={"content-type": "text/html"},
+                            response="<h1>Hi</h1><p>there</p>")
+        with patch("app.mcp_server.solver_engine.process_request", new=AsyncMock(return_value=sol)):
+            resp = _rpc(self.client, "tools/call", {
+                "name": "solverr_scrape", "arguments": {"url": "https://example.com", "format": "markdown"},
+            })
+        result = resp.json()["result"]
+        self.assertFalse(result.get("isError"))
+        self.assertEqual(json.loads(result["content"][0]["text"])["content"], "# Hi\n\nthere\n")
+
+    def test_invalid_arguments_say_what_is_wrong(self):
+        resp = _rpc(self.client, "tools/call", {
+            "name": "solverr_scrape", "arguments": {"url": "https://example.com", "tier": "tier9"},
+        })
+        result = resp.json()["result"]
+        self.assertTrue(result.get("isError"))
+        self.assertIn("unknown tier 'tier9'", result["content"][0]["text"])
+
+    def test_inspect_returns_debug_capture(self):
+        from app.models.flaresolverr import SolutionModel
+        sol = SolutionModel(url="https://example.com/", status=200, tier="tier3_stealth_browser",
+                            headers={"content-type": "text/html"}, response="<p>x</p>",
+                            debug={"redirects": [{"url": "https://example.com/", "status": 200, "location": None}]})
+        with patch("app.mcp_server.solver_engine.process_request", new=AsyncMock(return_value=sol)) as solve:
+            resp = _rpc(self.client, "tools/call", {
+                "name": "solverr_inspect", "arguments": {"url": "https://example.com", "capture": ["redirects"]},
+            })
+        result = resp.json()["result"]
+        self.assertFalse(result.get("isError"))
+        payload = json.loads(result["content"][0]["text"])
+        self.assertEqual(payload["debug"]["redirects"][0]["status"], 200)
+        self.assertNotIn("content", payload)
+        req = solve.call_args[0][0]
+        self.assertEqual(req.debug_capture(), ("redirects",))
+        self.assertTrue(req.forceBrowser)
 
     def test_untrusted_host_is_rejected_without_an_api_key(self):
         # No API_KEY here, so a non-local Host must be rejected.

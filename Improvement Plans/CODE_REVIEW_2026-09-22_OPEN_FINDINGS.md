@@ -8,6 +8,10 @@ callers, the challenge-loop false-positive-clear bug, cookie-identity dedup, the
 in-flight-dedup thundering herd, the fast-TLS session-jar cross-session leak, pool
 instance health-checking, and the unbounded `_domain_scores` dict).
 
+> **Status (2026-10-18, v1.8.0):** CR-012, CR-013, CR-015, CR-018 and CR-020 had already been fixed
+> before this pass; CR-014, CR-016, CR-017 and CR-019 were closed in 1.8.0 (see `CHANGELOG.md`).
+> CR-009 and CR-011 remain open and are the planned focus for 1.9.
+
 ## Important (not yet fixed)
 
 ### CR-009 — `_execute_solve_flow` is a ~270-line monolith

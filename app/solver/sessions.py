@@ -326,6 +326,13 @@ async def apply_session(req: V1Request) -> Optional[Dict[str, Any]]:
     sess = await session_manager.get_session_async(req.session)
     if not sess:
         return None
+    if req.session_ttl_minutes and req.session_ttl_minutes > 0 and time.time() - sess.created_at > req.session_ttl_minutes * 60:
+        # FlareSolverr's session_ttl_minutes: an older session starts over (same id and proxy, no cookies).
+        logger.info(f"[SessionManager] Session '{req.session}' is older than {req.session_ttl_minutes} min; recreating it")
+        await session_manager.create_session_async(session_id=sess.session_id, proxy=sess.proxy, ttl=sess.ttl)
+        sess = await session_manager.get_session_async(req.session)
+        if not sess:
+            return None
     if sess.cookies:
         req.cookies = (req.cookies or []) + sess.cookies
     if sess.proxy and not req.proxy:
