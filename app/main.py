@@ -8,6 +8,7 @@ import traceback
 import contextlib
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -105,7 +106,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         )
     return JSONResponse(
         status_code=422,
-        content={"detail": exc.errors()}
+        # jsonable_encoder: a validator's ValueError sits in each error's ctx and isn't JSON-serializable.
+        content={"detail": jsonable_encoder(exc.errors())}
     )
 
 # Health checks stay open so the container HEALTHCHECK works with API_KEY set.

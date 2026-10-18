@@ -185,6 +185,48 @@ class TestAPIEndpoints(unittest.TestCase):
             called_req = mock_proc.call_args[0][0]
             self.assertEqual(called_req.url, "https://example.com/api?a=1&b=2")
 
+    def test_scrape_markdown_format_and_debug_passthrough(self):
+        sol = SolutionModel(
+            url="https://example.com/", status=200, headers={"content-type": "text/html"},
+            response="<html><body><h1>Title</h1><p>Hello <b>world</b></p></body></html>",
+            debug={"console": [{"type": "log", "text": "hi"}]},
+        )
+        with patch("app.api.flaresolverr.solver_engine.process_request", new=AsyncMock(return_value=sol)) as solve:
+            res = self.client.post("/scrape", json={
+                "url": "https://example.com/", "format": "markdown", "capture": ["console"],
+                "extract_rules": {"h": "h1"},
+            })
+        self.assertEqual(res.status_code, 200)
+        body = res.json()
+        self.assertEqual(body["content"], "# Title\n\nHello **world**\n")
+        self.assertEqual(body["extracted"], {"h": "Title"}, "extraction runs on the HTML, before conversion")
+        self.assertEqual(body["debug"], {"console": [{"type": "log", "text": "hi"}]})
+        self.assertEqual(solve.call_args[0][0].debug_capture(), ("console",))
+
+    def test_scrape_rejects_unknown_tier_and_format(self):
+        self.assertEqual(self.client.post("/scrape", json={"url": "https://example.com", "tier": "nope"}).status_code, 422)
+        self.assertEqual(self.client.post("/scrape", json={"url": "https://example.com", "format": "pdf"}).status_code, 422)
+        self.assertEqual(self.client.post("/scrape", json={"url": "https://example.com", "capture": ["har"]}).status_code, 422)
+
+    def test_scrape_tier4_without_fallback_proxies_is_a_400(self):
+        from app.config import settings
+        with patch.object(settings, "FALLBACK_PROXY_URL", None), patch.object(settings, "FALLBACK_PROXY_URLS", ""), \
+             patch("app.solver.engine.check_target_url_async", new=AsyncMock()):
+            res = self.client.post("/scrape", json={"url": "https://example.com", "tier": "tier4_proxy"})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("FALLBACK_PROXY_URL", res.json()["detail"])
+
+    def test_v1_accepts_flaresolverr_return_screenshot(self):
+        sol = SolutionModel(url="https://example.com/", status=200, screenshot="abc")
+        with patch("app.api.flaresolverr.solver_engine.process_request", new=AsyncMock(return_value=sol)) as solve:
+            res = self.client.post("/v1", json={
+                "cmd": "request.get", "url": "https://example.com/", "returnScreenshot": True, "waitInSeconds": 2,
+            })
+        self.assertEqual(res.json()["solution"]["screenshot"], "abc")
+        req = solve.call_args[0][0]
+        self.assertTrue(req.screenshot and req.forceBrowser)
+        self.assertEqual(req.wait_delay_ms, 2000)
+
     def test_export_cookies_endpoint(self):
         # Test Netscape export
         res_netscape = self.client.get("/api/cookies/export?format=netscape")

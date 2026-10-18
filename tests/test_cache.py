@@ -21,15 +21,86 @@ class _FakePipeline:
         self._commands = []
 
     def set(self, key, val, ex=None):
-        self._commands.append((key, val))
+        self._commands.append(("set", key, val))
+        return self
+
+    def zadd(self, key, mapping, gt=False, nx=False):
+        self._commands.append(("zadd", key, mapping))
         return self
 
     def execute(self):
         if not self._client.healthy:
             raise ConnectionError("redis down")
-        for key, val in self._commands:
-            self._client.store[key] = val
+        for op, key, val in self._commands:
+            if op == "set":
+                self._client.store[key] = val
+            else:
+                vars(self._client).setdefault("zsets", {}).setdefault(key, {}).update(val)
         return [True] * len(self._commands)
+
+
+class _FakeIndexedRedis:
+    """Cookie keys plus sorted sets, enough for count_domains()'s domain index."""
+
+    def __init__(self):
+        import fnmatch
+        self._fnmatch = fnmatch
+        self.healthy = True
+        self.store = {}
+        self.zsets = {}
+        self.scans = 0
+
+    def ping(self):
+        return True
+
+    def scan_iter(self, match=None, count=None):
+        self.scans += 1
+        return iter([k for k in self.store if self._fnmatch.fnmatch(k, match)])
+
+    def zadd(self, key, mapping, gt=False, nx=False):
+        zset = self.zsets.setdefault(key, {})
+        for member, score in mapping.items():
+            if nx and member in zset:
+                continue
+            if gt and member in zset and zset[member] >= score:
+                continue
+            zset[member] = score
+
+    def delete(self, *keys):
+        for key in keys:
+            self.store.pop(key, None)
+            self.zsets.pop(key, None)
+
+    def pipeline(self, transaction=True):
+        client = self
+
+        class _Pipe(_FakePipeline):
+            def zremrangebyscore(self, key, lo, hi):
+                self._commands.append(("zrem", key, hi))
+                return self
+
+            def zcard(self, key):
+                self._commands.append(("zcard", key, None))
+                return self
+
+            def execute(self):
+                results = []
+                for op, key, val in self._commands:
+                    zset = client.zsets.setdefault(key, {}) if op != "set" else None
+                    if op == "set":
+                        client.store[key] = val
+                    elif op == "zadd":
+                        client.zadd(key, val, gt=True)
+                    elif op == "zrem":
+                        for member in [m for m, sc in zset.items() if sc <= val]:
+                            del zset[member]
+                    elif op == "zcard":
+                        results.append(len(zset))
+                        continue
+                    results.append(True)
+                return results
+
+        return _Pipe(client)
 
 
 class TestCookieCache(unittest.TestCase):
@@ -332,6 +403,46 @@ class TestCookieCache(unittest.TestCase):
         )
         self.cache._domain_count_cache_at = 0.0
         self.assertEqual(self.cache.count_domains(), 0)
+
+    def test_redis_count_domains_reads_the_domain_index_without_scanning(self):
+        client = _FakeIndexedRedis()
+        with patch("redis.Redis.from_url", return_value=client):
+            cache = CookieCache(cache_file=self.cache_file, redis_url="redis://fake-host:6379/0")
+            cache.set_cookies("https://a.example.com", [CookieModel(name="a", value="1", domain="a.example.com")])
+            cache.set_cookies("https://b.example.com", [
+                CookieModel(name="b", value="2", domain=".b.example.com"),
+                CookieModel(name="c", value="3", domain="b.example.com", path="/x"),
+            ])
+            self.assertEqual(cache.count_domains(), 2)
+            scans_after_seed = client.scans
+
+            cache.set_cookies("https://c.example.com", [CookieModel(name="c", value="1", domain="c.example.com")])
+            self.assertEqual(cache.count_domains(), 3)
+            self.assertEqual(client.scans, scans_after_seed, "only the one-time seed may SCAN")
+
+    def test_redis_count_domains_drops_domains_whose_cookies_expired(self):
+        client = _FakeIndexedRedis()
+        with patch("redis.Redis.from_url", return_value=client):
+            cache = CookieCache(cache_file=self.cache_file, redis_url="redis://fake-host:6379/0")
+            cache.set_cookies("https://a.example.com", [CookieModel(name="a", value="1", domain="a.example.com")])
+            cache.set_cookies("https://b.example.com", [CookieModel(name="b", value="1", domain="b.example.com")])
+            client.zsets["solverr:cookie_domains"]["a.example.com"] = time.time() - 1
+            self.assertEqual(cache.count_domains(), 1)
+
+    def test_redis_count_domains_seeds_cookies_cached_before_the_index(self):
+        client = _FakeIndexedRedis()
+        client.store["solverr:cookie:old.example.com:a|/"] = "{}"
+        with patch("redis.Redis.from_url", return_value=client):
+            cache = CookieCache(cache_file=self.cache_file, redis_url="redis://fake-host:6379/0")
+            self.assertEqual(cache.count_domains(), 1)
+
+    def test_redis_clear_drops_the_domain_index(self):
+        client = _FakeIndexedRedis()
+        with patch("redis.Redis.from_url", return_value=client):
+            cache = CookieCache(cache_file=self.cache_file, redis_url="redis://fake-host:6379/0")
+            cache.set_cookies("https://a.example.com", [CookieModel(name="a", value="1", domain="a.example.com")])
+            cache.clear()
+            self.assertNotIn("solverr:cookie_domains", client.zsets)
 
     def test_async_set_keeps_disk_flush_debounced(self):
         async def write():

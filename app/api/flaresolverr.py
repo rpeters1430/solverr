@@ -4,7 +4,8 @@ import logging
 from typing import Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, Request as FastAPIRequest, Response
 from app.models.flaresolverr import V1Request, V1Response, ScrapeRequest, ScrapeResponse
-from app.solver.engine import solver_engine
+from app.solver.engine import RequestConfigError, solver_engine
+from app.content_format import convert_content
 from app.solver.sessions import apply_session, persist_session, session_manager
 from app.config import settings
 from app.logging_config import sanitize_proxy_url, get_request_id
@@ -114,7 +115,12 @@ async def flaresolverr_api(req: V1Request):
             logger.error(f"Solve request failed after {elapsed_ms}ms for {req.url}: {type(e).__name__} - {str(e)}", exc_info=True)
             # Exception text can carry proxy credentials; clients get only the request_id,
             # plus the reason when it's an unsolved challenge (whose text we compose ourselves).
-            detail = f"Error solving the challenge: {e}" if isinstance(e, ChallengeNotSolvedError) else "Error solving request"
+            if isinstance(e, ChallengeNotSolvedError):
+                detail = f"Error solving the challenge: {e}"
+            elif isinstance(e, RequestConfigError):
+                detail = f"Error: {e}"
+            else:
+                detail = "Error solving request"
             return V1Response(
                 status="error",
                 message=f"{detail} (request_id: {get_request_id()})",
@@ -136,7 +142,7 @@ async def flaresolverr_api(req: V1Request):
                     endTimestamp=int(time.time() * 1000),
                     version=settings.VERSION,
                 )
-        sid = await session_manager.create_session_async(session_id=req.session, proxy=proxy_url, ttl=req.session_ttl or 7200)
+        sid = await session_manager.create_session_async(session_id=req.session, proxy=proxy_url, ttl=req.session_ttl or (req.session_ttl_minutes or 0) * 60 or 7200)
         return V1Response(
             status="ok",
             message=f"Session created with ID: {sid}",
@@ -213,13 +219,16 @@ async def native_scrape_api(req: ScrapeRequest):
             duration_ms=duration_ms,
             cookies=solution.cookies,
             headers=solution.headers,
-            content=solution.response,
+            content=convert_content(solution.response, solution.headers.get("content-type", ""), req.format),
             extracted=extracted,
-            screenshot=solution.screenshot
+            screenshot=solution.screenshot,
+            debug=solution.debug,
         )
     except SSRFBlockedError as e:
         logger.warning(f"[ScrapeAPI] SSRF validation blocked for {req.url}: {e}")
         raise HTTPException(status_code=400, detail=f"SSRF validation failed: {e}")
+    except RequestConfigError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"[ScrapeAPI] Scrape failed for {req.url}: {e}", exc_info=True)
         detail = f"Scrape failed: {e}" if isinstance(e, ChallengeNotSolvedError) else "Scrape failed"

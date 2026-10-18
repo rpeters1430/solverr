@@ -13,12 +13,15 @@ def set_request_id(req_id: str) -> None:
 def get_request_id() -> str:
     return request_id_ctx.get()
 
+# Userinfo stops at whitespace so free text after a URL (exception messages) isn't swallowed.
+_CREDENTIALS_RE = re.compile(r'(://[^\s:/@]+:)[^\s@/]+(@)')
+
+
 def sanitize_proxy_url(proxy_url: Optional[str]) -> Optional[str]:
     """http://user:secret@host:port -> http://user:***@host:port"""
     if not proxy_url:
         return None
-    url_str = str(proxy_url)
-    return re.sub(r'(://[^:]+:)[^@]+(@)', r'\1***\2', url_str)
+    return _CREDENTIALS_RE.sub(r'\1***\2', str(proxy_url))
 
 class RequestIdFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
@@ -32,7 +35,8 @@ class CustomLogFormatter(logging.Formatter):
             record.req_prefix = f"[{req_id}] "
         else:
             record.req_prefix = ""
-        return super().format(record)
+        # Exception text and tracebacks often embed the proxy URL verbatim; mask credentials in every line.
+        return _CREDENTIALS_RE.sub(r'\1***\2', super().format(record))
 
 def setup_logging(log_level_str: Optional[str] = None):
     level_name = (log_level_str or os.getenv("LOG_LEVEL", "INFO")).upper()

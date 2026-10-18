@@ -19,6 +19,9 @@ CLEARANCE_COOKIE_NAMES = ("cf_clearance", "aws-waf-token", "datadome")
 
 # Without a cooldown, a dead Redis would cost a connect timeout on every lookup.
 REDIS_RECONNECT_INTERVAL_SECONDS = 30.0
+# Sorted set of cached domains scored by when their last cookie expires, so counting
+# domains is a ZCARD instead of a SCAN over every cookie key. Outside "solverr:cookie:*".
+DOMAIN_INDEX_KEY = "solverr:cookie_domains"
 
 class CookieCache:
     def __init__(self, cache_file: str = settings.CACHE_FILE, redis_url: Optional[str] = settings.REDIS_URL):
@@ -34,6 +37,8 @@ class CookieCache:
         self._async_lock = asyncio.Lock()
         self._domain_count_cache_value = 0
         self._domain_count_cache_at = 0.0
+        # Cookies written before the domain index existed are folded into it once per process.
+        self._domain_index_seeded = False
 
         if self.redis_url:
             self._redis()
@@ -87,8 +92,11 @@ class CookieCache:
         if pending:
             try:
                 pipe = client.pipeline(transaction=False)
+                index: Dict[str, float] = {}
                 for domain_key, cookie_key, entry, ttl in pending:
                     pipe.set(f"solverr:cookie:{domain_key}:{cookie_key}", json.dumps(entry), ex=ttl)
+                    index[domain_key] = max(index.get(domain_key, 0.0), now + ttl)
+                pipe.zadd(DOMAIN_INDEX_KEY, index, gt=True)
                 pipe.execute()
                 for domain_key, cookie_key, _entry, _ttl in pending:
                     cookies_dict = self._store.get(domain_key)
@@ -227,11 +235,16 @@ class CookieCache:
         if self._redis():
             try:
                 pipe = self.redis_client.pipeline(transaction=False)
+                expires_at = now + settings.COOKIE_CACHE_TTL
+                index: Dict[str, float] = {}
                 for c in cookies:
                     c_domain = c.domain.lstrip(".") if c.domain else domain
                     key = f"solverr:cookie:{c_domain}:{self._cookie_key(c)}"
                     val = json.dumps(self._entry(c, now, user_agent))
                     pipe.set(key, val, ex=settings.COOKIE_CACHE_TTL)
+                    index[c_domain] = expires_at
+                if index:
+                    pipe.zadd(DOMAIN_INDEX_KEY, index, gt=True)
                 pipe.execute()
                 self._domain_count_cache_at = 0.0
                 logger.debug(f"[CookieCache] Saved {len(cookies)} cookie(s) to Redis for domain '{domain}'")
@@ -276,8 +289,7 @@ class CookieCache:
         if self._redis():
             try:
                 keys = self._scan_keys("solverr:cookie:*")
-                if keys:
-                    self.redis_client.delete(*keys)
+                self.redis_client.delete(*keys, DOMAIN_INDEX_KEY)
                 logger.info("[CookieCache] Cleared all cached cookies from Redis")
             except Exception as e:
                 logger.warning(f"[CookieCache] Redis clear error: {e}")
@@ -333,12 +345,7 @@ class CookieCache:
             return self._domain_count_cache_value
         if self._redis():
             try:
-                domains = {
-                    key.split(":", 3)[2]
-                    for key in self._scan_keys("solverr:cookie:*")
-                    if len(key.split(":", 3)) >= 4
-                }
-                value = len(domains)
+                value = self._count_redis_domains()
             except Exception:
                 self._invalidate_redis()
                 value = self._count_live_local_domains()
@@ -347,6 +354,25 @@ class CookieCache:
         self._domain_count_cache_value = value
         self._domain_count_cache_at = now
         return value
+
+    def _count_redis_domains(self) -> int:
+        client = self.redis_client
+        now = time.time()
+        if not self._domain_index_seeded:
+            # One SCAN per process, for cookies cached before the index existed; scored as if
+            # just written, so a stale domain can count for at most one COOKIE_CACHE_TTL.
+            domains = {
+                key.split(":", 3)[2]
+                for key in self._scan_keys("solverr:cookie:*")
+                if len(key.split(":", 3)) >= 4
+            }
+            if domains:
+                client.zadd(DOMAIN_INDEX_KEY, {d: now + settings.COOKIE_CACHE_TTL for d in domains}, nx=True)
+            self._domain_index_seeded = True
+        pipe = client.pipeline(transaction=False)
+        pipe.zremrangebyscore(DOMAIN_INDEX_KEY, "-inf", now)
+        pipe.zcard(DOMAIN_INDEX_KEY)
+        return int(pipe.execute()[-1])
 
     def _count_live_local_domains(self) -> int:
         now = time.time()

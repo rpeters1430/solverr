@@ -3,7 +3,7 @@ import base64
 import json
 import logging
 import time
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from playwright.async_api import Page
 
 from app.config import settings
@@ -28,6 +28,7 @@ from app.solver.browser.challenges import (
     has_age_gate_marker,
     is_browser_error,
 )
+from app.solver.browser.debug_capture import DebugCapture
 from app.solver.browser.captcha import CAPTCHA_SOLVER_WIDGETS, try_captcha_solver_escalation, try_datadome_slider_solver
 from app.solver.browser.cookies import build_playwright_cookies, read_context_cookies, extract_captured_cookies
 from app.solver.browser.content import decode_browser_body, is_non_html_text
@@ -358,6 +359,8 @@ class BrowserPool:
         follow_meta_refresh: bool = False,
         browser_storage: Optional[Dict[str, Any]] = None,
         capture_storage: bool = False,
+        disable_media: bool = False,
+        debug_capture: Optional[Tuple[str, ...]] = None,
     ) -> SolutionModel:
         wait_start = time.monotonic()
         self._queued_at.add(wait_start)
@@ -398,6 +401,7 @@ class BrowserPool:
                             extract_records=extract_records,
                             follow_meta_refresh=follow_meta_refresh,
                             browser_storage=browser_storage, capture_storage=capture_storage,
+                            disable_media=disable_media, debug_capture=debug_capture,
                         ),
                         timeout=tier_timeout
                     )
@@ -435,6 +439,7 @@ class BrowserPool:
                         screenshot_selector=screenshot_selector, extract_records=extract_records,
                         follow_meta_refresh=follow_meta_refresh,
                         browser_storage=browser_storage, capture_storage=capture_storage,
+                        disable_media=disable_media, debug_capture=debug_capture,
                     ),
                     timeout=tier_timeout
                 )
@@ -469,6 +474,8 @@ class BrowserPool:
         follow_meta_refresh: bool = False,
         browser_storage: Optional[Dict[str, Any]] = None,
         capture_storage: bool = False,
+        disable_media: bool = False,
+        debug_capture: Optional[Tuple[str, ...]] = None,
     ) -> SolutionModel:
         # Leave the ephemeral retry its minimum window (plus launch slack) out of the caller's budget.
         remaining_s = timeout_ms / 1000.0 - (time.monotonic() - start_time)
@@ -514,6 +521,7 @@ class BrowserPool:
                 screenshot_selector=screenshot_selector, extract_records=extract_records,
                 follow_meta_refresh=follow_meta_refresh,
                 browser_storage=browser_storage, capture_storage=capture_storage,
+                disable_media=disable_media, debug_capture=debug_capture,
             )
         except BaseException as exc:
             disconnected = _is_browser_disconnected(exc)
@@ -572,6 +580,8 @@ class BrowserPool:
         follow_meta_refresh: bool = False,
         browser_storage: Optional[Dict[str, Any]] = None,
         capture_storage: bool = False,
+        disable_media: bool = False,
+        debug_capture: Optional[Tuple[str, ...]] = None,
     ) -> SolutionModel:
         """Non-pooled launch for requests with their own proxy or user_agent, both fixed at launch."""
         # timeout_ms is what's left when this attempt starts, so its clock starts here (launch included).
@@ -625,6 +635,7 @@ class BrowserPool:
                 screenshot_selector=screenshot_selector, extract_records=extract_records,
                 follow_meta_refresh=follow_meta_refresh,
                 browser_storage=browser_storage, capture_storage=capture_storage,
+                disable_media=disable_media, debug_capture=debug_capture,
             )
 
     async def _execute_solve_flow(
@@ -649,6 +660,8 @@ class BrowserPool:
         follow_meta_refresh: bool = False,
         browser_storage: Optional[Dict[str, Any]] = None,
         capture_storage: bool = False,
+        disable_media: bool = False,
+        debug_capture: Optional[Tuple[str, ...]] = None,
         proxy_url: Optional[str] = None,
     ) -> SolutionModel:
         # Navigation and the challenge loop share one deadline; the loop used to get a fresh full
@@ -663,7 +676,11 @@ class BrowserPool:
             except Exception as e:
                 logger.warning(f"[BrowserPool] Error pre-loading cookies: {e}")
 
-        await install_media_blocking(context)
+        await install_media_blocking(context, disable_media=disable_media)
+
+        capture = DebugCapture(debug_capture) if debug_capture else None
+        if capture:
+            capture.attach(page)
 
         saved_session_storage = (browser_storage or {}).get("session") or {}
         if saved_session_storage:
@@ -712,7 +729,8 @@ class BrowserPool:
                 headers={"content-type": "text/html"},
                 response="<html><body><h1>502 Bad Gateway</h1><p>Browser navigation failed to reach target URL</p></body></html>",
                 cookies=[],
-                userAgent=active_ua
+                userAgent=active_ua,
+                debug=capture.to_dict() if capture else None,
             )
 
         initial_title = ""
@@ -1081,6 +1099,8 @@ class BrowserPool:
             solution.screenshot = screenshot_b64
         if rendered_records is not None:
             solution.extracted = rendered_records
+        if capture:
+            solution.debug = capture.to_dict()
 
         return solution
 

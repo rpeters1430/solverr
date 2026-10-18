@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import AsyncMock, patch
 from app.models.flaresolverr import V1Request, SolutionModel, CookieModel
-from app.solver.engine import HybridSolverEngine
+from app.solver.engine import HybridSolverEngine, RequestConfigError
 from app.config import settings
 
 
@@ -69,6 +69,50 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
             sol = await self.engine.process_request(req)
             self.assertEqual(sol.status, 503)
             browser_mock.assert_not_called()
+
+    async def test_tier4_moves_to_the_next_pooled_proxy_after_a_failure(self):
+        from app.solver.proxy_pool import FallbackProxyPool
+        pool = FallbackProxyPool(["http://p1.test:8080", "http://p2.test:8080"])
+        with patch("app.solver.engine.fallback_proxy_pool", pool), \
+             patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock(side_effect=[RuntimeError("direct"), RuntimeError("p1"), _sol(200)])) as browser_mock:
+            sol = await self.engine.process_request(V1Request(cmd="request.get", url="https://example.com"))
+        self.assertEqual(sol.tier, "tier4_fallback_proxy")
+        proxies = [call.kwargs["proxy"] for call in browser_mock.call_args_list]
+        self.assertEqual(proxies, [None, {"url": "http://p1.test:8080"}, {"url": "http://p2.test:8080"}])
+        health = {p["proxy"]: p for p in pool.stats()}
+        self.assertFalse(health["http://p1.test:8080"]["healthy"])
+        self.assertEqual(health["http://p2.test:8080"]["successes"], 1)
+
+    async def test_force_fallback_proxy_skips_tiers_1_to_3(self):
+        from app.solver.proxy_pool import FallbackProxyPool
+        with patch("app.solver.engine.fallback_proxy_pool", FallbackProxyPool(["http://p1.test:8080"])), \
+             patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock()) as fast_mock, \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock(return_value=_sol(200))) as browser_mock:
+            sol = await self.engine.process_request(V1Request(cmd="request.get", url="https://example.com", forceFallbackProxy=True))
+        fast_mock.assert_not_called()
+        browser_mock.assert_called_once()
+        self.assertEqual(browser_mock.call_args.kwargs["proxy"], {"url": "http://p1.test:8080"})
+        self.assertEqual(sol.tier, "tier4_fallback_proxy")
+
+    async def test_force_fallback_proxy_is_a_config_error_without_a_pool_or_with_a_proxy(self):
+        from app.solver.proxy_pool import FallbackProxyPool
+        with patch("app.solver.engine.fallback_proxy_pool", FallbackProxyPool([])):
+            with self.assertRaises(RequestConfigError):
+                await self.engine.process_request(V1Request(cmd="request.get", url="https://example.com", forceFallbackProxy=True))
+        with patch("app.solver.engine.fallback_proxy_pool", FallbackProxyPool(["http://p1.test:8080"])):
+            with self.assertRaises(RequestConfigError):
+                await self.engine.process_request(V1Request(
+                    cmd="request.get", url="https://example.com", forceFallbackProxy=True, proxy="http://mine.test:8080"
+                ))
+
+    async def test_debug_capture_and_disable_media_reach_the_browser(self):
+        with patch("app.solver.engine.browser_pool.solve", new=AsyncMock(return_value=_sol(200))) as browser_mock:
+            await self.engine.process_request(V1Request(
+                cmd="request.get", url="https://example.com", capture=["console"], disableMedia=True
+            ))
+        self.assertEqual(browser_mock.call_args.kwargs["debug_capture"], ("console",))
+        self.assertTrue(browser_mock.call_args.kwargs["disable_media"])
 
     async def test_browser_failure_escalates_to_fallback_proxy(self):
         with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \

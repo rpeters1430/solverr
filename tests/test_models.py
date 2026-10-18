@@ -83,3 +83,47 @@ class TestV1RequestModels(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFlareSolverrCompatibilityFields(unittest.TestCase):
+    def test_return_screenshot_and_wait_in_seconds_map_to_solverr_fields(self):
+        req = V1Request(cmd="request.get", url="https://a.test", returnScreenshot=True, waitInSeconds=3)
+        self.assertTrue(req.screenshot)
+        self.assertTrue(req.forceBrowser, "a screenshot needs the browser tier")
+        self.assertEqual(req.wait_delay_ms, 3000)
+
+    def test_explicit_wait_delay_wins_over_wait_in_seconds(self):
+        req = V1Request(cmd="request.get", url="https://a.test", waitInSeconds=3, wait_delay_ms=500)
+        self.assertEqual(req.wait_delay_ms, 500)
+
+    def test_disable_media_and_tabs_till_verify_are_accepted(self):
+        req = V1Request(cmd="request.get", url="https://a.test", disableMedia=True, tabs_till_verify=3)
+        self.assertTrue(req.disableMedia)
+        self.assertFalse(req.forceBrowser)
+
+    def test_capture_forces_the_browser_and_rejects_unknown_kinds(self):
+        req = V1Request(cmd="request.get", url="https://a.test", capture=["redirects", "console", "console"])
+        self.assertTrue(req.forceBrowser)
+        self.assertEqual(req.debug_capture(), ("console", "redirects"))
+        with self.assertRaises(ValueError):
+            V1Request(cmd="request.get", url="https://a.test", capture=["har"])
+
+
+class TestScrapeTiers(unittest.TestCase):
+    def test_tier_mapping(self):
+        self.assertTrue(ScrapeRequest(url="https://a.test", tier="tier2_cache").to_v1_request().fastTlsOnly)
+        tier4 = ScrapeRequest(url="https://a.test", tier="tier4_proxy").to_v1_request()
+        self.assertTrue(tier4.forceFallbackProxy)
+        self.assertTrue(tier4.forceBrowser)
+        tier3 = ScrapeRequest(url="https://a.test", tier="tier3_browser").to_v1_request()
+        self.assertTrue(tier3.forceBrowser)
+        self.assertFalse(tier3.forceFallbackProxy)
+
+    def test_unknown_tier_is_rejected(self):
+        with self.assertRaises(ValueError):
+            ScrapeRequest(url="https://a.test", tier="tier5_magic")
+
+    def test_capture_and_disable_media_pass_through(self):
+        req = ScrapeRequest(url="https://a.test", capture=["network"], disable_media=True).to_v1_request()
+        self.assertEqual(req.debug_capture(), ("network",))
+        self.assertTrue(req.disableMedia)

@@ -15,6 +15,37 @@ logger = logging.getLogger("solverr.browser")
 AKAMAI_HOLD_SELECTOR = "#progress-button, .behavioral-button, #sec-if-cpt-container [role='button']"
 AKAMAI_HOLD_SECONDS = 5.5
 
+# Top-level widget selectors, tried in order; the first visible match larger than 15x15 is clicked.
+WIDGET_LOCATORS = [
+    ["iframe[src*='challenges.cloudflare.com']", "Turnstile"],
+    ["iframe[src*='turnstile']", "Turnstile"],
+    ["iframe[src*='cloudflare']", "Turnstile"],
+    ["div.cf-turnstile iframe", "Turnstile"],
+    ["#turnstile-wrapper iframe", "Turnstile"],
+    ["#challenge-stage iframe", "Turnstile"],
+    ["div[data-sitekey] iframe", "Turnstile"],
+    ["iframe[title*='Cloudflare']", "Turnstile"],
+    ["iframe[title*='Turnstile']", "Turnstile"],
+    ["#turnstile-wrapper", "Turnstile"],
+    ["#challenge-stage", "Turnstile"],
+    [".cf-turnstile", "Turnstile"],
+    ["iframe[src*='recaptcha/api2/anchor'], iframe[src*='google.com/recaptcha']", "reCAPTCHA"],
+    ["iframe[src*='hcaptcha.com']", "hCaptcha"],
+]
+
+_FIND_WIDGET_JS = """(locators) => {
+    for (const [selector, kind] of locators) {
+        let el = null;
+        try { el = document.querySelector(selector); } catch (e) { continue; }
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width > 15 && r.height > 15) {
+            return { selector, kind, x: r.left, y: r.top, width: r.width, height: r.height };
+        }
+    }
+    return null;
+}"""
+
 
 async def wander_mouse(page: Page, points: int = 3) -> None:
     """Drift the pointer between a few random spots; Akamai's sensor scores pointer telemetry
@@ -92,64 +123,20 @@ async def dispatch_challenge_click(
                 except Exception as f_err:
                     logger.debug(f"[Turnstile] Frame click notice: {f_err}")
 
-    # Turnstile widget located from the top-level page.
-    if not clicked:
-        turnstile_locators = [
-            "iframe[src*='challenges.cloudflare.com']",
-            "iframe[src*='turnstile']",
-            "iframe[src*='cloudflare']",
-            "div.cf-turnstile iframe",
-            "#turnstile-wrapper iframe",
-            "#challenge-stage iframe",
-            "div[data-sitekey] iframe",
-            "iframe[title*='Cloudflare']",
-            "iframe[title*='Turnstile']",
-            "#turnstile-wrapper",
-            "#challenge-stage",
-            ".cf-turnstile"
-        ]
-        for t_sel in turnstile_locators:
-            try:
-                loc = page.locator(t_sel).first
-                if await loc.count() > 0:
-                    box = await loc.bounding_box()
-                    if box and box['width'] > 15 and box['height'] > 15:
-                        click_x = box['x'] + (28.0 if box['width'] > 60 else box['width'] / 2.0)
-                        click_y = box['y'] + (box['height'] / 2.0)
-                        logger.info(f"[Turnstile] Detected widget '{t_sel}' at ({click_x:.0f}, {click_y:.0f}). Dispatching human click...")
-                        await human_click(page, click_x, click_y)
-                        clicked = True
-                        break
-            except Exception as t_err:
-                logger.debug(f"[Turnstile] Locator notice for '{t_sel}': {t_err}")
-
+    # Turnstile, reCAPTCHA and hCaptcha widgets located from the top-level page, in one round trip.
     if not clicked:
         try:
-            recap_loc = page.locator("iframe[src*='recaptcha/api2/anchor'], iframe[src*='google.com/recaptcha']").first
-            if await recap_loc.count() > 0:
-                box = await recap_loc.bounding_box()
-                if box and box['width'] > 15 and box['height'] > 15:
-                    click_x = box['x'] + 28.0
-                    click_y = box['y'] + (box['height'] / 2.0)
-                    logger.info(f"[reCAPTCHA] Detected anchor at ({click_x:.0f}, {click_y:.0f}). Dispatching human click...")
-                    await human_click(page, click_x, click_y)
-                    clicked = True
-        except Exception as recap_err:
-            logger.debug(f"[reCAPTCHA] Notice: {recap_err}")
-
-    if not clicked:
-        try:
-            hcap_loc = page.locator("iframe[src*='hcaptcha.com']").first
-            if await hcap_loc.count() > 0:
-                box = await hcap_loc.bounding_box()
-                if box and box['width'] > 15 and box['height'] > 15:
-                    click_x = box['x'] + 28.0
-                    click_y = box['y'] + (box['height'] / 2.0)
-                    logger.info(f"[hCaptcha] Detected frame at ({click_x:.0f}, {click_y:.0f}). Dispatching human click...")
-                    await human_click(page, click_x, click_y)
-                    clicked = True
-        except Exception as hcap_err:
-            logger.debug(f"[hCaptcha] Notice: {hcap_err}")
+            widget = await page.evaluate(_FIND_WIDGET_JS, WIDGET_LOCATORS)
+            if widget:
+                bw = widget["width"]
+                offset_x = 28.0 if (widget["kind"] != "Turnstile" or bw > 60) else bw / 2.0
+                click_x = widget["x"] + offset_x
+                click_y = widget["y"] + (widget["height"] / 2.0)
+                logger.info(f"[{widget['kind']}] Detected widget '{widget['selector']}' at ({click_x:.0f}, {click_y:.0f}). Dispatching human click...")
+                await human_click(page, click_x, click_y)
+                clicked = True
+        except Exception as w_err:
+            logger.debug(f"[WidgetClick] Locator notice: {w_err}")
 
     # Fallback: walk shadow roots for widgets the locators above can't reach.
     if not clicked and (active_challenge in ["cloudflare_turnstile", "recaptcha", "hcaptcha"] or is_challenge_title(title)):

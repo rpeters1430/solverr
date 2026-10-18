@@ -4,19 +4,21 @@ Tools share the HTTP routes' singletons, so MCP solves appear in /metrics and th
 """
 import base64
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import ValidationError
 from starlette.applications import Starlette
 
 from app.api.flaresolverr import _extract_data
 from app.config import settings
-from app.models.flaresolverr import ScrapeRequest
+from app.content_format import convert_content
+from app.models.flaresolverr import CAPTURE_KINDS, ScrapeRequest, SolutionModel, V1Request
 from app.solver.browser import ChallengeNotSolvedError, browser_pool
 from app.solver.cache import cookie_cache
-from app.solver.engine import metrics, solver_engine
+from app.solver.engine import RequestConfigError, metrics, solver_engine
 from app.solver.sessions import apply_session, persist_session
 
 logger = logging.getLogger("solverr.mcp")
@@ -27,12 +29,34 @@ mcp_server: MCPServer = MCPServer(
     instructions=(
         "Solverr solves Cloudflare (Turnstile, 5s interstitial), Google reCAPTCHA v2, "
         "hCaptcha, GeeTest, Imperva, DataDome, Akamai, and AWS WAF challenges, then "
-        "returns the resulting page. Use solverr_scrape to fetch a URL's content, "
-        "solverr_screenshot for a visual capture, solverr_get_cookies to inspect "
+        "returns the resulting page. Use solverr_scrape to fetch a URL's content "
+        "(format=\"markdown\" is the most compact to read), solverr_screenshot for a "
+        "visual capture, solverr_inspect to debug a page (console, network requests, "
+        "redirect chain), solverr_get_cookies to inspect "
         "clearance cookies Solverr already holds for a domain, and solverr_get_stats "
         "for engine/browser-pool health."
     ),
 )
+
+
+async def _solve(action: str, url: str, build_request) -> tuple:
+    """Build and run a request for a tool; returns (request, solution). Errors become ToolErrors
+    that say what was wrong with the input, and nothing else (exception text can carry proxy credentials)."""
+    try:
+        req: V1Request = build_request()
+    except ValidationError as e:
+        problems = "; ".join(f"{'.'.join(str(p) for p in err['loc']) or 'request'}: {err['msg']}" for err in e.errors())
+        raise ToolError(f"Invalid arguments: {problems}") from e
+    try:
+        storage = await apply_session(req)
+        solution: SolutionModel = await solver_engine.process_request(req, browser_storage=storage)
+        await persist_session(req, solution)
+    except Exception as e:
+        logger.error(f"[MCP] {action} failed for {url}: {type(e).__name__}: {e}", exc_info=True)
+        if isinstance(e, (ChallengeNotSolvedError, RequestConfigError)):
+            raise ToolError(f"{action} failed for {url}: {e}") from e
+        raise ToolError(f"{action} failed for {url}; see server logs for details.") from e
+    return req, solution
 
 
 @mcp_server.tool()
@@ -47,6 +71,7 @@ async def solverr_scrape(
     max_timeout_ms: int = 60000,
     follow_meta_refresh: Optional[bool] = None,
     session: Optional[str] = None,
+    format: str = "html",
 ) -> Dict[str, Any]:
     """Fetch a URL through Solverr's tiered solver, automatically clearing any
     Cloudflare/CAPTCHA/WAF challenge in the way, and return its content.
@@ -55,10 +80,13 @@ async def solverr_scrape(
     than silently sent as GET. post_data: request body for a POST.
     tier: "auto" (default, escalates only as needed), "tier1_tls" (Fast TLS
     only, no browser - fails rather than escalating if a challenge is hit),
-    or "tier3_browser" (force a stealth browser solve). There is no tier
-    value that forces Tier 4 directly - that's an automatic engine-side
-    escalation (FALLBACK_PROXY_URL) after a direct browser solve fails, not
-    a mode a caller can select up front.
+    "tier2_cache" (Fast TLS replaying cached clearance cookies, no browser),
+    "tier3_browser" (force a stealth browser solve), or "tier4_proxy"
+    (stealth browser through the server's fallback proxy pool; an error if
+    none is configured).
+    format: "html" (default), "markdown" (readable and much smaller - best
+    for reading a page), or "text". Applies to HTML pages only; JSON and
+    other documents are returned as-is. Extraction always runs on the HTML.
     extract_rules: optional {name: rule} map for pulling fields out of the
     returned HTML - rule is a CSS selector (text), "selector@attr" (an
     attribute), "selector[]" (a list of matches), or "regex:pattern".
@@ -70,27 +98,18 @@ async def solverr_scrape(
     if method.upper() not in ("GET", "POST"):
         raise ToolError(f"Unsupported method '{method}' - only GET and POST are supported.")
 
-    try:
-        req = ScrapeRequest(
-            url=url,
-            method=method,
-            postData=post_data,
-            tier=tier,
-            wait_selector=wait_selector,
-            extract_records=extract_records,
-            maxTimeout=max_timeout_ms,
-            followMetaRefresh=follow_meta_refresh,
-            session=session,
-        ).to_v1_request()
-        storage = await apply_session(req)
-        solution = await solver_engine.process_request(req, browser_storage=storage)
-        await persist_session(req, solution)
-    except Exception as e:
-        # Exception text can carry proxy credentials, so details go to the log only.
-        logger.error(f"[MCP] solverr_scrape failed for {url}: {type(e).__name__}: {e}", exc_info=True)
-        if isinstance(e, ChallengeNotSolvedError):
-            raise ToolError(f"Scrape failed for {url}: {e}") from e
-        raise ToolError(f"Scrape failed for {url}; see server logs for details.") from e
+    _req, solution = await _solve("Scrape", url, lambda: ScrapeRequest(
+        url=url,
+        method=method,
+        postData=post_data,
+        tier=tier,
+        wait_selector=wait_selector,
+        extract_records=extract_records,
+        maxTimeout=max_timeout_ms,
+        followMetaRefresh=follow_meta_refresh,
+        session=session,
+        format=format,
+    ).to_v1_request())
 
     extracted = None
     if solution.extracted is not None:
@@ -103,10 +122,46 @@ async def solverr_scrape(
         "http_status": solution.status,
         "tier_used": solution.tier or "tier1_fast_tls",
         "challenge_type": solution.challengeType,
-        "content": solution.response,
+        "content": convert_content(solution.response, solution.headers.get("content-type", ""), format),
         "extracted": extracted,
         "cookie_count": len(solution.cookies),
     }
+
+
+@mcp_server.tool()
+async def solverr_inspect(
+    url: str,
+    capture: Optional[List[str]] = None,
+    max_timeout_ms: int = 60000,
+    include_content: bool = False,
+) -> Dict[str, Any]:
+    """Debug a page: solve any challenge in a stealth browser and report what
+    happened along the way - browser console messages and page errors, every
+    network request with its status (failed ones with the failure reason), and
+    the main-frame redirect chain (including challenge hops).
+
+    capture: any of "console", "network", "redirects" (default: all three).
+    include_content: also return the final page as markdown.
+    """
+    kinds = capture or list(CAPTURE_KINDS)
+    _req, solution = await _solve("Inspect", url, lambda: ScrapeRequest(
+        url=url,
+        tier="tier3_browser",
+        capture=kinds,
+        maxTimeout=max_timeout_ms,
+    ).to_v1_request())
+    result: Dict[str, Any] = {
+        "url": solution.url,
+        "http_status": solution.status,
+        "tier_used": solution.tier,
+        "challenge_type": solution.challengeType,
+        "content_type": solution.headers.get("content-type"),
+        "cookies": sorted(c.name for c in solution.cookies),
+        "debug": solution.debug or {},
+    }
+    if include_content:
+        result["content"] = convert_content(solution.response, solution.headers.get("content-type", ""), "markdown")
+    return result
 
 
 @mcp_server.tool()
@@ -115,21 +170,14 @@ async def solverr_screenshot(url: str, max_timeout_ms: int = 60000,
     """Solve any challenge on a URL and return a JPEG screenshot of the
     resulting page. Always uses the stealth browser tier, since a screenshot
     requires a real rendered page rather than a raw HTTP response."""
-    try:
-        req = ScrapeRequest(
-            url=url,
-            tier="tier3_browser",
-            screenshot=True,
-            screenshot_full_page=full_page,
-            screenshot_selector=selector,
-            maxTimeout=max_timeout_ms,
-        ).to_v1_request()
-        solution = await solver_engine.process_request(req)
-    except Exception as e:
-        logger.error(f"[MCP] solverr_screenshot failed for {url}: {type(e).__name__}: {e}", exc_info=True)
-        if isinstance(e, ChallengeNotSolvedError):
-            raise ToolError(f"Screenshot failed for {url}: {e}") from e
-        raise ToolError(f"Screenshot failed for {url}; see server logs for details.") from e
+    _req, solution = await _solve("Screenshot", url, lambda: ScrapeRequest(
+        url=url,
+        tier="tier3_browser",
+        screenshot=True,
+        screenshot_full_page=full_page,
+        screenshot_selector=selector,
+        maxTimeout=max_timeout_ms,
+    ).to_v1_request())
 
     if not solution.screenshot:
         raise ToolError(f"No screenshot was captured for {url} (http_status={solution.status})")

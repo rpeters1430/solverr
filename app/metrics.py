@@ -4,6 +4,7 @@ from app.solver.engine import metrics
 from app.solver.cache import cookie_cache
 from app.solver.sessions import session_manager
 from app.solver.browser import browser_pool
+from app.solver.proxy_pool import fallback_proxy_pool
 from app.config import settings
 
 def generate_prometheus_metrics(cached_domains_count: int | None = None, active_sessions_count: int | None = None) -> str:
@@ -135,6 +136,15 @@ def generate_prometheus_metrics(cached_domains_count: int | None = None, active_
         "# HELP solverr_browser_oldest_checkout_seconds Longest current pooled browser checkout",
         "# TYPE solverr_browser_oldest_checkout_seconds gauge",
         f'solverr_browser_oldest_checkout_seconds {pool_stats["oldest_checkout_seconds"]}',
+    ]
+
+    proxies = fallback_proxy_pool.stats()
+    lines += [
+        "",
+        "# HELP solverr_fallback_proxies Configured Tier 4 fallback proxies, by health (healthy = not cooling down after a failure)",
+        "# TYPE solverr_fallback_proxies gauge",
+        f'solverr_fallback_proxies{{state="healthy"}} {sum(1 for p in proxies if p["healthy"])}',
+        f'solverr_fallback_proxies{{state="cooling_down"}} {sum(1 for p in proxies if not p["healthy"])}',
     ]
 
     lines += [

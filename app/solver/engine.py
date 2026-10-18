@@ -3,7 +3,7 @@ import json
 import hashlib
 import asyncio
 import logging
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from app.models.flaresolverr import V1Request, SolutionModel, CookieModel
 from app.solver.cache import cookie_cache
 from app.solver.fast_tls import fast_tls_engine
@@ -13,6 +13,11 @@ from app.config import settings
 from app.events import event_broadcaster
 from app.history import request_history
 from app.security import check_target_url_async
+from app.solver.proxy_pool import fallback_proxy_pool
+
+
+class RequestConfigError(ValueError):
+    """A request asked for something this deployment can't do; the caller's mistake (HTTP 400)."""
 
 logger = logging.getLogger("solverr.engine")
 
@@ -205,6 +210,11 @@ class HybridSolverEngine:
     ) -> SolutionModel:
         """`browser_storage` is the request's session web storage (from apply_session()), restored
         into the browser tiers; it is never taken from the client."""
+        if req.forceFallbackProxy:
+            if req.get_proxy_url():
+                raise RequestConfigError("tier4_proxy uses the fallback proxy pool and can't be combined with 'proxy'")
+            if not fallback_proxy_pool.enabled:
+                raise RequestConfigError("tier4_proxy needs FALLBACK_PROXY_URL or FALLBACK_PROXY_URLS to be configured")
         budget = RequestBudget(req.maxTimeout or settings.BROWSER_TIMEOUT_MS)
         url = req.url
         method = req.cmd.split(".")[-1].upper() if "." in req.cmd else "GET"
@@ -236,6 +246,9 @@ class HybridSolverEngine:
             "maxTimeout": req.maxTimeout,
             "bypassCookieCache": bypass_cookie_cache,
             "followMetaRefresh": req.follows_meta_refresh(),
+            "forceFallbackProxy": req.forceFallbackProxy,
+            "capture": req.debug_capture(),
+            "disableMedia": req.disableMedia,
         }
         inflight_key = hashlib.sha256(
             json.dumps(fingerprint, sort_keys=True, default=str).encode()
@@ -411,18 +424,14 @@ class HybridSolverEngine:
         if budget.is_expired or budget.remaining_s < 1.0:
             raise TimeoutError(f"Request timeout budget exhausted ({budget.elapsed_ms:.0f}ms elapsed)")
 
-        browser_timeout_ms = max(3000, budget.remaining_ms)
-        try:
-            if tier1_ip_block:
-                logger.info(f"[HybridEngine] {tier1_ip_block} refused this IP at Tier 1; skipping the same-IP browser solve.")
-                raise ChallengeNotSolvedError(tier1_ip_block, IP_BLOCKED_REASON, ip_blocked=True)
-            solution = await browser_pool.solve(
+        def _browser_kwargs(proxy: Optional[str], timeout_ms: int) -> Dict[str, Any]:
+            return dict(
                 url=url,
                 method=method,
                 post_data=req.postData,
                 cookies=combined_cookies,
-                proxy={"url": proxy_url} if proxy_url else None,
-                timeout_ms=browser_timeout_ms,
+                proxy={"url": proxy} if proxy else None,
+                timeout_ms=timeout_ms,
                 user_agent=req.userAgent,
                 headers=req.headers,
                 wait_selector=req.wait_selector,
@@ -434,8 +443,20 @@ class HybridSolverEngine:
                 follow_meta_refresh=req.follows_meta_refresh(),
                 browser_storage=browser_storage,
                 capture_storage=bool(req.session),
+                debug_capture=req.debug_capture(),
+                disable_media=bool(req.disableMedia),
             )
-            
+
+        if req.forceFallbackProxy:
+            logger.info("[HybridEngine] forceFallbackProxy=True requested. Going straight to Tier 4 Fallback Proxy...")
+            return await self._solve_via_fallback_proxies(url, budget, _browser_kwargs, TimeoutError("Request timeout budget exhausted before a Tier 4 attempt"))
+
+        try:
+            if tier1_ip_block:
+                logger.info(f"[HybridEngine] {tier1_ip_block} refused this IP at Tier 1; skipping the same-IP browser solve.")
+                raise ChallengeNotSolvedError(tier1_ip_block, IP_BLOCKED_REASON, ip_blocked=True)
+            solution = await browser_pool.solve(**_browser_kwargs(proxy_url, max(3000, budget.remaining_ms)))
+
             elapsed_ms = budget.elapsed_ms
             metrics.record_browser(elapsed_ms, solution.challengeType)
             logger.info(f"[HybridEngine] Level 3 Stealth Browser SUCCESS in {elapsed_ms:.1f}ms | Status: {solution.status} | Challenge: {solution.challengeType or 'none'}")
@@ -458,55 +479,56 @@ class HybridSolverEngine:
         except Exception as e:
             if isinstance(e, (asyncio.TimeoutError, TimeoutError)):
                 metrics.record_timeout()
-            # Tier 4: retry through the fallback proxy.
-            fallback_proxy = settings.FALLBACK_PROXY_URL
-            if fallback_proxy and not proxy_url and not budget.is_expired and budget.remaining_s >= 2.0:
-                await check_target_url_async(fallback_proxy, label="Fallback proxy")
-                fallback_timeout_ms = max(3000, budget.remaining_ms)
-                logger.warning(f"[HybridEngine] Level 3 direct solve failed ({e}). Escalating to Tier 4 Fallback Proxy ({fallback_proxy}, remaining budget: {budget.remaining_s:.1f}s)...")
-                try:
-                    solution = await browser_pool.solve(
-                        url=url,
-                        method=method,
-                        post_data=req.postData,
-                        cookies=combined_cookies,
-                        proxy={"url": fallback_proxy},
-                        timeout_ms=fallback_timeout_ms,
-                        user_agent=req.userAgent,
-                        headers=req.headers,
-                        wait_selector=req.wait_selector,
-                        wait_delay_ms=req.wait_delay_ms,
-                        capture_screenshot=bool(req.screenshot or req.screenshot_selector or req.screenshot_full_page),
-                        screenshot_full_page=req.screenshot_full_page,
-                        screenshot_selector=req.screenshot_selector,
-                        extract_records=req.extract_records,
-                        follow_meta_refresh=req.follows_meta_refresh(),
-                        browser_storage=browser_storage,
-                        capture_storage=bool(req.session),
-                    )
-                    elapsed_ms = budget.elapsed_ms
-                    metrics.record_fallback_proxy(elapsed_ms)
-                    logger.info(f"[HybridEngine] Tier 4 Fallback Proxy SUCCESS in {elapsed_ms:.1f}ms | Status: {solution.status}")
-                    solution.tier = "tier4_fallback_proxy"
-                    if solution.cookies:
-                        await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent)
-                    event_broadcaster.emit("solve", {
-                        "url": url,
-                        "tier": "tier4_fallback_proxy",
-                        "status": solution.status,
-                        "duration_ms": round(elapsed_ms, 1),
-                        "cookies_count": len(solution.cookies) if solution.cookies else 0
-                    })
-                    return solution
-                except Exception as fallback_err:
-                    logger.error(f"[HybridEngine] Tier 4 Fallback Proxy solve also FAILED for {url}: {fallback_err}")
-                    metrics.record_failure()
-                    event_broadcaster.emit("solve_error", {"url": url, "error": str(fallback_err)})
-                    raise fallback_err
+            # Tier 4: retry through the fallback proxy pool, unless the caller chose its own proxy.
+            if fallback_proxy_pool.enabled and not proxy_url and not budget.is_expired and budget.remaining_s >= 2.0:
+                logger.warning(f"[HybridEngine] Level 3 direct solve failed ({e}). Escalating to Tier 4 Fallback Proxy (remaining budget: {budget.remaining_s:.1f}s)...")
+                return await self._solve_via_fallback_proxies(url, budget, _browser_kwargs, e)
 
             metrics.record_failure()
             event_broadcaster.emit("solve_error", {"url": url, "error": str(e)})
             logger.error(f"[HybridEngine] Level 3 Stealth Browser solve FAILED for {url}: {type(e).__name__} - {e}")
             raise e
+
+    async def _solve_via_fallback_proxies(self, url: str, budget: RequestBudget, browser_kwargs, last_error: BaseException) -> SolutionModel:
+        """Tier 4: a fresh Camoufox through each pooled fallback proxy in turn while the budget lasts."""
+        if not fallback_proxy_pool.enabled:
+            metrics.record_failure()
+            raise ValueError("No fallback proxy is configured (FALLBACK_PROXY_URL / FALLBACK_PROXY_URLS)")
+        tried: List[str] = []
+        attempts = min(len(fallback_proxy_pool), settings.FALLBACK_PROXY_MAX_ATTEMPTS)
+        while len(tried) < attempts and not budget.is_expired and budget.remaining_s >= 2.0:
+            fallback_proxy = fallback_proxy_pool.pick(exclude=tried)
+            if fallback_proxy is None:
+                break
+            tried.append(fallback_proxy)
+            await check_target_url_async(fallback_proxy, label="Fallback proxy")
+            logger.info(f"[HybridEngine] Tier 4 attempt {len(tried)}/{attempts} via {fallback_proxy} (remaining budget: {budget.remaining_s:.1f}s)")
+            try:
+                solution = await browser_pool.solve(**browser_kwargs(fallback_proxy, max(3000, budget.remaining_ms)))
+            except Exception as fallback_err:
+                fallback_proxy_pool.report(fallback_proxy, ok=False)
+                logger.warning(f"[HybridEngine] Tier 4 Fallback Proxy attempt via {fallback_proxy} failed for {url}: {type(fallback_err).__name__} - {fallback_err}")
+                last_error = fallback_err
+                continue
+            fallback_proxy_pool.report(fallback_proxy, ok=True)
+            elapsed_ms = budget.elapsed_ms
+            metrics.record_fallback_proxy(elapsed_ms)
+            logger.info(f"[HybridEngine] Tier 4 Fallback Proxy SUCCESS in {elapsed_ms:.1f}ms | Status: {solution.status}")
+            solution.tier = "tier4_fallback_proxy"
+            if solution.cookies:
+                await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent)
+            event_broadcaster.emit("solve", {
+                "url": url,
+                "tier": "tier4_fallback_proxy",
+                "status": solution.status,
+                "duration_ms": round(elapsed_ms, 1),
+                "cookies_count": len(solution.cookies) if solution.cookies else 0
+            })
+            return solution
+
+        logger.error(f"[HybridEngine] Tier 4 Fallback Proxy solve also FAILED for {url}: {last_error}")
+        metrics.record_failure()
+        event_broadcaster.emit("solve_error", {"url": url, "error": str(last_error)})
+        raise last_error
 
 solver_engine = HybridSolverEngine()

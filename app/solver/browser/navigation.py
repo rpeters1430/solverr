@@ -17,10 +17,17 @@ logger = logging.getLogger("solverr.browser")
 META_REFRESH_FIRE_GRACE_SECONDS = 2.0
 
 
-async def install_media_blocking(context: BrowserContext) -> None:
+# FlareSolverr's disableMedia: also drop images, stylesheets and fonts. Opt-in, since some
+# challenge widgets render through them.
+DISABLE_MEDIA_RESOURCE_TYPES = ("media", "image", "stylesheet", "font")
+
+
+async def install_media_blocking(context: BrowserContext, disable_media: bool = False) -> None:
     """Block video/audio and SSRF targets; fonts and canvases stay because some challenges need them."""
+    blocked_types = DISABLE_MEDIA_RESOURCE_TYPES if disable_media else ("media",)
+
     async def block_heavy_media(route, request):
-        if request.resource_type in ["media"]:
+        if request.resource_type in blocked_types:
             await route.abort()
             return
         try:

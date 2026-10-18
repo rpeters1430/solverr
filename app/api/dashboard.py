@@ -10,6 +10,7 @@ from app.solver.engine import metrics, solver_engine
 from app.solver.cache import cookie_cache
 from app.solver.sessions import session_manager
 from app.solver.fast_tls import fast_tls_engine
+from app.solver.proxy_pool import fallback_proxy_pool
 from app.config import settings
 from app.logging_config import get_request_id
 from app.history import request_history
@@ -63,6 +64,7 @@ async def get_stats():
         "tls_impersonation": fast_tls_engine.impersonate_target,
         "cache_hit_ratio_pct": cache_hit_ratio_pct,
         "browser_pool": browser_pool.pool_stats(),
+        "fallback_proxies": fallback_proxy_pool.stats(),
     })
     return data
 

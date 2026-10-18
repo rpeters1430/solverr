@@ -164,6 +164,25 @@ class TestBrowserRequestSSRFGuard(unittest.IsolatedAsyncioTestCase):
         route.abort.assert_awaited_once_with("blockedbyclient")
         route.continue_.assert_not_awaited()
 
+    async def test_disable_media_also_blocks_images_styles_and_fonts(self):
+        from unittest.mock import AsyncMock, patch
+        from app.solver.browser.navigation import install_media_blocking
+
+        for disable_media, expect_blocked in ((False, False), (True, True)):
+            captured = {}
+            context = AsyncMock()
+            async def register(_pattern, handler):
+                captured["handler"] = handler
+            context.route = AsyncMock(side_effect=register)
+            await install_media_blocking(context, disable_media=disable_media)
+            for resource_type in ("image", "stylesheet", "font"):
+                route = AsyncMock()
+                request = type("Request", (), {"resource_type": resource_type, "url": "https://cdn.example.com/x"})()
+                with patch("app.solver.browser.navigation.check_target_url_async", new=AsyncMock()):
+                    await captured["handler"](route, request)
+                self.assertEqual(route.abort.await_count, int(expect_blocked), (disable_media, resource_type))
+                self.assertEqual(route.continue_.await_count, int(not expect_blocked), (disable_media, resource_type))
+
     async def test_public_browser_subresource_continues(self):
         from unittest.mock import AsyncMock, patch
         from app.solver.browser.navigation import install_media_blocking
