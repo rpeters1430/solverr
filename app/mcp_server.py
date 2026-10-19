@@ -72,6 +72,7 @@ async def solverr_scrape(
     follow_meta_refresh: Optional[bool] = None,
     session: Optional[str] = None,
     format: str = "html",
+    solve_embedded_captchas: bool = True,
 ) -> Dict[str, Any]:
     """Fetch a URL through Solverr's tiered solver, automatically clearing any
     Cloudflare/CAPTCHA/WAF challenge in the way, and return its content.
@@ -94,6 +95,9 @@ async def solverr_scrape(
     redirects (defaults to the server's FOLLOW_META_REFRESH setting).
     session: a FlareSolverr session id (sessions.create on /v1) whose cookies,
     proxy and browser storage this request should use and update.
+    solve_embedded_captchas: try to solve a captcha that is part of the page
+    itself (a login or comment form) before returning it (default true). Set
+    false to get the page straight away; challenge walls are solved either way.
     """
     if method.upper() not in ("GET", "POST"):
         raise ToolError(f"Unsupported method '{method}' - only GET and POST are supported.")
@@ -109,6 +113,7 @@ async def solverr_scrape(
         followMetaRefresh=follow_meta_refresh,
         session=session,
         format=format,
+        solve_embedded_captchas=solve_embedded_captchas,
     ).to_v1_request())
 
     extracted = None

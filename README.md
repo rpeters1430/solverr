@@ -183,7 +183,7 @@ Every request Solverr handles is a self-contained request/response - there's no 
 }
 ```
 
-If a challenge wall is still up when the request's `maxTimeout` runs out, the response is `"status": "error"` with the reason in `message` (for example `Error solving the challenge: cloudflare_turnstile challenge not solved: still present after 38s`), never the challenge page returned as a solution. A captcha widget embedded in an otherwise real page (a login form's reCAPTCHA, say) is not a wall: Solverr tries it for up to 15 seconds and then returns the page.
+If a challenge wall is still up when the request's `maxTimeout` runs out, the response is `"status": "error"` with the reason in `message` (for example `Error solving the challenge: cloudflare_turnstile challenge not solved: still present after 38s`), never the challenge page returned as a solution. A captcha widget embedded in an otherwise real page (a login form's reCAPTCHA, say) is not a wall: `/v1` returns the page as soon as it has loaded without touching the widget, unless the request sets `solveEmbeddedCaptchas: true`, in which case Solverr tries it for up to 15 seconds first.
 
 JSON, XML/RSS and plain-text documents come back as the server's own body with its real `content-type`, also when the browser tier had to fetch them (not wrapped in Firefox's viewer markup).
 
@@ -238,6 +238,8 @@ limited by `MAX_SCREENSHOT_HEIGHT_PX` and byte limited by `MAX_SCREENSHOT_MB`.
 `format` is `html` (default), `markdown` or `text`. Markdown keeps headings, links, lists, tables and code and drops scripts and styles, which makes a page far smaller for an LLM to read. It applies to HTML pages only (JSON and other documents are returned unchanged), and `extract_rules` always run on the original HTML.
 
 `capture` and `disable_media` work as on `/v1` (see above); the capture comes back in the response's `debug` field.
+
+`solve_embedded_captchas` (default `true` here, `false` on `/v1`) tries a captcha embedded in the real page for up to 15 seconds before returning it, so a form's response token is filled in. Set it to `false` to get the page straight away. Challenge walls are solved either way.
 
 ### 3. Prometheus Metrics (`GET /metrics`)
 Scrape endpoint for Grafana, Prometheus, or VictoriaMetrics:

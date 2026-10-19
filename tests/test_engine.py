@@ -380,6 +380,20 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
             await self.engine.process_request(V1Request(cmd="request.get", url="https://example.com"))
             self.assertEqual(store_mock.call_args.kwargs["user_agent"], solved.userAgent)
 
+    async def test_embedded_captchas_are_skipped_on_v1_and_solved_on_scrape(self):
+        from app.models.flaresolverr import ScrapeRequest
+        with patch("app.solver.engine.browser_pool.solve", new=AsyncMock(return_value=_sol(200))) as browser_mock:
+            await self.engine.process_request(V1Request(cmd="request.get", url="https://example.com", forceBrowser=True))
+            self.assertFalse(browser_mock.call_args.kwargs["solve_embedded_captchas"])
+            await self.engine.process_request(
+                ScrapeRequest(url="https://example.com", tier="tier3_browser").to_v1_request()
+            )
+            self.assertTrue(browser_mock.call_args.kwargs["solve_embedded_captchas"])
+            await self.engine.process_request(V1Request(
+                cmd="request.get", url="https://example.com", forceBrowser=True, solveEmbeddedCaptchas=True
+            ))
+            self.assertTrue(browser_mock.call_args.kwargs["solve_embedded_captchas"])
+
     async def test_tier4_cookies_are_cached_under_the_fallback_proxy(self):
         from app.solver.proxy_pool import FallbackProxyPool
         solved = _sol(200)

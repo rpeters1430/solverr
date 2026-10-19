@@ -510,7 +510,7 @@ REAL_BODY = "<body>" + "<p>search result row</p>" * 200 + "</body>"
 
 
 class TestSolveFlowWallVersusRealPage(unittest.IsolatedAsyncioTestCase):
-    async def _run(self, page, status=200, timeout_s=3.0, **patches):
+    async def _run(self, page, status=200, timeout_s=3.0, flow_kwargs=None, **patches):
         pool = BrowserPool()
 
         async def nav(*args, **kwargs):
@@ -525,7 +525,7 @@ class TestSolveFlowWallVersusRealPage(unittest.IsolatedAsyncioTestCase):
                 return await pool._execute_solve_flow(
                     context=_NoCookieContext(), page=page, url=page.url, method="GET",
                     post_data=None, cookies=None, timeout_ms=int(timeout_s * 1000), active_ua="ua",
-                    headers=None, start_time=start, deadline=start + timeout_s,
+                    headers=None, start_time=start, deadline=start + timeout_s, **(flow_kwargs or {}),
                 ), time.monotonic() - start
             except ChallengeNotSolvedError as e:
                 return e, time.monotonic() - start
@@ -545,6 +545,25 @@ class TestSolveFlowWallVersusRealPage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sol.status, 200)
         self.assertEqual(sol.challengeType, "recaptcha")
         self.assertLess(elapsed, 3.0)
+
+    async def test_embedded_widget_is_left_alone_when_not_asked_to_solve_it(self):
+        page = _StaticPage()
+        page.html = '<html><div class="g-recaptcha" data-sitekey="x"></div>' + REAL_BODY + "</html>"
+        with patch.object(browser_module, "try_captcha_solver_escalation") as paid_mock:
+            sol, elapsed = await self._run(
+                page, timeout_s=6.0, flow_kwargs={"solve_embedded_captchas": False}, WIDGET_SOLVE_WINDOW_SECONDS=3.0
+            )
+        self.assertEqual(sol.status, 200)
+        self.assertLess(elapsed, 1.5)
+        paid_mock.assert_not_called()
+
+    async def test_wall_is_still_solved_when_embedded_captchas_are_skipped(self):
+        page = _StaticPage()
+        page.page_title = "example.com"
+        page.html = "<html><script>var dd={'rt':'c','cid':'x','host':'geo.captcha-delivery.com'}</script></html>"
+        err, _ = await self._run(page, timeout_s=1.5, flow_kwargs={"solve_embedded_captchas": False})
+        self.assertIsInstance(err, ChallengeNotSolvedError)
+        self.assertEqual(err.challenge, "datadome")
 
     async def test_wall_served_with_200_fails_instead_of_returning_as_solved(self):
         page = _StaticPage()

@@ -249,6 +249,7 @@ class HybridSolverEngine:
             "forceFallbackProxy": req.forceFallbackProxy,
             "capture": req.debug_capture(),
             "disableMedia": req.disableMedia,
+            "solveEmbeddedCaptchas": bool(req.solveEmbeddedCaptchas),
         }
         inflight_key = hashlib.sha256(
             json.dumps(fingerprint, sort_keys=True, default=str).encode()
@@ -451,6 +452,7 @@ class HybridSolverEngine:
                 capture_storage=bool(req.session),
                 debug_capture=req.debug_capture(),
                 disable_media=bool(req.disableMedia),
+                solve_embedded_captchas=bool(req.solveEmbeddedCaptchas),
             )
 
         if req.forceFallbackProxy:

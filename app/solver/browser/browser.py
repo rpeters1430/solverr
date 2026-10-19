@@ -361,6 +361,7 @@ class BrowserPool:
         capture_storage: bool = False,
         disable_media: bool = False,
         debug_capture: Optional[Tuple[str, ...]] = None,
+        solve_embedded_captchas: bool = True,
     ) -> SolutionModel:
         wait_start = time.monotonic()
         self._queued_at.add(wait_start)
@@ -402,6 +403,7 @@ class BrowserPool:
                             follow_meta_refresh=follow_meta_refresh,
                             browser_storage=browser_storage, capture_storage=capture_storage,
                             disable_media=disable_media, debug_capture=debug_capture,
+                            solve_embedded_captchas=solve_embedded_captchas,
                         ),
                         timeout=tier_timeout
                     )
@@ -440,6 +442,7 @@ class BrowserPool:
                         follow_meta_refresh=follow_meta_refresh,
                         browser_storage=browser_storage, capture_storage=capture_storage,
                         disable_media=disable_media, debug_capture=debug_capture,
+                        solve_embedded_captchas=solve_embedded_captchas,
                     ),
                     timeout=tier_timeout
                 )
@@ -476,6 +479,7 @@ class BrowserPool:
         capture_storage: bool = False,
         disable_media: bool = False,
         debug_capture: Optional[Tuple[str, ...]] = None,
+        solve_embedded_captchas: bool = True,
     ) -> SolutionModel:
         # Leave the ephemeral retry its minimum window (plus launch slack) out of the caller's budget.
         remaining_s = timeout_ms / 1000.0 - (time.monotonic() - start_time)
@@ -522,6 +526,7 @@ class BrowserPool:
                 follow_meta_refresh=follow_meta_refresh,
                 browser_storage=browser_storage, capture_storage=capture_storage,
                 disable_media=disable_media, debug_capture=debug_capture,
+                solve_embedded_captchas=solve_embedded_captchas,
             )
         except BaseException as exc:
             disconnected = _is_browser_disconnected(exc)
@@ -582,6 +587,7 @@ class BrowserPool:
         capture_storage: bool = False,
         disable_media: bool = False,
         debug_capture: Optional[Tuple[str, ...]] = None,
+        solve_embedded_captchas: bool = True,
     ) -> SolutionModel:
         """Non-pooled launch for requests with their own proxy or user_agent, both fixed at launch."""
         # timeout_ms is what's left when this attempt starts, so its clock starts here (launch included).
@@ -636,6 +642,7 @@ class BrowserPool:
                 follow_meta_refresh=follow_meta_refresh,
                 browser_storage=browser_storage, capture_storage=capture_storage,
                 disable_media=disable_media, debug_capture=debug_capture,
+                solve_embedded_captchas=solve_embedded_captchas,
             )
 
     async def _execute_solve_flow(
@@ -662,6 +669,7 @@ class BrowserPool:
         capture_storage: bool = False,
         disable_media: bool = False,
         debug_capture: Optional[Tuple[str, ...]] = None,
+        solve_embedded_captchas: bool = True,
         proxy_url: Optional[str] = None,
     ) -> SolutionModel:
         # Navigation and the challenge loop share one deadline; the loop used to get a fresh full
@@ -799,6 +807,9 @@ class BrowserPool:
                 )
                 if active_challenge and not active_wall and active_challenge not in WIDGET_CHALLENGES:
                     # A provider's telemetry script on the real page, not a challenge.
+                    active_challenge = None
+                elif active_challenge and not active_wall and not solve_embedded_captchas:
+                    # A captcha in the real page's own form: the caller wants the page, not the token.
                     active_challenge = None
             if not active_challenge and is_anubis_verification_url(curr_url):
                 # Between a solved proof-of-work and the redirect back to the page asked for.
