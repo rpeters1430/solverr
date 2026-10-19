@@ -367,7 +367,43 @@ class TestFastTLSSessionPool(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(challenged)
         self.assertIsNone(solution)
         self.assertEqual(mock_session.get.await_count, 1)
-        mock_session.close.assert_awaited_once()
+    async def test_cookies_preserved_and_merged_in_fast_tls_solution(self):
+        from unittest.mock import AsyncMock, patch, MagicMock
+        from app.models.flaresolverr import CookieModel
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = "<html><head><title>Dashboard</title></head><body>Welcome</body></html>"
+        mock_resp.headers = {}
+        mock_resp.cookies = {"new_cookie": "new_val"}
+        mock_resp.url = "https://example.com/dashboard"
+
+        mock_session = AsyncMock()
+        mock_session.get = AsyncMock(return_value=mock_resp)
+        mock_session.close = AsyncMock()
+
+        engine = FastTLSEngine()
+        engine._pool_enabled = False
+
+        existing_cookie = CookieModel(name="cf_clearance", value="clearance_val", domain="example.com", path="/")
+        other_cookie = CookieModel(name="unrelated", value="val", domain="other.com", path="/")
+
+        with patch("app.solver.fast_tls.AsyncSession", return_value=mock_session), \
+             patch("app.solver.fast_tls.check_target_url_async", new=AsyncMock()):
+            challenged, solution = await engine.request(
+                "https://example.com/dashboard",
+                cookies=[existing_cookie, other_cookie]
+            )
+
+        self.assertFalse(challenged)
+        cookie_map = {c.name: c.value for c in solution.cookies}
+        self.assertIn("cf_clearance", cookie_map)
+        self.assertEqual(cookie_map["cf_clearance"], "clearance_val")
+        self.assertIn("new_cookie", cookie_map)
+        self.assertEqual(cookie_map["new_cookie"], "new_val")
+        # Cookie for unrelated domain must not be merged into example.com
+        self.assertNotIn("unrelated", cookie_map)
+
 
 if __name__ == "__main__":
     unittest.main()

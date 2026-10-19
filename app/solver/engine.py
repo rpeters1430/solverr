@@ -340,6 +340,9 @@ class HybridSolverEngine:
                 logger.info(f"[HybridEngine] Level 1/2 Fast TLS SUCCESS in {elapsed_ms:.1f}ms | Status: {solution.status}")
                 solution.tier = tier_name
 
+                if not solution.cookies and combined_cookies:
+                    solution.cookies = list(combined_cookies)
+
                 if solution.cookies:
                     await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent)
                 event_broadcaster.emit("solve", {
@@ -357,6 +360,8 @@ class HybridSolverEngine:
                     metrics.record_fast(elapsed_ms)
                     logger.info("[HybridEngine] fastTlsOnly=True requested. Returning Fast TLS solution without browser escalation.")
                     solution.tier = "tier1_fast_tls"
+                    if not solution.cookies and combined_cookies:
+                        solution.cookies = list(combined_cookies)
                     if solution.cookies:
                         await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent)
                     event_broadcaster.emit("solve", {

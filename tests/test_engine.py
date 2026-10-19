@@ -242,6 +242,17 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
             await self.engine.process_request(V1Request(cmd="request.get", url="https://example.com"))
             self.assertEqual(fast_mock.call_args.kwargs["user_agent"], solving_ua)
 
+    async def test_cached_cookies_retained_in_fast_tls_solution(self):
+        clearance = _cookie("cf_clearance", "token", domain="example.com")
+        with patch("app.solver.engine.cookie_cache.get_cookies_with_user_agent_async", new=AsyncMock(return_value=([clearance], None))), \
+             patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(False, _sol(200, cookies=[])))), \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock()):
+            sol = await self.engine.process_request(V1Request(cmd="request.get", url="https://example.com"))
+            self.assertEqual(sol.status, 200)
+            self.assertEqual(len(sol.cookies), 1)
+            self.assertEqual(sol.cookies[0].name, "cf_clearance")
+            self.assertEqual(sol.cookies[0].value, "token")
+
     async def test_caller_user_agent_beats_cached_one(self):
         clearance = _cookie("cf_clearance", "token", domain="example.com")
         with patch("app.solver.engine.cookie_cache.get_cookies_with_user_agent_async", new=AsyncMock(return_value=([clearance], "Mozilla/5.0 Firefox/152.0"))), \
