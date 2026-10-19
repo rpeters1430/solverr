@@ -170,6 +170,37 @@ class TestCookieCache(unittest.TestCase):
         self.assertEqual(len(cookies), 1)
         self.assertIsNone(ua)
 
+    def test_proxy_earned_cookies_are_not_replayed_on_another_route(self):
+        direct = CookieModel(name="cf_clearance", value="direct", domain="example.com")
+        proxied = CookieModel(name="cf_clearance", value="proxied", domain="example.com")
+        self.cache.set_cookies("https://example.com", [direct], user_agent="direct-ua")
+        self.cache.set_cookies("https://example.com", [proxied], user_agent="proxy-ua", proxy="http://user:pw@p1.test:8080")
+
+        cookies, ua = self.cache.get_cookies_with_user_agent("https://example.com")
+        self.assertEqual([(c.value, ua) for c in cookies], [("direct", "direct-ua")])
+        cookies, ua = self.cache.get_cookies_with_user_agent("https://example.com", proxy="http://user:pw@p1.test:8080")
+        self.assertEqual([(c.value, ua) for c in cookies], [("proxied", "proxy-ua")])
+        self.assertEqual(self.cache.get_cookies("https://example.com", proxy="http://p2.test:8080"), [])
+        # Survives a reload from disk.
+        reloaded = CookieCache(cache_file=self.cache_file)
+        self.assertEqual([c.value for c in reloaded.get_cookies("https://example.com", proxy="http://user:pw@p1.test:8080")], ["proxied"])
+
+    def test_egress_tag_ignores_the_password_but_not_the_session_username(self):
+        from app.solver.cache import egress_tag
+        self.assertIsNone(egress_tag(None))
+        self.assertEqual(egress_tag("http://user:old@p1.test:8080"), egress_tag("http://user:new@P1.test:8080"))
+        self.assertNotEqual(egress_tag("http://user-session-1:pw@p1.test:8080"), egress_tag("http://user-session-2:pw@p1.test:8080"))
+        self.assertNotEqual(egress_tag("http://p1.test:8080"), egress_tag("socks5://p1.test:8080"))
+        self.assertNotIn("pw", egress_tag("http://user:pw@p1.test:8080") or "")
+
+    def test_entries_cached_before_egress_was_recorded_count_as_direct(self):
+        self.cache._store = {"example.com": {"cf_clearance|/": {
+            "cookie": CookieModel(name="cf_clearance", value="legacy", domain="example.com").model_dump(),
+            "timestamp": time.time(),
+        }}}
+        self.assertEqual([c.value for c in self.cache.get_cookies("https://example.com")], ["legacy"])
+        self.assertEqual(self.cache.get_cookies("https://example.com", proxy="http://p1.test:8080"), [])
+
     def test_clear_cache(self):
         cookies = [CookieModel(name="cf_clearance", value="val_clear", domain=".example.com")]
         self.cache.set_cookies("https://example.com", cookies)

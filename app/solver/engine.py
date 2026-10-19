@@ -312,7 +312,8 @@ class HybridSolverEngine:
         cached_cookies = []
         cached_ua: Optional[str] = None
         if not (bypass_cookie_cache or getattr(req, "skip_cache", False)):
-            cached_cookies, cached_ua = await cookie_cache.get_cookies_with_user_agent_async(url)
+            # Only cookies earned over this request's own route: clearance is bound to the egress IP.
+            cached_cookies, cached_ua = await cookie_cache.get_cookies_with_user_agent_async(url, proxy=proxy_url)
             metrics.record_cookie_cache_lookup(hit=bool(cached_cookies))
 
         # Same identity as cookie_cache._cookie_key: same-name cookies on other paths are distinct.
@@ -379,7 +380,7 @@ class HybridSolverEngine:
                     solution.cookies = list(combined_cookies)
 
                 if solution.cookies:
-                    await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent)
+                    await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent, proxy=proxy_url)
                 event_broadcaster.emit("solve", {
                     "url": url,
                     "tier": tier_name,
@@ -398,7 +399,7 @@ class HybridSolverEngine:
                     if not solution.cookies and combined_cookies:
                         solution.cookies = list(combined_cookies)
                     if solution.cookies:
-                        await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent)
+                        await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent, proxy=proxy_url)
                     event_broadcaster.emit("solve", {
                         "url": url,
                         "tier": "tier1_fast_tls",
@@ -468,7 +469,7 @@ class HybridSolverEngine:
             solution.tier = "tier3_stealth_browser"
 
             if solution.cookies:
-                await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent)
+                await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent, proxy=proxy_url)
 
             event_broadcaster.emit("solve", {
                 "url": url,
@@ -521,7 +522,8 @@ class HybridSolverEngine:
             logger.info(f"[HybridEngine] Tier 4 Fallback Proxy SUCCESS in {elapsed_ms:.1f}ms | Status: {solution.status}")
             solution.tier = "tier4_fallback_proxy"
             if solution.cookies:
-                await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent)
+                # Earned through the fallback proxy, so replaying them direct would never validate.
+                await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent, proxy=fallback_proxy)
             event_broadcaster.emit("solve", {
                 "url": url,
                 "tier": "tier4_fallback_proxy",

@@ -380,6 +380,23 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
             await self.engine.process_request(V1Request(cmd="request.get", url="https://example.com"))
             self.assertEqual(store_mock.call_args.kwargs["user_agent"], solved.userAgent)
 
+    async def test_tier4_cookies_are_cached_under_the_fallback_proxy(self):
+        from app.solver.proxy_pool import FallbackProxyPool
+        solved = _sol(200)
+        solved.cookies = [_cookie("cf_clearance", "token", domain="example.com")]
+        with patch("app.solver.engine.fallback_proxy_pool", FallbackProxyPool(["http://p1.test:8080"])), \
+             patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock(side_effect=[RuntimeError("direct"), solved])), \
+             patch("app.solver.engine.cookie_cache.set_cookies_async", new=AsyncMock()) as store_mock:
+            await self.engine.process_request(V1Request(cmd="request.get", url="https://example.com"))
+        self.assertEqual(store_mock.call_args.kwargs["proxy"], "http://p1.test:8080")
+
+    async def test_cached_cookies_are_looked_up_for_the_request_proxy(self):
+        with patch("app.solver.engine.cookie_cache.get_cookies_with_user_agent_async", new=AsyncMock(return_value=([], None))) as lookup_mock, \
+             patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(False, _sol(200)))):
+            await self.engine.process_request(V1Request(cmd="request.get", url="https://example.com", proxy="http://mine.test:8080"))
+        self.assertEqual(lookup_mock.call_args.kwargs["proxy"], "http://mine.test:8080")
+
     async def test_request_budget_propagates_remaining_timeout_to_browser(self):
         with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \
              patch("app.solver.engine.browser_pool.solve", new=AsyncMock(return_value=_sol(200))) as browser_mock:
