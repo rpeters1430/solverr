@@ -1,4 +1,4 @@
-fastapi==0.148.0
+fastapi==0.150.0
 uvicorn[standard]==0.54.0
 curl_cffi==0.16.3
 # Keep Playwright on the range supported by currently released Camoufox builds.
