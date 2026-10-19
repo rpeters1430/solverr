@@ -399,13 +399,33 @@ class FastTLSEngine:
                 self.record_outcome(url, impersonate_target, True)
                 logger.info(f"[FastTLS] Direct HTTP response received (HTTP Status: {resp.status_code}, Length: {len(resp.text)} bytes)")
 
-            captured_cookies: List[CookieModel] = []
-            # Use the post-redirect URL; a cross-domain chain would otherwise file cookies under the wrong domain.
+            # Preserve existing/cached cookies sent with the request, updating with any Set-Cookie from response
+            merged_cookies: Dict[Tuple[str, str, str], CookieModel] = {}
             parsed_req_url = urlparse(str(resp.url))
-            cookie_domain = parsed_req_url.netloc.split(":")[0].lstrip(".")
+            cookie_domain = parsed_req_url.netloc.split(":")[0].lstrip(".").lower()
+
+            if cookies:
+                for c in cookies:
+                    c_dom = (c.domain or "").lstrip(".").lower()
+                    if c_dom and c_dom != cookie_domain and not cookie_domain.endswith("." + c_dom) and not c_dom.endswith("." + cookie_domain):
+                        continue
+                    c_path = c.path or "/"
+                    merged_cookies[(c_dom, c_path, c.name)] = c
+
             for name, val in resp.cookies.items():
-                captured_cookies.append(
-                    CookieModel(
+                matched_key = None
+                for (dom, pth, n) in merged_cookies:
+                    if n == name and (dom == cookie_domain or cookie_domain.endswith("." + dom)):
+                        matched_key = (dom, pth, n)
+                        break
+
+                if matched_key and matched_key in merged_cookies:
+                    existing_c = merged_cookies[matched_key]
+                    merged_cookies[matched_key] = existing_c.model_copy(
+                        update={"value": val, "size": len(name) + len(val)}
+                    )
+                else:
+                    merged_cookies[(cookie_domain, "/", name)] = CookieModel(
                         name=name,
                         value=val,
                         domain=cookie_domain,
@@ -417,7 +437,8 @@ class FastTLSEngine:
                         session=False,
                         sameSite="Lax"
                     )
-                )
+
+            captured_cookies: List[CookieModel] = list(merged_cookies.values())
 
             solution = SolutionModel(
                 url=str(resp.url),
