@@ -29,7 +29,14 @@ from app.solver.browser.challenges import (
     is_browser_error,
 )
 from app.solver.browser.debug_capture import DebugCapture
-from app.solver.browser.captcha import CAPTCHA_SOLVER_WIDGETS, try_captcha_solver_escalation, try_datadome_slider_solver
+from app.solver.browser.captcha import (
+    CAPTCHA_SOLVER_WIDGETS,
+    install_cloudflare_capture,
+    read_cloudflare_render,
+    try_captcha_solver_escalation,
+    try_cloudflare_challenge_solver,
+    try_datadome_slider_solver,
+)
 from app.solver.browser.cookies import build_playwright_cookies, read_context_cookies, extract_captured_cookies
 from app.solver.browser.content import decode_browser_body, is_non_html_text
 from app.solver.browser.navigation import follow_meta_refresh as follow_meta_refresh_in_page, install_media_blocking, navigate_to_target
@@ -76,6 +83,10 @@ WIDGET_SOLVE_WINDOW_SECONDS = 15.0
 SENSOR_REDIRECT_GRACE_SECONDS = 5.0
 # The paid DataDome slider solve needs at least this much of the attempt left to be worth starting.
 DATADOME_SOLVER_MIN_SECONDS = 15.0
+# Cloudflare's challenge page gets this long to clear by clicking before the paid solver is called,
+# and the paid solve needs at least CLOUDFLARE_SOLVER_MIN_SECONDS of the attempt left to start.
+CLOUDFLARE_SOLVER_AFTER_SECONDS = 12.0
+CLOUDFLARE_SOLVER_MIN_SECONDS = 20.0
 # After that reload, a wall still up this long is the site refusing the cookie it just issued.
 POST_RENAVIGATE_GRACE_SECONDS = 10.0
 
@@ -361,6 +372,7 @@ class BrowserPool:
         capture_storage: bool = False,
         disable_media: bool = False,
         debug_capture: Optional[Tuple[str, ...]] = None,
+        solve_embedded_captchas: bool = True,
     ) -> SolutionModel:
         wait_start = time.monotonic()
         self._queued_at.add(wait_start)
@@ -402,6 +414,7 @@ class BrowserPool:
                             follow_meta_refresh=follow_meta_refresh,
                             browser_storage=browser_storage, capture_storage=capture_storage,
                             disable_media=disable_media, debug_capture=debug_capture,
+                            solve_embedded_captchas=solve_embedded_captchas,
                         ),
                         timeout=tier_timeout
                     )
@@ -440,6 +453,7 @@ class BrowserPool:
                         follow_meta_refresh=follow_meta_refresh,
                         browser_storage=browser_storage, capture_storage=capture_storage,
                         disable_media=disable_media, debug_capture=debug_capture,
+                        solve_embedded_captchas=solve_embedded_captchas,
                     ),
                     timeout=tier_timeout
                 )
@@ -476,6 +490,7 @@ class BrowserPool:
         capture_storage: bool = False,
         disable_media: bool = False,
         debug_capture: Optional[Tuple[str, ...]] = None,
+        solve_embedded_captchas: bool = True,
     ) -> SolutionModel:
         # Leave the ephemeral retry its minimum window (plus launch slack) out of the caller's budget.
         remaining_s = timeout_ms / 1000.0 - (time.monotonic() - start_time)
@@ -522,6 +537,7 @@ class BrowserPool:
                 follow_meta_refresh=follow_meta_refresh,
                 browser_storage=browser_storage, capture_storage=capture_storage,
                 disable_media=disable_media, debug_capture=debug_capture,
+                solve_embedded_captchas=solve_embedded_captchas,
             )
         except BaseException as exc:
             disconnected = _is_browser_disconnected(exc)
@@ -582,6 +598,7 @@ class BrowserPool:
         capture_storage: bool = False,
         disable_media: bool = False,
         debug_capture: Optional[Tuple[str, ...]] = None,
+        solve_embedded_captchas: bool = True,
     ) -> SolutionModel:
         """Non-pooled launch for requests with their own proxy or user_agent, both fixed at launch."""
         # timeout_ms is what's left when this attempt starts, so its clock starts here (launch included).
@@ -597,6 +614,7 @@ class BrowserPool:
             os="linux",
             config={'forceScopeAccess': True},
             firefox_user_prefs=firefox_user_prefs(),
+            main_world_eval=captcha_solver.enabled,
             i_know_what_im_doing=True
         ) as browser_instance:
             if hasattr(browser_instance, "new_context"):
@@ -636,6 +654,7 @@ class BrowserPool:
                 follow_meta_refresh=follow_meta_refresh,
                 browser_storage=browser_storage, capture_storage=capture_storage,
                 disable_media=disable_media, debug_capture=debug_capture,
+                solve_embedded_captchas=solve_embedded_captchas,
             )
 
     async def _execute_solve_flow(
@@ -662,6 +681,7 @@ class BrowserPool:
         capture_storage: bool = False,
         disable_media: bool = False,
         debug_capture: Optional[Tuple[str, ...]] = None,
+        solve_embedded_captchas: bool = True,
         proxy_url: Optional[str] = None,
     ) -> SolutionModel:
         # Navigation and the challenge loop share one deadline; the loop used to get a fresh full
@@ -677,6 +697,7 @@ class BrowserPool:
                 logger.warning(f"[BrowserPool] Error pre-loading cookies: {e}")
 
         await install_media_blocking(context, disable_media=disable_media)
+        cf_capture_key = await install_cloudflare_capture(context) if captcha_solver.enabled else None
 
         capture = DebugCapture(debug_capture) if debug_capture else None
         if capture:
@@ -760,6 +781,8 @@ class BrowserPool:
         renavigated_at: Optional[float] = None
         akamai_held = False
         datadome_solver_tried = False
+        cloudflare_solver_tried = False
+        wall_seen_at: Optional[float] = None
         cleared = False
 
         while time.monotonic() < loop_deadline:
@@ -800,6 +823,9 @@ class BrowserPool:
                 if active_challenge and not active_wall and active_challenge not in WIDGET_CHALLENGES:
                     # A provider's telemetry script on the real page, not a challenge.
                     active_challenge = None
+                elif active_challenge and not active_wall and not solve_embedded_captchas:
+                    # A captcha in the real page's own form: the caller wants the page, not the token.
+                    active_challenge = None
             if not active_challenge and is_anubis_verification_url(curr_url):
                 # Between a solved proof-of-work and the redirect back to the page asked for.
                 active_challenge = "anubis"
@@ -813,6 +839,7 @@ class BrowserPool:
                 wall_cookies = await read_context_cookies(context)
                 if not wall_seen:
                     wall_seen = True
+                    wall_seen_at = time.monotonic()
                     sensor_baseline |= sensor_snapshot(wall_cookies, target_host, BLOCK_PAGE_COOKIES)
 
                 if needs_unsolvable_captcha(active_challenge, content, last_main_headers, last_main_status["code"]):
@@ -835,6 +862,21 @@ class BrowserPool:
                         raise ChallengeNotSolvedError(active_challenge, UNSOLVABLE_CAPTCHA_REASON)
                 else:
                     unsolvable_passes = 0
+
+                if cf_capture_key and not cloudflare_solver_tried and active_challenge == "cloudflare_turnstile":
+                    # Tier 3.5 for Cloudflare's own page, started while the attempt still has time for it:
+                    # once the clicks have had their chance, or before the window gets too short.
+                    solver_window = loop_deadline - time.monotonic() - 5.0
+                    if solver_window >= CLOUDFLARE_SOLVER_MIN_SECONDS and (
+                        time.monotonic() - wall_seen_at >= CLOUDFLARE_SOLVER_AFTER_SECONDS
+                        or solver_window < CLOUDFLARE_SOLVER_MIN_SECONDS + 2.0
+                    ):
+                        render = await read_cloudflare_render(page, cf_capture_key)
+                        if render:
+                            cloudflare_solver_tried = True
+                            if await try_cloudflare_challenge_solver(page, cf_capture_key, render, proxy_url, solver_window):
+                                # The page submits the challenge itself; the loop sees whether the wall clears.
+                                continue
 
                 now_wall = time.monotonic()
                 if renavigated_at is not None:

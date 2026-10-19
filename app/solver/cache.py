@@ -1,5 +1,6 @@
 import os
 import json
+import hashlib
 import time
 import asyncio
 import logging
@@ -22,6 +23,23 @@ REDIS_RECONNECT_INTERVAL_SECONDS = 30.0
 # Sorted set of cached domains scored by when their last cookie expires, so counting
 # domains is a ZCARD instead of a SCAN over every cookie key. Outside "solverr:cookie:*".
 DOMAIN_INDEX_KEY = "solverr:cookie_domains"
+
+
+def egress_tag(proxy_url: Optional[str]) -> Optional[str]:
+    """Which route cookies were earned over: None for a direct connection, else a short hash of the proxy.
+
+    cf_clearance and friends only validate from the IP that earned them, so a cookie earned through
+    one proxy is useless direct or through another one. The password is left out of the hash, but
+    the username stays: residential providers encode the sticky session (so the exit IP) in it."""
+    if not proxy_url:
+        return None
+    parsed = urlparse(proxy_url if "://" in proxy_url else f"http://{proxy_url}")
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    route = f"{parsed.scheme.lower()}://{parsed.username or ''}@{(parsed.hostname or '').lower()}:{port or ''}"
+    return hashlib.sha256(route.encode()).hexdigest()[:16]
 
 class CookieCache:
     def __init__(self, cache_file: str = settings.CACHE_FILE, redis_url: Optional[str] = settings.REDIS_URL):
@@ -116,9 +134,11 @@ class CookieCache:
         self.redis_client = None
         self._redis_last_attempt = time.time()
 
-    def _cookie_key(self, cookie: CookieModel) -> str:
-        # Domain is the outer key; path keeps same-name cookies on one domain apart.
-        return f"{cookie.name}|{cookie.path or '/'}"
+    def _cookie_key(self, cookie: CookieModel, egress: Optional[str] = None) -> str:
+        # Domain is the outer key; path keeps same-name cookies on one domain apart, and the egress
+        # tag keeps a proxy-earned cookie from overwriting the direct one. Direct keys are unchanged.
+        key = f"{cookie.name}|{cookie.path or '/'}"
+        return f"{key}|{egress}" if egress else key
 
     def _normalize_domain(self, domain_or_url: str) -> str:
         if "://" in domain_or_url:
@@ -132,8 +152,8 @@ class CookieCache:
         # Never KEYS: it blocks the single-threaded Redis server for the whole keyspace walk.
         return list(self.redis_client.scan_iter(match=pattern, count=200))
 
-    def get_cookies(self, url_or_domain: str) -> List[CookieModel]:
-        return self.get_cookies_with_user_agent(url_or_domain)[0]
+    def get_cookies(self, url_or_domain: str, proxy: Optional[str] = None) -> List[CookieModel]:
+        return self.get_cookies_with_user_agent(url_or_domain, proxy=proxy)[0]
 
     @staticmethod
     def _pick_user_agent(entries: List[dict], url_or_domain: str) -> Optional[str]:
@@ -161,9 +181,13 @@ class CookieCache:
             )["user_agent"]
         return max(with_ua, key=lambda e: e.get("timestamp", 0))["user_agent"]
 
-    def get_cookies_with_user_agent(self, url_or_domain: str) -> Tuple[List[CookieModel], Optional[str]]:
-        """Cached cookies for the domain, plus the User-Agent they must be replayed with (if recorded)."""
+    def get_cookies_with_user_agent(
+        self, url_or_domain: str, proxy: Optional[str] = None
+    ) -> Tuple[List[CookieModel], Optional[str]]:
+        """Cached cookies for the domain earned over `proxy` (None: direct), plus the User-Agent they
+        must be replayed with (if recorded). Entries cached before egress was recorded count as direct."""
         target_domain = self._normalize_domain(url_or_domain)
+        egress = egress_tag(proxy)
         result: List[CookieModel] = []
         entries: List[dict] = []
         now = time.time()
@@ -182,6 +206,8 @@ class CookieCache:
                 for data_raw in raw_values:
                     if data_raw:
                         data = json.loads(data_raw)
+                        if data.get("egress") != egress:
+                            continue
                         c_model = CookieModel(**data["cookie"])
                         if c_model.expires and c_model.expires > 0 and now > c_model.expires:
                             continue
@@ -197,6 +223,8 @@ class CookieCache:
             if target_domain == clean_domain or target_domain.endswith("." + clean_domain):
                 for cookie_name, data in list(cookies_dict.items()):
                     if now - data.get("timestamp", 0) > settings.COOKIE_CACHE_TTL:
+                        continue
+                    if data.get("egress") != egress:
                         continue
                     try:
                         c_model = CookieModel(**data["cookie"])
@@ -215,10 +243,12 @@ class CookieCache:
         cookies = self.get_cookies(url_or_domain)
         return {c.name: c.value for c in cookies}
 
-    def _entry(self, cookie: CookieModel, now: float, user_agent: Optional[str]) -> dict:
+    def _entry(self, cookie: CookieModel, now: float, user_agent: Optional[str], egress: Optional[str] = None) -> dict:
         entry = {"cookie": cookie.model_dump(), "timestamp": now}
         if user_agent:
             entry["user_agent"] = user_agent
+        if egress:
+            entry["egress"] = egress
         return entry
 
     def set_cookies(
@@ -227,9 +257,12 @@ class CookieCache:
         cookies: List[CookieModel],
         schedule_save: bool = True,
         user_agent: Optional[str] = None,
+        proxy: Optional[str] = None,
     ):
-        """Store cookies; `user_agent` is the UA that earned them, needed to replay cf_clearance."""
+        """Store cookies; `user_agent` is the UA that earned them and `proxy` the route they were
+        earned over (None: direct), both needed to replay cf_clearance."""
         domain = self._normalize_domain(url_or_domain)
+        egress = egress_tag(proxy)
         now = time.time()
 
         if self._redis():
@@ -239,8 +272,8 @@ class CookieCache:
                 index: Dict[str, float] = {}
                 for c in cookies:
                     c_domain = c.domain.lstrip(".") if c.domain else domain
-                    key = f"solverr:cookie:{c_domain}:{self._cookie_key(c)}"
-                    val = json.dumps(self._entry(c, now, user_agent))
+                    key = f"solverr:cookie:{c_domain}:{self._cookie_key(c, egress)}"
+                    val = json.dumps(self._entry(c, now, user_agent, egress))
                     pipe.set(key, val, ex=settings.COOKIE_CACHE_TTL)
                     index[c_domain] = expires_at
                 if index:
@@ -258,7 +291,7 @@ class CookieCache:
             if c_domain not in self._store:
                 self._evict_domain_if_at_capacity()
                 self._store[c_domain] = {}
-            self._store[c_domain][self._cookie_key(c)] = self._entry(c, now, user_agent)
+            self._store[c_domain][self._cookie_key(c, egress)] = self._entry(c, now, user_agent, egress)
             self._evict_cookies_if_at_capacity(c_domain)
         self._domain_count_cache_at = 0.0
         logger.debug(f"[CookieCache] Saved {len(cookies)} cookie(s) to local cache for domain '{domain}'")
@@ -395,16 +428,22 @@ class CookieCache:
         async with self._async_lock:
             return await asyncio.to_thread(self.get_cookies, url_or_domain)
 
-    async def get_cookies_with_user_agent_async(self, url_or_domain: str) -> Tuple[List[CookieModel], Optional[str]]:
+    async def get_cookies_with_user_agent_async(
+        self, url_or_domain: str, proxy: Optional[str] = None
+    ) -> Tuple[List[CookieModel], Optional[str]]:
         async with self._async_lock:
-            return await asyncio.to_thread(self.get_cookies_with_user_agent, url_or_domain)
+            return await asyncio.to_thread(self.get_cookies_with_user_agent, url_or_domain, proxy)
 
     async def set_cookies_async(
-        self, url_or_domain: str, cookies: List[CookieModel], user_agent: Optional[str] = None
+        self,
+        url_or_domain: str,
+        cookies: List[CookieModel],
+        user_agent: Optional[str] = None,
+        proxy: Optional[str] = None,
     ) -> None:
         async with self._async_lock:
             # Schedule the flush here: in the worker thread there's no loop, so it would write immediately.
-            await asyncio.to_thread(self.set_cookies, url_or_domain, cookies, False, user_agent)
+            await asyncio.to_thread(self.set_cookies, url_or_domain, cookies, False, user_agent, proxy)
             if not self.redis_client:
                 self._schedule_save()
 

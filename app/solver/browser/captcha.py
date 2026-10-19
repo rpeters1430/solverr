@@ -1,4 +1,6 @@
+import json
 import logging
+import uuid
 from http.cookies import CookieError, SimpleCookie
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -130,6 +132,133 @@ async def try_captcha_solver_escalation(page: Page, url: str, challenge_type: st
     logger.info(f"[CaptchaSolver] Token injected for '{challenge_type}'.")
     return True
 
+
+
+# Cloudflare's challenge page has no data-sitekey element: its orchestrator calls turnstile.render()
+# with the sitekey, action, cData and chlPageData, and a callback that submits the challenge form.
+# This init script (main world, so it sees the page's own `turnstile`) records the parameters of the
+# latest render and keeps its callback, so a paid solver's token can be handed to Cloudflare the way
+# its widget would. Only installed when the paid solver is configured.
+_CLOUDFLARE_CAPTURE_JS = r"""(key) => {
+  if (window !== window.top) return;
+  let captured;
+  const valid = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max;
+  const read = () => captured && !captured.used && captured.render.websiteURL === location.href
+    && document.querySelector('#challenge-form') ? Object.assign({}, captured.render) : null;
+  Object.defineProperty(window, key, { value: {
+    read,
+    deliver(expected, token) {
+      if (!captured || JSON.stringify(read()) !== JSON.stringify(expected)) return false;
+      captured.used = true;
+      captured.callback(token);
+      return true;
+    },
+  } });
+  const wrapped = new WeakSet();
+  const wrap = (sdk) => {
+    if (!sdk || typeof sdk !== 'object' || wrapped.has(sdk)) return;
+    wrapped.add(sdk);
+    const d = Object.getOwnPropertyDescriptor(sdk, 'render');
+    if (d && (!d.configurable || d.get || d.set)) return;
+    const intercept = (render) => typeof render !== 'function' ? render : function (container, options) {
+      captured = undefined;
+      if (options && valid(options.sitekey, 512) && valid(options.action, 512) && valid(options.cData, 4096)
+          && valid(options.chlPageData, 65536) && typeof options.callback === 'function') {
+        const callback = options.callback;
+        const current = { callback, used: false, render: {
+          websiteURL: location.href, websiteKey: options.sitekey, action: options.action,
+          data: options.cData, pagedata: options.chlPageData, userAgent: navigator.userAgent,
+        } };
+        captured = current;
+        options = Object.assign({}, options, {
+          callback: function (...args) { current.used = true; return callback.apply(this, args); },
+        });
+        for (const name of ['expired-callback', 'error-callback']) {
+          const handler = options[name];
+          options[name] = function (...args) {
+            current.used = true;
+            if (typeof handler === 'function') return handler.apply(this, args);
+          };
+        }
+      }
+      try { return render.call(this, container, options); } catch (e) { captured = undefined; throw e; }
+    };
+    let render = intercept(sdk.render);
+    Object.defineProperty(sdk, 'render', {
+      configurable: true, enumerable: d ? d.enumerable : true,
+      get: () => render, set: (v) => { captured = undefined; render = intercept(v); },
+    });
+    for (const name of ['reset', 'remove']) {
+      const method = sdk[name];
+      if (typeof method === 'function') {
+        sdk[name] = function (...args) { captured = undefined; return method.apply(this, args); };
+      }
+    }
+  };
+  const d = Object.getOwnPropertyDescriptor(window, 'turnstile');
+  if (d && (!d.configurable || d.get || d.set)) return;
+  let sdk = window.turnstile;
+  wrap(sdk);
+  Object.defineProperty(window, 'turnstile', {
+    configurable: true, enumerable: d ? d.enumerable : true,
+    get: () => sdk, set(v) { if (sdk !== v) captured = undefined; sdk = v; wrap(v); },
+  });
+}"""
+
+_RENDER_FIELDS = ("websiteURL", "websiteKey", "action", "data", "pagedata", "userAgent")
+
+
+async def install_cloudflare_capture(context: Any) -> Optional[str]:
+    """Install the challenge-page capture into every page of `context`; returns its window key, or None.
+
+    The key is random per solve so the page can't look for a fixed name. Camoufox's "mw:" prefix
+    runs it in the page's main world (needs main_world_eval at launch, see pool.py)."""
+    key = f"__{uuid.uuid4().hex}"
+    try:
+        await context.add_init_script(script=f"mw:({_CLOUDFLARE_CAPTURE_JS})({json.dumps(key)})")
+        return key
+    except Exception as e:
+        logger.debug(f"[CaptchaSolver] Cloudflare challenge capture unavailable: {e}")
+        return None
+
+
+async def read_cloudflare_render(page: Page, key: str) -> Optional[Dict[str, str]]:
+    """The live challenge's render parameters, or None if none is waiting for a token."""
+    try:
+        render = await page.evaluate(f"mw:window[{json.dumps(key)}]?.read() ?? null")
+    except Exception:
+        return None
+    if not isinstance(render, dict) or not all(isinstance(render.get(f), str) and render[f] for f in _RENDER_FIELDS):
+        return None
+    return {f: render[f] for f in _RENDER_FIELDS}
+
+
+async def try_cloudflare_challenge_solver(
+    page: Page, key: str, render: Dict[str, str], proxy_url: Optional[str], timeout: float
+) -> bool:
+    """Tier 3.5 for Cloudflare's own challenge page: solve its Turnstile with the captured render
+    parameters and hand the token to the page's callback, which submits the challenge."""
+    logger.info(f"[CaptchaSolver] Escalating Cloudflare challenge page (sitekey='{render['websiteKey'][:16]}...') to paid solver service...")
+    token = await captcha_solver.solve_cloudflare_challenge(render, proxy_url=proxy_url, timeout=timeout)
+    if not token:
+        logger.warning("[CaptchaSolver] Paid solver did not return a token for the Cloudflare challenge page.")
+        return False
+    if (page.url or "") != render["websiteURL"]:
+        # The challenge was replaced while the task ran (a reload, an expiry); the token is for the old one.
+        logger.info("[CaptchaSolver] Cloudflare challenge changed while solving; discarding the token.")
+        return False
+    try:
+        delivered = await page.evaluate(
+            f"mw:window[{json.dumps(key)}]?.deliver({json.dumps(render)}, {json.dumps(token)}) === true"
+        )
+    except Exception as e:
+        logger.debug(f"[CaptchaSolver] Cloudflare token delivery notice: {e}")
+        delivered = False
+    if delivered:
+        logger.info("[CaptchaSolver] Token delivered to the Cloudflare challenge page.")
+    else:
+        logger.info("[CaptchaSolver] Cloudflare challenge was no longer waiting for this token.")
+    return bool(delivered)
 
 
 def parse_solver_cookie(set_cookie: str, page_host: str) -> Optional[Dict[str, Any]]:

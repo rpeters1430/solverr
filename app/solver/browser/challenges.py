@@ -17,7 +17,8 @@ CHALLENGE_MARKERS: Dict[str, List[str]] = {
     ],
     "cloudflare_5s": ["attention required!", "ddos protection by cloudflare", "please wait 5 seconds"],
     "ddos_guard": ["ddos-guard", "check.ddos-guard.net", "ddg-captcha", "ddos protection by ddos-guard"],
-    "recaptcha": ["g-recaptcha", "google.com/recaptcha", "recaptcha.net/recaptcha", "recaptcha/api2"],
+    # Matched by has_recaptcha_widget() instead: the bare script path is also invisible v3.
+    "recaptcha": [],
     "hcaptcha": ["h-captcha", "cf-hcaptcha", "hcaptcha.com/1/api", "js.hcaptcha.com", "newassets.hcaptcha.com"],
     "geetest": ["gt_captcha", "initgeetest", "geetest_", "static.geetest.com", "gcaptcha4.geetest.com"],
     "imperva": ["_incapsula_resource", "visid_incap", "incapsula incident id"],
@@ -35,6 +36,11 @@ CHALLENGE_MARKERS: Dict[str, List[str]] = {
 # Captcha widgets a site can embed in its own pages (a login form, a comment box). Finding one
 # doesn't mean the page is blocked; every other type exists only as a provider-served wall.
 WIDGET_CHALLENGES = frozenset({"cloudflare_turnstile", "recaptcha", "hcaptcha", "geetest", "cap"})
+
+# Imperva Advanced Bot Protection (formerly Distil) blocks with a "Pardon Our Interruption" page
+# that carries none of the Incapsula markers.
+_IMPERVA_BOT_WALL_TITLE = "pardon our interruption"
+_IMPERVA_BOT_WALL_TEXT = "something about your browser made us think you were a bot"
 
 # Content that only exists while the provider is serving its own interstitial, as opposed to the
 # markers above, some of which (telemetry scripts, embedded widgets) also ride on real pages.
@@ -91,6 +97,13 @@ _ANUBIS_REJECT_IMG_RE = re.compile(r"/\.within\.website/x/cmd/anubis/static/img/
 _INERT_BLOCK_RE = re.compile(r"<(template|noscript|textarea|style)\b[^>]*>.*?</\1\s*>", re.I | re.S)
 _SCRIPT_RE = re.compile(r"<script\b([^>]*)>(.*?)</script\s*>", re.I | re.S)
 _IMG_RE = re.compile(r"<img\b([^>]*)>", re.I)
+# reCAPTCHA v2 shows a checkbox (or an invisible v2 binds to a form); v3 only scores in the
+# background. Many ordinary pages load v3 (`api.js?render=SITEKEY`) and its rendered badge
+# carries `g-recaptcha-response` and a `size=invisible` anchor frame, none of which is clickable.
+_RECAPTCHA_V2_CLASS_RE = re.compile(r"""class\s*=\s*["'][^"']*(?<![\w-])g-recaptcha(?![\w-])""")
+_RECAPTCHA_ANCHOR_RE = re.compile(r"""recaptcha/(?:api2|enterprise)/anchor\?[^"'\s>]*""")
+_RECAPTCHA_SCRIPT_RE = re.compile(r"""(?:google\.com|recaptcha\.net)/recaptcha/(?:api|enterprise)\.js(\?[^"'\s>]*)?""")
+_RECAPTCHA_V3_RENDER_RE = re.compile(r"[?&]render=(?!explicit(?:&|$))")
 _ATTR_RE = re.compile(r"""([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))""")
 
 # Google search answers an IP it is rate limiting with a redirect to /sorry/; only another IP clears it.
@@ -230,6 +243,26 @@ def is_google_sorry_url(url: str) -> bool:
     return host in _GOOGLE_SEARCH_HOSTS and (parsed.path == "/sorry" or parsed.path.startswith("/sorry/"))
 
 
+def has_recaptcha_widget(content_lower: str) -> bool:
+    """Whether lowercased page content holds a reCAPTCHA v2 widget, not just invisible v3 scoring."""
+    if "recaptcha" not in content_lower:
+        return False
+    if _RECAPTCHA_V2_CLASS_RE.search(content_lower):
+        return True
+    if any("size=invisible" not in m.group(0) for m in _RECAPTCHA_ANCHOR_RE.finditer(content_lower)):
+        return True
+    # A v2 page that renders explicitly has only the script until its JS runs (Tier 1 sees this).
+    return any(
+        not _RECAPTCHA_V3_RENDER_RE.search(m.group(1) or "") for m in _RECAPTCHA_SCRIPT_RE.finditer(content_lower)
+    )
+
+
+def _is_imperva_bot_wall(title_lower: str, content_lower: str) -> bool:
+    if _IMPERVA_BOT_WALL_TEXT not in content_lower:
+        return False
+    return _IMPERVA_BOT_WALL_TITLE in title_lower or _IMPERVA_BOT_WALL_TITLE in content_lower
+
+
 def detect_challenge(
     title: str,
     content: str,
@@ -247,6 +280,12 @@ def detect_challenge(
     content_lower = content.lower() if content else ""
     for ctype, markers in CHALLENGE_MARKERS.items():
         if any(m in title_lower or (check_content and m in content_lower) for m in markers):
+            return ctype
+        if not check_content:
+            continue
+        if ctype == "recaptcha" and has_recaptcha_widget(content_lower):
+            return ctype
+        if ctype == "imperva" and _is_imperva_bot_wall(title_lower, content_lower):
             return ctype
     # Every Anubis wall carries an anubis_challenge/anubis_version script, so the substring
     # gates the structural parse and a clean page pays for one scan.
@@ -280,6 +319,8 @@ def is_challenge_wall(
     if challenge == "datadome" and _DATADOME_OBJECT_RE.search(content_lower):
         return True
     if any(m in content_lower for m in WALL_MARKERS.get(challenge, ())):
+        return True
+    if challenge == "imperva" and _is_imperva_bot_wall(title.lower() if title else "", content_lower):
         return True
     lean_limit = LEAN_WALL_BODY_CHARS.get(challenge)
     # An empty body means the content wasn't read, not that the page is a bare stub.

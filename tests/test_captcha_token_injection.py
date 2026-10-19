@@ -111,3 +111,62 @@ class TestWidgetParamsAndSolverCookie(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _CloudflarePage:
+    def __init__(self, url, results):
+        self.url = url
+        self.results = list(results)
+        self.scripts = []
+
+    async def evaluate(self, script, *args):
+        self.scripts.append(script)
+        return self.results.pop(0)
+
+
+RENDER = {
+    "websiteURL": "https://e.test/", "websiteKey": "0xKEY", "action": "managed",
+    "data": "cdata", "pagedata": "chlpagedata", "userAgent": "UA",
+}
+
+
+class TestCloudflareChallengeCapture(unittest.IsolatedAsyncioTestCase):
+    async def test_install_uses_a_random_main_world_key(self):
+        from app.solver.browser import captcha as captcha_module
+
+        class Ctx:
+            scripts = []
+
+            async def add_init_script(self, script):
+                self.scripts.append(script)
+
+        ctx = Ctx()
+        key1 = await captcha_module.install_cloudflare_capture(ctx)
+        key2 = await captcha_module.install_cloudflare_capture(ctx)
+        self.assertNotEqual(key1, key2)
+        self.assertTrue(ctx.scripts[0].startswith("mw:("))
+        self.assertIn(key1, ctx.scripts[0])
+
+    async def test_read_rejects_incomplete_renders(self):
+        from app.solver.browser.captcha import read_cloudflare_render
+        self.assertEqual(await read_cloudflare_render(_CloudflarePage("https://e.test/", [dict(RENDER)]), "k"), RENDER)
+        self.assertIsNone(await read_cloudflare_render(_CloudflarePage("https://e.test/", [None]), "k"))
+        self.assertIsNone(await read_cloudflare_render(_CloudflarePage("https://e.test/", [{**RENDER, "pagedata": ""}]), "k"))
+
+    async def test_token_is_delivered_through_the_page_callback(self):
+        from unittest.mock import AsyncMock, patch
+        from app.solver.browser import captcha as captcha_module
+        page = _CloudflarePage("https://e.test/", [True])
+        with patch.object(captcha_module.captcha_solver, "solve_cloudflare_challenge", AsyncMock(return_value="TOKEN")) as solve:
+            self.assertTrue(await captcha_module.try_cloudflare_challenge_solver(page, "k", RENDER, "http://p.test:1", 30.0))
+        self.assertEqual(solve.call_args.kwargs, {"proxy_url": "http://p.test:1", "timeout": 30.0})
+        self.assertTrue(page.scripts[0].startswith("mw:"))
+        self.assertIn('"TOKEN"', page.scripts[0])
+
+    async def test_token_for_a_replaced_challenge_is_discarded(self):
+        from unittest.mock import AsyncMock, patch
+        from app.solver.browser import captcha as captcha_module
+        page = _CloudflarePage("https://e.test/?__cf_chl_rt_tk=new", [])
+        with patch.object(captcha_module.captcha_solver, "solve_cloudflare_challenge", AsyncMock(return_value="TOKEN")):
+            self.assertFalse(await captcha_module.try_cloudflare_challenge_solver(page, "k", RENDER, None, 30.0))
+        self.assertEqual(page.scripts, [])

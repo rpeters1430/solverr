@@ -19,6 +19,42 @@ class TestChallengeDetection(unittest.TestCase):
         self.assertIsNone(detect_challenge("Example Site", content, check_content=False))
         self.assertEqual(detect_challenge("Example Site", content, check_content=True), "recaptcha")
 
+    def test_recaptcha_v3_scoring_is_not_a_widget(self):
+        # Invisible v3 as loaded by many ordinary pages, including the badge it renders.
+        v3 = (
+            '<script src="https://www.google.com/recaptcha/api.js?render=6LcKEY"></script>'
+            '<div class="grecaptcha-badge"><iframe src="https://www.google.com/recaptcha/api2/anchor?ar=1&k=6LcKEY&size=invisible"></iframe>'
+            '<textarea id="g-recaptcha-response" name="g-recaptcha-response" class="g-recaptcha-response"></textarea></div>'
+        )
+        self.assertIsNone(detect_challenge("Shop", v3, check_content=True))
+        enterprise_v3 = '<script src="https://www.recaptcha.net/recaptcha/enterprise.js?render=6LcKEY"></script>'
+        self.assertIsNone(detect_challenge("Shop", enterprise_v3, check_content=True))
+        self.assertIsNone(detect_challenge("Blog", "<p>We use reCAPTCHA v3 to fight spam.</p>", check_content=True))
+
+    def test_recaptcha_v2_widget_still_detected(self):
+        for content in (
+            '<form><div class="form-row g-recaptcha" data-sitekey="k"></div></form>',
+            '<script src="https://www.google.com/recaptcha/api.js" async defer></script>',
+            '<script src="https://www.google.com/recaptcha/api.js?onload=cb&render=explicit"></script>',
+            '<iframe src="https://www.google.com/recaptcha/api2/anchor?ar=1&k=k&size=normal"></iframe>',
+        ):
+            with self.subTest(content=content):
+                self.assertEqual(detect_challenge("Login", content, check_content=True), "recaptcha")
+
+    def test_imperva_bot_wall_detected(self):
+        content = (
+            "<html><head><title>Pardon Our Interruption</title></head><body><h1>Pardon Our Interruption</h1>"
+            "<p>As you were browsing something about your browser made us think you were a bot.</p></body></html>"
+        )
+        challenge = detect_challenge("Pardon Our Interruption", content, check_content=True)
+        self.assertEqual(challenge, "imperva")
+        self.assertTrue(is_challenge_wall(challenge, "Pardon Our Interruption", content, status=200))
+
+    def test_imperva_bot_wall_text_quoted_in_an_article_is_not_a_wall(self):
+        content = '<p>The page says "something about your browser made us think you were a bot".</p>'
+        self.assertIsNone(detect_challenge("Odd error messages", content, check_content=True))
+        self.assertIsNone(detect_challenge("Pardon Our Interruption", "<p>A short story.</p>", check_content=True))
+
     def test_detects_hcaptcha(self):
         self.assertEqual(detect_challenge("Verify", "<script src='hcaptcha.com/1/api.js'></script>", check_content=True), "hcaptcha")
 

@@ -12,7 +12,7 @@
   - **Tier 1 (Fast TLS)**: Level 1 & 2 JA3 / TLS Impersonation (`curl_cffi`) with **Adaptive Domain Scoring** solves requests in **30ms – 120ms** without browser overhead.
   - **Tier 2 (Clearance Cache)**: Instant `cf_clearance` & domain cookie jar reuse (**< 50ms**) with granular per-cookie TTL expiration and Netscape export.
   - **Tier 3 (Stealth Browser)**: Warm Camoufox (Stealth Firefox) pool with per-page isolated Bézier human mouse curves and **Deep Shadow DOM traversal**, escalating to a fresh Camoufox instance (new fingerprint) if the pooled attempt fails.
-  - **Tier 3.5 (Paid Captcha Escalation)**: Optional 2Captcha-protocol escalation for interactive image puzzles (`CAPTCHA_SOLVER_API_KEY`): reCAPTCHA v2 (incl. Enterprise and invisible), hCaptcha, Turnstile (with the widget's action/cData), and DataDome's slider when the request goes through a proxy.
+  - **Tier 3.5 (Paid Captcha Escalation)**: Optional 2Captcha-protocol escalation for interactive image puzzles (`CAPTCHA_SOLVER_API_KEY`): reCAPTCHA v2 (incl. Enterprise and invisible), hCaptcha, Turnstile (with the widget's action/cData), Cloudflare's own challenge page (its Turnstile parameters are captured from the page, then the token is handed back to it), and DataDome's slider when the request goes through a proxy.
   - **Tier 4 (Fallback Proxy)**: Automatic residential / fallback proxy escalation for rate-limited indexers.
 - **🛡️ Multi-WAF & CAPTCHA Solver Suite**: Automated solving for **Cloudflare Turnstile**, **Cloudflare 5s Interstitial**, **Google reCAPTCHA v2 / Enterprise**, **hCaptcha**, **GeeTest**, **Imperva / Incapsula**, **DataDome**, **Akamai**, **AWS WAF**, and the **Anubis** and **Cap** proof-of-work challenges. Google's `/sorry/` rate-limit page is treated as an IP block and sent straight to Tier 4.
 - **🌐 Deep Shadow DOM & Web Component Traversal**: In-page recursive DOM walker locates Turnstile and CAPTCHA checkboxes nested inside `#shadow-root` nodes across custom web components.
@@ -183,7 +183,7 @@ Every request Solverr handles is a self-contained request/response - there's no 
 }
 ```
 
-If a challenge wall is still up when the request's `maxTimeout` runs out, the response is `"status": "error"` with the reason in `message` (for example `Error solving the challenge: cloudflare_turnstile challenge not solved: still present after 38s`), never the challenge page returned as a solution. A captcha widget embedded in an otherwise real page (a login form's reCAPTCHA, say) is not a wall: Solverr tries it for up to 15 seconds and then returns the page.
+If a challenge wall is still up when the request's `maxTimeout` runs out, the response is `"status": "error"` with the reason in `message` (for example `Error solving the challenge: cloudflare_turnstile challenge not solved: still present after 38s`), never the challenge page returned as a solution. A captcha widget embedded in an otherwise real page (a login form's reCAPTCHA, say) is not a wall: `/v1` returns the page as soon as it has loaded without touching the widget, unless the request sets `solveEmbeddedCaptchas: true`, in which case Solverr tries it for up to 15 seconds first.
 
 JSON, XML/RSS and plain-text documents come back as the server's own body with its real `content-type`, also when the browser tier had to fetch them (not wrapped in Firefox's viewer markup).
 
@@ -238,6 +238,8 @@ limited by `MAX_SCREENSHOT_HEIGHT_PX` and byte limited by `MAX_SCREENSHOT_MB`.
 `format` is `html` (default), `markdown` or `text`. Markdown keeps headings, links, lists, tables and code and drops scripts and styles, which makes a page far smaller for an LLM to read. It applies to HTML pages only (JSON and other documents are returned unchanged), and `extract_rules` always run on the original HTML.
 
 `capture` and `disable_media` work as on `/v1` (see above); the capture comes back in the response's `debug` field.
+
+`solve_embedded_captchas` (default `true` here, `false` on `/v1`) tries a captcha embedded in the real page for up to 15 seconds before returning it, so a form's response token is filled in. Set it to `false` to get the page straight away. Challenge walls are solved either way.
 
 ### 3. Prometheus Metrics (`GET /metrics`)
 Scrape endpoint for Grafana, Prometheus, or VictoriaMetrics:

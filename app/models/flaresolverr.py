@@ -73,6 +73,10 @@ class V1Request(BaseModel):
     returnScreenshot: Optional[bool] = False
     waitInSeconds: Optional[int] = None
     disableMedia: Optional[bool] = False
+    # Clicking a captcha embedded in the real page (a login or comment form) only earns that form's
+    # token. FlareSolverr clients (Prowlarr, Jackett, ...) only want the page, so /v1 skips it
+    # unless asked; /scrape and MCP turn it on. Provider walls are solved either way.
+    solveEmbeddedCaptchas: Optional[bool] = False
     # Accepted for compatibility only: Solverr locates the Turnstile checkbox itself, not by tabbing to it.
     tabs_till_verify: Optional[int] = None
 
@@ -216,6 +220,7 @@ class ScrapeRequest(BaseModel):
     followMetaRefresh: Optional[bool] = None
     capture: Optional[List[str]] = None
     disable_media: bool = False
+    solve_embedded_captchas: bool = True
     # "markdown"/"text" convert an HTML page after extraction; other content types pass through.
     format: Literal["html", "markdown", "text"] = "html"
 
@@ -258,6 +263,7 @@ class ScrapeRequest(BaseModel):
             forceFallbackProxy=self.tier == "tier4_proxy",
             capture=self.capture,
             disableMedia=self.disable_media,
+            solveEmbeddedCaptchas=self.solve_embedded_captchas,
         )
 
 class ScrapeResponse(BaseModel):
