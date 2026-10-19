@@ -84,6 +84,28 @@ class CaptchaSolverClient:
             params["data"] = cdata
         return await self._submit_and_poll(params)
 
+    async def solve_cloudflare_challenge(
+        self, render: Dict[str, str], proxy_url: Optional[str] = None, timeout: Optional[float] = None
+    ) -> Optional[str]:
+        """The Turnstile on Cloudflare's own challenge page, from the parameters its turnstile.render()
+        call was given (see browser/captcha.py's capture). Returns the token, or None.
+
+        Unlike a standalone widget, this one is only valid with the page's cData, chlPageData and
+        action, and for the browser's User-Agent; a proxy, when the browser has one, is shared."""
+        proxy = proxy_task_fields(proxy_url)
+        solution = await self._create_task_and_poll({
+            "type": "TurnstileTask" if proxy else "TurnstileTaskProxyless",
+            "websiteURL": render["websiteURL"],
+            "websiteKey": render["websiteKey"],
+            "action": render["action"],
+            "data": render["data"],
+            "pagedata": render["pagedata"],
+            "userAgent": render["userAgent"],
+            **(proxy or {}),
+        }, timeout=timeout)
+        token = (solution or {}).get("token")
+        return token if isinstance(token, str) and token.strip() and len(token) <= 65536 else None
+
     async def solve_datadome_slider(
         self, captcha_url: str, page_url: str, user_agent: str, proxy_url: str, timeout: Optional[float] = None
     ) -> Optional[str]:

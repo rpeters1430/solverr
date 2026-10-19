@@ -128,6 +128,47 @@ class TestCaptchaSolverTaskOptions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((seen["action"], seen["data"]), ("login", "xyz"))
 
 
+class TestCloudflareChallengeTask(unittest.IsolatedAsyncioTestCase):
+    RENDER = {
+        "websiteURL": "https://e.test/", "websiteKey": "0xKEY", "action": "managed",
+        "data": "cdata", "pagedata": "chlpagedata", "userAgent": "UA",
+    }
+
+    async def _solve(self, proxy_url=None, solution=None):
+        import json
+        bodies = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(request.content))
+            if request.url.path == "/createTask":
+                return httpx.Response(200, json={"errorId": 0, "taskId": 9})
+            return httpx.Response(200, json={"errorId": 0, "status": "ready", "solution": solution or {"token": "TOKEN"}})
+
+        client = make_client()
+        client.api_v2_url = "https://fake-v2.test"
+        with mocked_http(handler):
+            token = await client.solve_cloudflare_challenge(self.RENDER, proxy_url=proxy_url)
+        return token, bodies[0]["task"]
+
+    async def test_sends_the_challenge_page_parameters(self):
+        token, task = await self._solve()
+        self.assertEqual(token, "TOKEN")
+        self.assertEqual(task["type"], "TurnstileTaskProxyless")
+        self.assertEqual(
+            (task["websiteURL"], task["websiteKey"], task["action"], task["data"], task["pagedata"], task["userAgent"]),
+            ("https://e.test/", "0xKEY", "managed", "cdata", "chlpagedata", "UA"),
+        )
+
+    async def test_shares_the_browser_proxy(self):
+        _, task = await self._solve(proxy_url="http://u:p@proxy.test:3128")
+        self.assertEqual(task["type"], "TurnstileTask")
+        self.assertEqual((task["proxyAddress"], task["proxyPort"], task["proxyLogin"]), ("proxy.test", 3128, "u"))
+
+    async def test_empty_token_is_none(self):
+        token, _ = await self._solve(solution={"token": "  "})
+        self.assertIsNone(token)
+
+
 class TestDataDomeSliderTask(unittest.IsolatedAsyncioTestCase):
     async def test_creates_v2_task_through_the_proxy_and_returns_cookie(self):
         import json

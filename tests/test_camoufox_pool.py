@@ -565,6 +565,43 @@ class TestSolveFlowWallVersusRealPage(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(err, ChallengeNotSolvedError)
         self.assertEqual(err.challenge, "datadome")
 
+    async def test_cloudflare_challenge_page_is_handed_to_the_paid_solver_in_time(self):
+        from unittest.mock import AsyncMock
+        page = _StaticPage()
+        page.page_title = "Just a moment..."
+        page.html = "<html><script>window._cf_chl_opt={cType:'managed'}</script><form id='challenge-form'></form></html>"
+        render = {"websiteURL": page.url, "websiteKey": "0xKEY", "action": "managed",
+                  "data": "c", "pagedata": "p", "userAgent": "ua"}
+
+        async def deliver(*args):
+            page.page_title = "Search results"
+            page.html = "<html>" + REAL_BODY + "</html>"
+            return True
+
+        solver = AsyncMock(side_effect=deliver)
+        with patch.object(browser_module.captcha_solver, "api_key", "key"), \
+             patch.object(browser_module, "install_cloudflare_capture", AsyncMock(return_value="k")), \
+             patch.object(browser_module, "read_cloudflare_render", AsyncMock(return_value=render)), \
+             patch.object(browser_module, "try_cloudflare_challenge_solver", solver):
+            sol, _ = await self._run(
+                page, timeout_s=8.0, CLOUDFLARE_SOLVER_AFTER_SECONDS=0.3, CLOUDFLARE_SOLVER_MIN_SECONDS=0.5
+            )
+        self.assertEqual(sol.status, 200)
+        solver.assert_awaited_once()
+        self.assertEqual(solver.call_args.args[1:3], ("k", render))
+        # Started with most of the attempt left, not after the click loop ran out.
+        self.assertGreater(solver.call_args.args[4], 0.5)
+
+    async def test_cloudflare_capture_is_not_installed_without_the_paid_solver(self):
+        from unittest.mock import AsyncMock
+        page = _StaticPage()
+        page.html = "<html>" + REAL_BODY + "</html>"
+        install = AsyncMock(return_value="k")
+        with patch.object(browser_module.captcha_solver, "api_key", None), \
+             patch.object(browser_module, "install_cloudflare_capture", install):
+            await self._run(page)
+        install.assert_not_called()
+
     async def test_wall_served_with_200_fails_instead_of_returning_as_solved(self):
         page = _StaticPage()
         page.page_title = "example.com"

@@ -4,6 +4,7 @@ import time
 from typing import Any, Callable, List, Optional, Tuple
 
 from app.config import cgroup_memory_usage, settings
+from app.solver.captcha_solver import captcha_solver
 from app.solver.browser.models import _PooledCamoufox
 
 try:
@@ -229,6 +230,8 @@ class CamoufoxPool:
             os="linux",
             config={'forceScopeAccess': True},
             firefox_user_prefs=firefox_user_prefs(),
+            # "mw:" scripts for the Cloudflare challenge-page capture; off unless the paid solver is set.
+            main_world_eval=captcha_solver.enabled,
             i_know_what_im_doing=True
         )
         try:
