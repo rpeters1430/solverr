@@ -13,6 +13,22 @@ def _validate_capture(kinds: Optional[List[str]]) -> Optional[List[str]]:
     return kinds
 
 
+def _drop_empty_proxy(v):
+    # Prowlarr sends {"url": null, "username": null, "password": null} when it has no proxy set.
+    if isinstance(v, dict) and not any(val is not None and str(val).strip() for val in v.values()):
+        return None
+    if isinstance(v, str) and not v.strip():
+        return None
+    return v
+
+
+def _with_proxy_credentials(url: str, username: Optional[str], password: Optional[str]) -> str:
+    if not (username and password) or "@" in url:
+        return url
+    scheme, rest = url.split("://", 1) if "://" in url else ("http", url)
+    return f"{scheme}://{username}:{password}@{rest}"
+
+
 class CookieModel(BaseModel):
     name: str
     value: str
@@ -80,6 +96,11 @@ class V1Request(BaseModel):
     # Accepted for compatibility only: Solverr locates the Turnstile checkbox itself, not by tabbing to it.
     tabs_till_verify: Optional[int] = None
 
+    @field_validator("proxy", mode="before")
+    @classmethod
+    def _coerce_proxy(cls, v):
+        return _drop_empty_proxy(v)
+
     @field_validator("headers", mode="before")
     @classmethod
     def _coerce_headers(cls, v):
@@ -131,34 +152,27 @@ class V1Request(BaseModel):
         if not self.proxy:
             return None
         if isinstance(self.proxy, str):
-            return self.proxy
+            return self.proxy.strip() or None
         if isinstance(self.proxy, dict):
-            if "url" in self.proxy:
-                url_str = str(self.proxy["url"])
-                if "username" in self.proxy and "password" in self.proxy and "@" not in url_str:
-                    scheme, rest = url_str.split("://", 1) if "://" in url_str else ("http", url_str)
-                    return f"{scheme}://{self.proxy['username']}:{self.proxy['password']}@{rest}"
-                return url_str
-            if "server" in self.proxy:
-                srv_str = str(self.proxy["server"])
-                if "username" in self.proxy and "password" in self.proxy and "@" not in srv_str:
-                    scheme, rest = srv_str.split("://", 1) if "://" in srv_str else ("http", srv_str)
-                    return f"{scheme}://{self.proxy['username']}:{self.proxy['password']}@{rest}"
-                return srv_str
-            if "host" in self.proxy and "port" in self.proxy:
-                user_pass = ""
-                if "username" in self.proxy and "password" in self.proxy:
-                    user_pass = f"{self.proxy['username']}:{self.proxy['password']}@"
-                scheme = self.proxy.get("scheme", "http")
-                return f"{scheme}://{user_pass}{self.proxy['host']}:{self.proxy['port']}"
+            # Prowlarr always sends {"url": null, "username": null, "password": null} when it has no
+            # proxy configured: a null or blank field means "not set", never the string "None".
+            fields = {k: str(v).strip() for k, v in self.proxy.items() if v is not None and str(v).strip()}
+            username, password = fields.get("username"), fields.get("password")
+            server = fields.get("url") or fields.get("server")
+            if server:
+                return _with_proxy_credentials(server, username, password)
+            if fields.get("host") and fields.get("port"):
+                user_pass = f"{username}:{password}@" if username and password else ""
+                scheme = fields.get("scheme", "http")
+                return f"{scheme}://{user_pass}{fields['host']}:{fields['port']}"
+            return None
         if hasattr(self.proxy, "url"):
-            url_str = str(self.proxy.url)
-            username = getattr(self.proxy, "username", None)
-            password = getattr(self.proxy, "password", None)
-            if username and password and "@" not in url_str:
-                scheme, rest = url_str.split("://", 1) if "://" in url_str else ("http", url_str)
-                return f"{scheme}://{username}:{password}@{rest}"
-            return url_str
+            url_str = (self.proxy.url or "").strip()
+            if not url_str:
+                return None
+            return _with_proxy_credentials(
+                url_str, getattr(self.proxy, "username", None), getattr(self.proxy, "password", None)
+            )
         return None
 
 class SolutionModel(BaseModel):
@@ -228,6 +242,11 @@ class ScrapeRequest(BaseModel):
     @classmethod
     def _check_capture(cls, v):
         return _validate_capture(v)
+
+    @field_validator("proxy", mode="before")
+    @classmethod
+    def _coerce_proxy(cls, v):
+        return _drop_empty_proxy(v)
 
     @field_validator("tier")
     @classmethod
