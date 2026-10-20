@@ -66,6 +66,19 @@ class TestDockerPublishWorkflow(unittest.TestCase):
         self.assertEqual(indices, sorted(indices))
         self.assertGreater(indices[0], self.steps.index(candidate))
 
+    def test_release_notes_are_embedded_before_build_and_release_waits_for_validation(self):
+        build_info = next(step for step in self.steps if step.get("name") == "Embed changelog and image revision")
+        candidate = next(step for step in self.steps if step.get("name") == "Build candidate image")
+        self.assertLess(self.steps.index(build_info), self.steps.index(candidate))
+        self.assertIn("EVENT_BEFORE", build_info["env"])
+        self.assertIn("RELEASE_CHANGELOG", build_info["env"])
+        self.assertIn("build-info.json", (Path(__file__).resolve().parents[1] / "Dockerfile").read_text(encoding="utf-8"))
+        release = self.workflow["jobs"]["create-release"]
+        self.assertEqual(release["needs"], "build-and-push")
+        self.assertEqual(release["permissions"]["contents"], "write")
+        builder = next(step for step in release["steps"] if step.get("id") == "changelog")
+        self.assertIn("release-changelog-builder-action@", builder["uses"])
+
 
 if __name__ == "__main__":
     unittest.main()

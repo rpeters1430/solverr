@@ -97,6 +97,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # Stage 2: runtime image.
 FROM base AS runtime
 WORKDIR /app
+COPY build-info.json /app/build-info.json
 
 COPY --from=deps /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"

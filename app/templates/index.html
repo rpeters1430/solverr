@@ -507,6 +507,15 @@
         </button>
     </nav>
 
+    <dialog id="release-notes-dialog" class="release-notes-dialog" aria-labelledby="release-notes-title">
+        <header class="release-notes-header">
+            <div><p class="release-notes-eyebrow">Updated image</p><h2 id="release-notes-title">What’s new</h2></div>
+            <button id="release-notes-close" class="btn btn-secondary" type="button" aria-label="Close release notes">Close</button>
+        </header>
+        <div id="release-notes-content" class="release-notes-content"></div>
+        <p id="release-notes-revision" class="release-notes-revision"></p>
+    </dialog>
+    <script src="/static/release_notes.js?v=1.0.0"></script>
     <script src="/static/app.js?v=1.8.0"></script>
 </body>
 </html>

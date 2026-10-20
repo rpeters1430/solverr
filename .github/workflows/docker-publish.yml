@@ -47,6 +47,14 @@ jobs:
         run: |
           python -m unittest discover -s tests
 
+      - name: Set up Node for release notes renderer tests
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24'
+
+      - name: Test release notes renderer
+        run: node --test tests/test_release_notes_ui.js
+
       - name: Lint (ruff)
         run: |
           ruff check app/
@@ -70,6 +78,64 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Build versioned release notes
+        id: release-notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: mikepenz/release-changelog-builder-action@aa013739bbc8e7067dbbecd4525ff11aeb51a84b # v6.4.0
+        with:
+          mode: COMMIT
+          failOnError: true
+          configurationJson: |
+            {
+              "template": "#{{CHANGELOG}}",
+              "categories": [
+                { "title": "## Features", "labels": ["feat", "feature"] },
+                { "title": "## Fixes", "labels": ["fix", "bug"] },
+                { "title": "## Other changes", "labels": [] }
+              ],
+              "label_extractor": [
+                { "pattern": "^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test){1}(\\([\\w\\-\\.]+\\))?(!)?: ([\\w ])+([\\s\\S]*)", "on_property": "title", "target": "$1" }
+              ]
+            }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Embed changelog and image revision
+        env:
+          EVENT_BEFORE: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_CHANGELOG: ${{ steps.release-notes.outputs.changelog }}
+          TAG_NAME: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          set -eu
+          if [ -n "$TAG_NAME" ]; then
+            VERSION="${TAG_NAME#v}"
+            NOTES="$RELEASE_CHANGELOG"
+          elif [ -n "$EVENT_BEFORE" ] && [ "$EVENT_BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            VERSION="build-${GITHUB_SHA::12}"
+            NOTES=$(git log --format='- %s (%h)' "$EVENT_BEFORE..$GITHUB_SHA")
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="build-${GITHUB_SHA::12}"
+            NOTES=$(git log -1 --format='- %s (%h)' "$GITHUB_SHA")
+          else
+            VERSION="build-${GITHUB_SHA::12}"
+            NOTES="- Initial image build (${GITHUB_SHA::12})"
+          fi
+          if [ -z "$(printf '%s' "$NOTES" | tr -d '[:space:]')" ]; then
+            NOTES="- Container image updated (${GITHUB_SHA::12})"
+          fi
+          BUILD_VERSION="$VERSION" BUILD_REVISION="$GITHUB_SHA" RELEASE_NOTES="$NOTES" python3 - <<'PY'
+          import json, os
+          with open('build-info.json', 'w', encoding='utf-8') as output:
+              json.dump({
+                  'version': os.environ['BUILD_VERSION'],
+                  'revision': os.environ['BUILD_REVISION'],
+                  'notes': os.environ['RELEASE_NOTES'],
+              }, output, ensure_ascii=False, indent=2)
+              output.write('\n')
+          PY
 
       - name: Set up Python for Camoufox resolution
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -253,3 +319,45 @@ jobs:
             echo "$RELEASE_TAGS"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  create-release:
+    name: Create GitHub release notes
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build release changelog
+        id: changelog
+        uses: mikepenz/release-changelog-builder-action@aa013739bbc8e7067dbbecd4525ff11aeb51a84b # v6.4.0
+        with:
+          mode: COMMIT
+          failOnError: true
+          configurationJson: |
+            {
+              "template": "#{{CHANGELOG}}",
+              "categories": [
+                { "title": "## Features", "labels": ["feat", "feature"] },
+                { "title": "## Fixes", "labels": ["fix", "bug"] },
+                { "title": "## Other changes", "labels": [] }
+              ],
+              "label_extractor": [
+                { "pattern": "^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test){1}(\\([\\w\\-\\.]+\\))?(!)?: ([\\w ])+([\\s\\S]*)", "on_property": "title", "target": "$1" }
+              ]
+            }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create release if one does not already exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_CHANGELOG: ${{ steps.changelog.outputs.changelog }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes "$RELEASE_CHANGELOG"
+          fi
