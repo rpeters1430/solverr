@@ -15,9 +15,12 @@ def _validate_capture(kinds: Optional[List[str]]) -> Optional[List[str]]:
 
 def _drop_empty_proxy(v):
     # Prowlarr sends {"url": null, "username": null, "password": null} when it has no proxy set.
-    if isinstance(v, dict) and not any(val is not None and str(val).strip() for val in v.values()):
-        return None
-    if isinstance(v, str) and not v.strip():
+    if type(v) is dict:
+        # Fast path: a real proxy (the common case) has its address set.
+        if v.get("url") or v.get("server") or v.get("host"):
+            return v
+        return v if any(val is not None and str(val).strip() for val in v.values()) else None
+    if type(v) is str and not v.strip():
         return None
     return v
 
