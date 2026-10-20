@@ -1,4 +1,7 @@
 import unittest
+import json
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 from app.main import app
@@ -15,6 +18,30 @@ class TestAPIEndpoints(unittest.TestCase):
         json_data = response.json()
         self.assertEqual(json_data.get("status"), "ok")
         self.assertIn("stealth_engine", json_data)
+
+    def test_release_notes_metadata_and_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            metadata_path = Path(directory) / "build-info.json"
+            with patch("app.api.release_notes.BUILD_INFO_PATH", metadata_path):
+                metadata_path.write_text(json.dumps({
+                    "version": "1.2.3",
+                    "revision": "abcdef0123456789",
+                    "notes": "## Fixes\n- Faster browser startup",
+                }), encoding="utf-8")
+                response = self.client.get("/api/release-notes")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers.get("cache-control"), "no-store")
+                self.assertEqual(response.json(), {
+                    "version": "1.2.3",
+                    "revision": "abcdef0123456789",
+                    "notes": "## Fixes\n- Faster browser startup",
+                })
+
+                metadata_path.write_text("{invalid", encoding="utf-8")
+                self.assertEqual(self.client.get("/api/release-notes").json(), {"version": "", "revision": "", "notes": ""})
+
+                metadata_path.unlink()
+                self.assertEqual(self.client.get("/api/release-notes").json(), {"version": "", "revision": "", "notes": ""})
 
     def test_health_live_and_ready_split(self):
         live = self.client.get("/health/live")

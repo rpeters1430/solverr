@@ -27,6 +27,7 @@ function tierLabel(tier) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+    window.SolverrReleaseNotes?.loadReleaseNotes();
     // Mobile navigation & sidebar drawer controls
     const mobileMenuBtn = document.getElementById('btn-mobile-menu');
     const sidebarCloseBtn = document.getElementById('btn-sidebar-close');

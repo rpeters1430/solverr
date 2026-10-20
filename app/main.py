@@ -16,6 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from app.config import settings
 from app.api.flaresolverr import router as flaresolverr_router
 from app.api.dashboard import router as dashboard_router
+from app.api.release_notes import release_notes_payload
 from app.solver.browser import browser_pool, CAMOUFOX_AVAILABLE
 from app.solver.fast_tls import fast_tls_engine
 from app.metrics import generate_prometheus_metrics
@@ -209,6 +210,11 @@ def _get_dashboard_html() -> str:
 @app.get("/", response_class=HTMLResponse)
 async def dashboard_index():
     return HTMLResponse(_get_dashboard_html())
+
+@app.get("/api/release-notes")
+async def release_notes(response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    return release_notes_payload()
 
 def _readiness_body() -> dict:
     # An unused lazy pool is healthy; only a failed Camoufox import leaves Tier 3 with no engine.
