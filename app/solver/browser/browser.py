@@ -65,6 +65,9 @@ MIN_RETRY_TIMEOUT_MS = 5000
 POOL_ACQUIRE_TIMEOUT_SECONDS = 20
 # Page/context close on a wedged browser can hang; past this the instance is treated as broken and recycled.
 POOLED_CLEANUP_TIMEOUT_SECONDS = 5
+# A healthy warm instance opens a context and page in a second or two. One that hasn't in this long
+# is wedged (seen at 20-50s+ on a NAS after hours idle), so give the budget to the fresh retry instead.
+POOLED_SETUP_TIMEOUT_SECONDS = 20
 # Held back from the pooled attempt so a stuck fingerprint still leaves the fresh-fingerprint retry
 # a real window: the smaller of this and RETRY_RESERVE_FRACTION of the budget.
 EPHEMERAL_RETRY_RESERVE_MS = 20000
@@ -297,6 +300,7 @@ class BrowserPool:
             "memory_recycles_total": cp.memory_recycles_total if cp else 0,
             "dead_reclaimed_total": cp.dead_reclaimed_total if cp else 0,
             "idle_retired_total": cp.idle_retired_total if cp else 0,
+            "probe_failures_total": cp.probe_failures_total if cp else 0,
             "crashes_total": self._crashes_total,
             "avg_queue_wait_seconds": round(avg_wait, 3),
             "queue_wait_samples": self._queue_wait_count,
@@ -508,14 +512,28 @@ class BrowserPool:
         disconnected = False
         try:
             logger.info(f"[CamoufoxPool] Checked out warm instance (use #{inst.uses}) for {url}...")
-            if hasattr(inst.browser, "new_context"):
-                context = await inst.browser.new_context(**_context_options(browser_storage))
-            elif inst.browser.contexts:
-                context = inst.browser.contexts[0]
-            else:
-                context = inst.browser
-            page = await context.new_page()
-            active_ua = await page.evaluate("() => navigator.userAgent")
+            setup_started = time.monotonic()
+
+            async def open_page():
+                nonlocal context, page
+                if hasattr(inst.browser, "new_context"):
+                    context = await inst.browser.new_context(**_context_options(browser_storage))
+                elif inst.browser.contexts:
+                    context = inst.browser.contexts[0]
+                else:
+                    context = inst.browser
+                page = await context.new_page()
+                return await page.evaluate("() => navigator.userAgent")
+
+            try:
+                active_ua = await asyncio.wait_for(open_page(), timeout=POOLED_SETUP_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError as e:
+                raise TimeoutError(
+                    f"Pooled Camoufox instance did not open a page within {POOLED_SETUP_TIMEOUT_SECONDS}s"
+                ) from e
+            setup_s = time.monotonic() - setup_started
+            if setup_s > 5:
+                logger.info(f"[CamoufoxPool] Opening a page on the warm instance took {setup_s:.1f}s.")
             # The process answered JS, so later failures are page-level and shouldn't evict it.
             setup_ok = True
             return await self._execute_solve_flow(
@@ -556,12 +574,14 @@ class BrowserPool:
 
     async def _release_pooled(self, inst: Any, context: Any, page: Any, setup_ok: bool, disconnected: bool):
         try:
-            if page:
+            # An instance that never answered is recycled anyway; closing its page/context first
+            # would only add up to two more cleanup timeouts to the failed request.
+            if page and setup_ok:
                 try:
                     await asyncio.wait_for(page.close(), timeout=POOLED_CLEANUP_TIMEOUT_SECONDS)
                 except Exception:
                     disconnected = True
-            if context and context is not inst.browser:
+            if context and context is not inst.browser and setup_ok:
                 try:
                     await asyncio.wait_for(context.close(), timeout=POOLED_CLEANUP_TIMEOUT_SECONDS)
                 except Exception:

@@ -58,11 +58,14 @@ class CamoufoxPool:
         self._all_instances: "set[_PooledCamoufox]" = set()
         self._created = 0
         self._lock = asyncio.Lock()
+        # Recycles run in the background so a slow relaunch never holds up the request that released.
+        self._replacements: "set[asyncio.Task]" = set()
         self._memory_usage = memory_usage or cgroup_memory_usage
         self.recycles_total = 0
         self.dead_reclaimed_total = 0
         self.idle_retired_total = 0
         self.memory_recycles_total = 0
+        self.probe_failures_total = 0
 
     async def acquire(self, wait_timeout: Optional[float] = None) -> _PooledCamoufox:
         """`wait_timeout` bounds only the at-capacity wait for a peer's instance, never a launch.
@@ -115,33 +118,50 @@ class CamoufoxPool:
                 self.memory_recycles_total += 1
                 logger.info("[CamoufoxPool] Container memory pressure: retiring a browser instance on release.")
             self._all_instances.discard(inst)
-            await self._close_instance(inst)
-            async with self._lock:
-                self._created -= 1
-                # Below the headroom a warm replacement could tip the container into the OOM killer;
-                # the next acquire() launches one on demand instead.
-                fresh = await self._relaunch_with_retry() if self._has_replacement_headroom() else None
-                if fresh is not None:
-                    self._created += 1
-                    self._all_instances.add(fresh)
-            if fresh is not None:
-                fresh.last_used_at = time.monotonic()
-                self._idle.put_nowait(fresh)
-            else:
-                self._freed_slot_tokens += 1
-                self._idle.put_nowait(None)
+            # The slot stays counted in _created until the replacement lands or gives it up, so
+            # acquire() can't launch past capacity meanwhile. Closing and relaunching on a slow host
+            # took over a minute, and the released request used to wait for all of it.
+            task = asyncio.ensure_future(self._replace(inst))
+            self._replacements.add(task)
+            task.add_done_callback(self._replacements.discard)
             return
         inst.last_used_at = time.monotonic()
         self._idle.put_nowait(inst)
 
+    async def _replace(self, old: Optional[_PooledCamoufox]) -> None:
+        if old is not None:
+            await self._close_instance(old)
+        # Below the headroom a warm replacement could tip the container into the OOM killer;
+        # the next acquire() launches one on demand instead.
+        fresh = await self._relaunch_with_retry() if self._has_replacement_headroom() else None
+        if fresh is None:
+            self._free_slot()
+            return
+        self._all_instances.add(fresh)
+        fresh.last_used_at = time.monotonic()
+        self._idle.put_nowait(fresh)
+
+    def _free_slot(self) -> None:
+        self._created -= 1
+        self._freed_slot_tokens += 1
+        self._idle.put_nowait(None)
+
+    async def wait_for_replacements(self) -> None:
+        """Wait out in-flight background recycles (tests, shutdown)."""
+        while self._replacements:
+            await asyncio.gather(*list(self._replacements), return_exceptions=True)
+
     async def maintain(self) -> None:
         """Drop idle instances whose browser died, and retire those idle past
-        CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS. Both relaunch lazily on the next acquire()."""
+        CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS. Both relaunch lazily on the next acquire().
+        Then probe instances idle past CAMOUFOX_POOL_PROBE_SECONDS and replace any that stall."""
         idle_timeout = settings.CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS
+        probe_every = settings.CAMOUFOX_POOL_PROBE_SECONDS
         now = time.monotonic()
         keep: List[_PooledCamoufox] = []
         dead: List[_PooledCamoufox] = []
         retire: List[_PooledCamoufox] = []
+        probe: List[_PooledCamoufox] = []
         # Drained and refilled with no await in between, so acquire() never sees a missing instance.
         while True:
             try:
@@ -154,6 +174,8 @@ class CamoufoxPool:
                 dead.append(inst)
             elif idle_timeout > 0 and now - (inst.last_used_at or inst.created_at) >= idle_timeout:
                 retire.append(inst)
+            elif probe_every > 0 and now - max(inst.last_used_at, inst.last_probe_at, inst.created_at) >= probe_every:
+                probe.append(inst)
             else:
                 keep.append(inst)
         for inst in keep:
@@ -167,6 +189,43 @@ class CamoufoxPool:
             await self._close_instance(inst)
         if retire:
             logger.info(f"[CamoufoxPool] Retired {len(retire)} idle browser instance(s) after {idle_timeout}s unused.")
+        # Probed one at a time, out of the queue; an acquire() meanwhile waits at most the probe timeout.
+        for inst in probe:
+            if await self._probe(inst):
+                inst.last_probe_at = time.monotonic()
+                self._idle.put_nowait(inst)
+                continue
+            self.probe_failures_total += 1
+            self._all_instances.discard(inst)
+            task = asyncio.ensure_future(self._replace(inst))
+            self._replacements.add(task)
+            task.add_done_callback(self._replacements.discard)
+
+    async def _probe(self, inst: _PooledCamoufox) -> bool:
+        """Whether an idle instance can still open a context and run JS in time."""
+        if not hasattr(inst.browser, "new_context"):
+            return True
+        timeout = settings.CAMOUFOX_POOL_PROBE_TIMEOUT_SECONDS
+        started = time.monotonic()
+
+        async def roundtrip():
+            context = await inst.browser.new_context()
+            try:
+                page = await context.new_page()
+                await page.evaluate("() => 1")
+            finally:
+                await context.close()
+
+        try:
+            await asyncio.wait_for(roundtrip(), timeout=timeout)
+        except Exception as e:
+            reason = f"no answer within {timeout:.0f}s" if isinstance(e, asyncio.TimeoutError) else f"{type(e).__name__}: {e}"
+            logger.warning(f"[CamoufoxPool] Idle browser failed its health probe ({reason}); replacing it.")
+            return False
+        elapsed = time.monotonic() - started
+        if elapsed > 5:
+            logger.info(f"[CamoufoxPool] Idle browser health probe was slow ({elapsed:.1f}s).")
+        return True
 
     @property
     def idle_count(self) -> int:
@@ -247,7 +306,7 @@ class CamoufoxPool:
                     f"Camoufox launch did not complete within {CAMOUFOX_LAUNCH_TIMEOUT_SECONDS}s"
                 ) from e
             raise
-        logger.info(f"[CamoufoxPool] Warmed stealth browser instance ({self._created + 1}/{self.size})")
+        logger.info(f"[CamoufoxPool] Warmed stealth browser instance ({len(self._all_instances) + 1}/{self.size})")
         return _PooledCamoufox(cm=cm, browser=browser, created_at=time.monotonic())
 
     async def _close_instance(self, inst: _PooledCamoufox):
@@ -258,6 +317,10 @@ class CamoufoxPool:
 
     async def close(self):
         """Close all pooled instances (idle and in-use) cleanly."""
+        # A cancelled launch closes its own half-started Firefox (see _launch_instance).
+        for task in list(self._replacements):
+            task.cancel()
+        await asyncio.gather(*list(self._replacements), return_exceptions=True)
         async with self._lock:
             while True:
                 try:

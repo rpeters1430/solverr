@@ -55,6 +55,7 @@ class TestCamoufoxPool(unittest.IsolatedAsyncioTestCase):
             await pool.release(inst)
             inst = await pool.acquire()  # uses=2, hits budget
             await pool.release(inst)     # should recycle: close old, launch new
+            await pool.wait_for_replacements()
             self.assertEqual(pool.close_count, 1)
             self.assertEqual(pool.launch_count, 2)
 
@@ -131,6 +132,7 @@ class TestCamoufoxPoolResilience(unittest.IsolatedAsyncioTestCase):
             pool = FakeCamoufoxPool(2, memory_usage=lambda: (int(1.9 * gib), 2 * gib))
             inst = await pool.acquire()
             await pool.release(inst)
+            await pool.wait_for_replacements()
             self.assertEqual(pool.memory_recycles_total, 1)
             self.assertEqual(pool.close_count, 1)
             self.assertEqual(pool.launch_count, 1)  # no warm replacement at 100MB headroom
@@ -174,6 +176,7 @@ class TestCamoufoxPoolResilience(unittest.IsolatedAsyncioTestCase):
             pool = FakeCamoufoxPool(1, memory_usage=lambda: (1 * gib, 8 * gib))
             inst = await pool.acquire()
             await pool.release(inst)
+            await pool.wait_for_replacements()
             self.assertEqual(pool.memory_recycles_total, 0)
             self.assertEqual(pool.launch_count, 2)
             self.assertEqual(pool._idle.qsize(), 1)
@@ -204,6 +207,83 @@ class TestCamoufoxPoolResilience(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(pool._created, 1)
             self.assertEqual(pool._idle.qsize(), 1)
             self.assertIs(await pool.acquire(), c)
+
+    async def test_recycle_does_not_hold_up_the_release(self):
+        """A slow relaunch on a NAS used to keep the failed request waiting over a minute
+        and hold the pool lock, stalling every other acquire()."""
+        relaunched = asyncio.Event()
+
+        class SlowLaunchPool(FakeCamoufoxPool):
+            async def _launch_instance(self):
+                if self.launch_count:
+                    await relaunched.wait()
+                return await super()._launch_instance()
+
+        with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 100), \
+             patch.object(settings, "CAMOUFOX_POOL_RECYCLE_SECONDS", 100000):
+            pool = SlowLaunchPool(2)
+            inst = await pool.acquire()
+            await asyncio.wait_for(pool.release(inst, force_recycle=True), timeout=0.5)
+            self.assertEqual(pool._created, 1)  # slot reserved for the replacement
+            relaunched.set()
+            # Another caller launches into the free slot without waiting on the relaunch.
+            other = await asyncio.wait_for(pool.acquire(), timeout=0.5)
+            await pool.wait_for_replacements()
+        self.assertIsNot(other, inst)
+        self.assertEqual(pool._created, 2)
+        self.assertEqual(pool.idle_count, 1)
+
+    async def test_failed_replacement_frees_its_slot(self):
+        class FailingRelaunchPool(FakeCamoufoxPool):
+            async def _launch_instance(self):
+                if self.launch_count:
+                    raise TimeoutError("Camoufox launch did not complete within 30s")
+                return await super()._launch_instance()
+
+        pool = FailingRelaunchPool(1)
+        pool._relaunch_with_retry = lambda: CamoufoxPool._relaunch_with_retry(pool, backoff_seconds=0)
+        inst = await pool.acquire()
+        await pool.release(inst, force_recycle=True)
+        await pool.wait_for_replacements()
+        self.assertEqual(pool._created, 0)
+        self.assertEqual(pool.idle_count, 0)
+
+    async def test_maintain_replaces_idle_instance_that_fails_probe(self):
+        class StalledContextBrowser:
+            async def new_context(self, **kwargs):
+                await asyncio.sleep(10)
+
+        with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 100), \
+             patch.object(settings, "CAMOUFOX_POOL_RECYCLE_SECONDS", 100000), \
+             patch.object(settings, "CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS", 0), \
+             patch.object(settings, "CAMOUFOX_POOL_PROBE_SECONDS", 60), \
+             patch.object(settings, "CAMOUFOX_POOL_PROBE_TIMEOUT_SECONDS", 0.05):
+            pool = FakeCamoufoxPool(1)
+            inst = await pool.acquire()
+            await pool.release(inst)
+            inst.browser = StalledContextBrowser()
+            inst.last_used_at = inst.created_at = time.monotonic() - 120
+            await pool.maintain()
+            await pool.wait_for_replacements()
+            self.assertEqual(pool.probe_failures_total, 1)
+            self.assertEqual(pool.close_count, 1)
+            self.assertEqual(pool._created, 1)
+            self.assertIsNot(await pool.acquire(), inst)
+
+    async def test_maintain_keeps_idle_instance_that_passes_probe(self):
+        with patch.object(settings, "CAMOUFOX_POOL_RECYCLE_USES", 100), \
+             patch.object(settings, "CAMOUFOX_POOL_RECYCLE_SECONDS", 100000), \
+             patch.object(settings, "CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS", 0), \
+             patch.object(settings, "CAMOUFOX_POOL_PROBE_SECONDS", 60):
+            pool = FakeCamoufoxPool(1)
+            inst = await pool.acquire()
+            await pool.release(inst)
+            inst.browser = FakeBrowser()
+            inst.last_used_at = inst.created_at = time.monotonic() - 120
+            await pool.maintain()
+            self.assertEqual(pool.probe_failures_total, 0)
+            self.assertGreater(inst.last_probe_at, 0)
+            self.assertIs(await pool.acquire(), inst)
 
     async def test_maintain_keeps_idle_instances_when_timeout_disabled(self):
         with patch.object(settings, "CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS", 0):
@@ -1075,6 +1155,35 @@ class TestBrowserPoolCancellation(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake._idle.qsize(), 1)
         self.assertEqual(pool.pool_stats()["busy"], 0)
         self.assertEqual(pool.pool_stats()["oldest_checkout_seconds"], 0)
+
+    async def test_stalled_warm_instance_fails_fast_and_is_recycled(self):
+        """A warm instance idle for hours took 20-50s+ to open a page, eating the whole budget."""
+        pool = BrowserPool()
+        fake = FakeCamoufoxPool(1)
+
+        class StalledBrowser(FakeBrowser):
+            async def new_context(self, **kwargs):
+                await asyncio.sleep(10)
+
+        async def launch():
+            fake.launch_count += 1
+            return _PooledCamoufox(cm=object(), browser=StalledBrowser(), created_at=time.time())
+
+        fake._launch_instance = launch
+        pool.camoufox_pool = fake
+        start = time.monotonic()
+        with patch.object(browser_module, "POOLED_SETUP_TIMEOUT_SECONDS", 0.1):
+            with self.assertRaises(TimeoutError) as ctx:
+                await pool._solve_with_pooled_camoufox(
+                    url="https://example.com", method="GET", post_data=None, cookies=None,
+                    timeout_ms=30000, headers=None, start_time=time.monotonic(),
+                    wait_selector=None, wait_delay_ms=None, capture_screenshot=False,
+                )
+        self.assertLess(time.monotonic() - start, 1)
+        self.assertIn("did not open a page", str(ctx.exception))
+        await fake.wait_for_replacements()
+        self.assertEqual(fake.recycles_total, 1)
+        self.assertEqual(fake.launch_count, 2)
 
     async def test_exhausted_pool_fails_fast_so_ephemeral_retry_gets_budget(self):
         pool = BrowserPool()
