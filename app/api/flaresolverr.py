@@ -59,10 +59,8 @@ async def flaresolverr_api(req: V1Request):
     start_ts = int(time.time() * 1000)
     cmd = req.cmd.lower() if req.cmd else ""
 
-    proxy_str = None
-    if req.proxy:
-        raw_p = req.proxy.get("url") if isinstance(req.proxy, dict) else str(req.proxy)
-        proxy_str = sanitize_proxy_url(raw_p)
+    raw_proxy = req.get_proxy_url()
+    proxy_str = sanitize_proxy_url(raw_proxy) if raw_proxy else None
 
     extra_opts = []
     if req.session:

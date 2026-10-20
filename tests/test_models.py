@@ -19,6 +19,21 @@ class TestV1RequestModels(unittest.TestCase):
         req4 = V1Request(cmd="request.get", url="http://example.com", proxy={"server": "http://proxy.com:8080", "username": "usr", "password": "pwd"})
         self.assertEqual(req4.get_proxy_url(), "http://usr:pwd@proxy.com:8080")
 
+    def test_prowlarr_null_proxy_means_no_proxy(self):
+        # Prowlarr sends this on every request when it has no proxy configured.
+        null_proxy = {"url": None, "username": None, "password": None}
+        req = V1Request(cmd="request.get", url="http://example.com", proxy=null_proxy)
+        self.assertIsNone(req.proxy)
+        self.assertIsNone(req.get_proxy_url())
+        self.assertIsNone(ScrapeRequest(url="http://example.com", proxy=null_proxy).proxy)
+        self.assertIsNone(V1Request(cmd="request.get", url="http://example.com", proxy={"url": ""}).proxy)
+        self.assertIsNone(V1Request(cmd="request.get", url="http://example.com", proxy="  ").proxy)
+
+    def test_proxy_null_credentials_are_ignored(self):
+        req = V1Request(cmd="request.get", url="http://example.com",
+                        proxy={"url": "http://proxy.com:8080", "username": None, "password": None})
+        self.assertEqual(req.get_proxy_url(), "http://proxy.com:8080")
+
     def test_proxy_object_normalization(self):
         req = V1Request(cmd="request.get", url="http://example.com", proxy=ProxyConfig(url="http://proxy.com:8080"))
         self.assertEqual(req.get_proxy_url(), "http://proxy.com:8080")
