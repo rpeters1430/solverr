@@ -43,6 +43,14 @@
       "allowedVersions": "<1.63"
     },
     {
+      "description": "Keep Python on 3.14 to prevent Camoufox Base85 decoding error during browser startup",
+      "matchPackageNames": [
+        "python",
+        "docker.io/library/python"
+      ],
+      "allowedVersions": "<3.15"
+    },
+    {
       "description": "Create updates immediately and consolidate updates requiring manual review",
       "matchPackageNames": [
         "*"
