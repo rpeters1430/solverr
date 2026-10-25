@@ -208,6 +208,16 @@ class TestCamoufoxPoolResilience(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(pool._idle.qsize(), 1)
             self.assertIs(await pool.acquire(), c)
 
+    async def test_maintain_noop_when_pool_empty(self):
+        pool = FakeCamoufoxPool(3)
+        self.assertEqual(pool._created, 0)
+        self.assertTrue(pool._idle.empty())
+        # Should return immediately without error or modifying state
+        await pool.maintain()
+        self.assertEqual(pool._created, 0)
+        self.assertEqual(pool.idle_retired_total, 0)
+        self.assertEqual(pool.dead_reclaimed_total, 0)
+
     async def test_recycle_does_not_hold_up_the_release(self):
         """A slow relaunch on a NAS used to keep the failed request waiting over a minute
         and hold the pool lock, stalling every other acquire()."""

@@ -155,6 +155,8 @@ class CamoufoxPool:
         """Drop idle instances whose browser died, and retire those idle past
         CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS. Both relaunch lazily on the next acquire().
         Then probe instances idle past CAMOUFOX_POOL_PROBE_SECONDS and replace any that stall."""
+        if self._created == 0 and self._idle.empty():
+            return
         idle_timeout = settings.CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS
         probe_every = settings.CAMOUFOX_POOL_PROBE_SECONDS
         now = time.monotonic()
@@ -188,6 +190,8 @@ class CamoufoxPool:
             self._created -= 1
             await self._close_instance(inst)
         if retire:
+            import gc
+            gc.collect()
             logger.info(f"[CamoufoxPool] Retired {len(retire)} idle browser instance(s) after {idle_timeout}s unused.")
         # Probed one at a time, out of the queue; an acquire() meanwhile waits at most the probe timeout.
         for inst in probe:

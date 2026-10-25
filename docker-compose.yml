@@ -22,7 +22,7 @@ services:
       - PORT=8191
       - HOST=0.0.0.0
       - LOG_LEVEL=INFO
-      - MAX_BROWSER_WORKERS=auto # Scales with CPU cores and RAM; capped at 2 in NAS mode
+      - MAX_BROWSER_WORKERS=auto # Scales with CPU cores and RAM; capped at 1 in NAS mode
       - NAS_MODE=true            # Conservative worker budgeting for UGREEN NASync / Synology / Unraid
       - HEADLESS=true
       - ENABLE_FAST_TLS=true
@@ -33,14 +33,14 @@ services:
       # - REDIS_URL=redis://redis:6379/0  # Shared cookie cache for horizontal scaling (see profile below)
       # - API_KEY=change-me                # Optional API key authentication for all endpoints
       # - CAPTCHA_SOLVER_API_KEY=          # Optional 2Captcha/CapSolver key for paid image challenge escalation
-      # - CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS=900  # Optional: close warm browsers unused this long to free RAM
+      # - CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS=120  # Optional: close warm browsers unused this long (default: 120s in NAS mode)
       # - FOLLOW_META_REFRESH=true         # Optional: follow short-delay <meta http-equiv="refresh"> redirects
       # - 'USER_PREFS={"network.dns.blockDotOnion": false}'  # Optional extra Firefox prefs (JSON)
     volumes:
       - ./data:/app/data
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8191/health', timeout=3)"]
-      interval: 30s
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8191/health"]
+      interval: 60s
       timeout: 5s
       retries: 3
       start_period: 30s

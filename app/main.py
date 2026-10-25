@@ -40,7 +40,7 @@ async def periodic_session_cleanup():
             logger.warning(f"Error in session cleanup task: {e}")
 
 # Short enough that a browser that died while idle is reclaimed before most solves would meet it.
-POOL_MAINTENANCE_INTERVAL_SECONDS = 30
+POOL_MAINTENANCE_INTERVAL_SECONDS = 60 if settings.NAS_MODE else 30
 
 
 async def periodic_pool_maintenance():
@@ -259,4 +259,4 @@ async def prometheus_metrics():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:app", host=settings.HOST, port=settings.PORT, reload=False)
+    uvicorn.run("app.main:app", host=settings.HOST, port=settings.PORT, reload=False, access_log=False)
