@@ -122,7 +122,7 @@ class Settings:
     RAM_PER_WORKER_GB: float = float(os.getenv("RAM_PER_WORKER_GB", "2.0" if NAS_MODE else "1.0"))
     RAM_RESERVED_GB: float = float(os.getenv("RAM_RESERVED_GB", "2.0"))
 
-    _max_nas_workers: int = 2 if NAS_MODE else 16
+    _max_nas_workers: int = 1 if NAS_MODE else 16
     _cpu_based_workers: int = min(_max_nas_workers, max(1, TOTAL_CPU_CORES))
     _usable_ram_gb: float = TOTAL_RAM_GB - RAM_RESERVED_GB
     _ram_based_workers: int = (
@@ -184,11 +184,15 @@ class Settings:
     CAMOUFOX_POOL_RECYCLE_SECONDS: int = int(os.getenv("CAMOUFOX_POOL_RECYCLE_SECONDS", "1800"))
     # Close warm instances left unused this long (0 keeps them until recycled); the pool relaunches
     # lazily on the next solve. Frees RAM on a NAS between bursts of indexer traffic.
-    CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS: int = int(os.getenv("CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS", "0"))
+    CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS: int = int(
+        os.getenv("CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS", "120" if NAS_MODE else "0")
+    )
     # Open and close a throwaway context on warm instances idle this long (0 disables); one that
     # doesn't answer within CAMOUFOX_POOL_PROBE_TIMEOUT_SECONDS is replaced in the background, so a
     # browser that went stale over hours of idling isn't discovered by the next real solve.
-    CAMOUFOX_POOL_PROBE_SECONDS: int = int(os.getenv("CAMOUFOX_POOL_PROBE_SECONDS", "300"))
+    CAMOUFOX_POOL_PROBE_SECONDS: int = int(
+        os.getenv("CAMOUFOX_POOL_PROBE_SECONDS", "0" if NAS_MODE else "300")
+    )
     CAMOUFOX_POOL_PROBE_TIMEOUT_SECONDS: float = float(os.getenv("CAMOUFOX_POOL_PROBE_TIMEOUT_SECONDS", "15"))
     # Under a container memory limit: retire an instance on release once the working set passes this
     # share of the limit (0 disables), and skip warm replacements below MIN_REPLACE_HEADROOM_MB.

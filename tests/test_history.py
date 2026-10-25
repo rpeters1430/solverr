@@ -31,3 +31,13 @@ class TestRequestHistory(unittest.IsolatedAsyncioTestCase):
                 contents = db.read()
             self.assertNotIn(b"sensitive", contents)
             self.assertNotIn(b"secret", contents)
+
+    async def test_zero_limit_disables_history_and_creates_no_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "history_disabled.sqlite")
+            history = RequestHistory(path, limit=0)
+            await history.record("https://example.com", "tier1_fast_tls", "success", 10, 200)
+            self.assertFalse(os.path.exists(path))
+            self.assertEqual(await history.recent(), [])
+            summary = await history.summary()
+            self.assertEqual(summary["total"], 0)

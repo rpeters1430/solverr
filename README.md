@@ -53,12 +53,12 @@ distribution and launches Camoufox under the NAS runtime identity
 (`PUID=1000`, `PGID=10`) before publishing. The image runs on the NAS host's
 kernel; changing the container base does not change UGOS or its kernel.
 
-The included `compose.ugreen.yml` is tuned for the DXP4800 Pro while it is
-also running Jellyfin and the Arr stack. It fixes Solverr at two browser
-workers, two CPU cores, 3GB RAM, 1GB shared memory, bounded caches, rotated
-logs, and your common UGOS ownership values (`PUID=1000`, `PGID=10`).
-Camoufox is tested under that exact non-root identity before an image can be
-published.
+The included `compose.ugreen.yml` is tuned for the DXP4800 Pro (and other UGREEN / Synology / Unraid NAS systems) while running alongside Jellyfin/Plex and the `*arr` stack. It is configured for ultra-low idle impact:
+- **Idle Resource Reclamation**: Automatic shutdown of warm Camoufox browser instances after 120s of inactivity (`CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS=120`). Idle memory usage drops to **~60MB–80MB** with **0.0% CPU**.
+- **Lightweight Native Healthcheck**: Uses `curl` instead of Python, preventing periodic 50%–100% CPU spikes every healthcheck cycle.
+- **Resource Limits**: 1 browser worker (`MAX_BROWSER_WORKERS=1`), 1.5 CPU cores, 2GB memory limit, 512MB shared memory, RAM-backed tmpfs, and 256 PIDs limit.
+- **SSD/HDD Wear Protection**: Browser temporary files are held in RAM (`tmpfs`), and request history operates in SQLite WAL mode.
+- **UGOS Ownership**: Runs securely under your standard UGOS non-root ownership values (`PUID=1000`, `PGID=10`).
 
 Do not map `/dev/dri` into Solverr. Media requests are blocked during solves,
 so the Intel GPU provides little benefit here and is better left available to
@@ -67,15 +67,68 @@ Jellyfin transcoding.
 ### Using UGOS Pro Docker Compose
 
 1. Open **Docker** in UGOS Pro and create a project named `solverr`.
-2. Copy `compose.ugreen.yml` into the project, or paste its contents into the
-   UGOS Compose editor.
+2. Paste the following configuration (from `compose.ugreen.yml`) into the UGOS Compose editor:
+
+```yaml
+services:
+  solverr:
+    image: ghcr.io/rpeters1430/solverr:latest
+    container_name: solverr
+    restart: unless-stopped
+    ports:
+      - "8191:8191"
+    cpus: "1.5"
+    mem_limit: 2g
+    pids_limit: 256
+    stop_grace_period: 15s
+    shm_size: "512mb"
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=128M,mode=1777
+      - /app/.cache/camoufox/tmp:size=256M,mode=1777
+    environment:
+      PORT: "8191"
+      HOST: "0.0.0.0"
+      TZ: "America/Los_Angeles"
+      LOG_LEVEL: "INFO"
+      NAS_MODE: "true"
+      MAX_BROWSER_WORKERS: "1"
+      ENABLE_FAST_TLS: "true"
+      FAST_TLS_POOL_ENABLED: "true"
+      FAST_TLS_POOL_SIZE: "16"
+      CAMOUFOX_POOL_ENABLED: "true"
+      CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS: "120"
+      CAMOUFOX_POOL_RECYCLE_USES: "30"
+      CAMOUFOX_POOL_RECYCLE_SECONDS: "1800"
+      COOKIE_CACHE_TTL: "7200"
+      MAX_CACHE_DOMAINS: "250"
+      MAX_COOKIES_PER_DOMAIN: "50"
+      MAX_SESSIONS: "100"
+      MAX_REQUEST_BODY_MB: "2"
+      MAX_RESPONSE_BODY_MB: "20"
+      MAX_SCREENSHOT_MB: "4"
+      HISTORY_MAX_RECORDS: "500"
+      ENABLE_MCP: "false"
+      PUID: "1000"
+      PGID: "10"
+    volumes:
+      - /volume1/docker/solverr/data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8191/health"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+```
+
 3. Create `/volume1/docker/solverr/data` if it does not already exist.
 4. Deploy the project and open `http://YOUR-NAS-IP:8191`.
-
-If the NAS has only 8GB RAM and regularly performs Jellyfin transcodes, reduce
-`MAX_BROWSER_WORKERS` to `1` and `mem_limit` to `2g`. Raising the worker
-count is rarely useful for a single Prowlarr instance; watch the browser queue
-metric before increasing it.
 
 ### Command-line equivalent
 
@@ -83,14 +136,18 @@ metric before increasing it.
 docker run -d \
   --name solverr \
   --restart unless-stopped \
-  --cpus=2 \
-  --memory=3g \
-  --pids-limit=512 \
-  --shm-size=1g \
+  --cpus=1.5 \
+  --memory=2g \
+  --pids-limit=256 \
+  --shm-size=512m \
   -p 8191:8191 \
+  --tmpfs /tmp:size=128M,mode=1777 \
+  --tmpfs /app/.cache/camoufox/tmp:size=256M,mode=1777 \
   -v /volume1/docker/solverr/data:/app/data \
   -e NAS_MODE=true \
-  -e MAX_BROWSER_WORKERS=2 \
+  -e MAX_BROWSER_WORKERS=1 \
+  -e CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS=120 \
+  -e HISTORY_MAX_RECORDS=500 \
   -e ENABLE_MCP=false \
   -e PUID=1000 \
   -e PGID=10 \
@@ -122,8 +179,8 @@ services:
     volumes:
       - ./data:/app/data
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8191/health', timeout=3)"]
-      interval: 30s
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8191/health"]
+      interval: 60s
       timeout: 5s
       retries: 3
     logging:

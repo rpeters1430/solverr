@@ -13,12 +13,15 @@ from app.config import settings
 class RequestHistory:
     def __init__(self, path: str | None = None, limit: int | None = None):
         self.path = path or settings.HISTORY_DB_PATH
-        self.limit = max(1, limit if limit is not None else settings.HISTORY_MAX_RECORDS)
+        raw_limit = limit if limit is not None else settings.HISTORY_MAX_RECORDS
+        self.limit = max(0, raw_limit)
         self._lock = asyncio.Lock()
 
     def _connect(self):
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
         conn = sqlite3.connect(self.path, timeout=5)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("""CREATE TABLE IF NOT EXISTS requests (
             id INTEGER PRIMARY KEY, timestamp REAL NOT NULL, domain TEXT NOT NULL,
             tier TEXT NOT NULL, outcome TEXT NOT NULL, http_status INTEGER,
@@ -29,6 +32,8 @@ class RequestHistory:
     async def record(self, url: str, tier: str, outcome: str, duration_ms: float,
                      http_status: int | None = None, challenge: str | None = None,
                      failure_type: str | None = None):
+        if self.limit <= 0:
+            return
         # Hostname drops path/query/userinfo; do not persist arbitrary error messages.
         domain = (urlsplit(url).hostname or "unknown").lower()[:253]
         row = (time.time(), domain, tier[:40], outcome[:20], http_status,
@@ -45,6 +50,8 @@ class RequestHistory:
     async def recent(self, limit: int = 100, domain: str | None = None,
                      outcome: str | None = None, tier: str | None = None,
                      hours: int = 24):
+        if self.limit <= 0 or not os.path.exists(self.path):
+            return []
         async with self._lock:
             return await asyncio.to_thread(self._recent, min(max(limit, 1), 500), domain, outcome, tier, hours)
 
@@ -68,6 +75,16 @@ class RequestHistory:
 
     async def summary(self, domain: str | None = None, outcome: str | None = None,
                       tier: str | None = None, hours: int = 24):
+        if self.limit <= 0 or not os.path.exists(self.path):
+            window = min(max(hours, 1), 168)
+            bucket_cnt = min(24, window)
+            start_t = time.time() - window * 3600
+            step = window * 3600 / bucket_cnt
+            return {
+                "hours": [{"timestamp": start_t + i * step, "success": 0, "failed": 0} for i in range(bucket_cnt)],
+                "window_hours": window, "total": 0, "failed": 0, "p95_ms": None,
+                "tier_counts": {}, "top_failed_domains": [],
+            }
         async with self._lock:
             return await asyncio.to_thread(self._summary, domain, outcome, tier, hours)
 
