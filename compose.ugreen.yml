@@ -5,16 +5,16 @@ services:
     restart: unless-stopped
     ports:
       - "8191:8191"
-    cpus: "1.5"
+    cpus: "2.0"
     mem_limit: 2g
-    pids_limit: 256
+    pids_limit: 512
     stop_grace_period: 15s
-    shm_size: "512mb"
+    shm_size: "1gb"
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:size=128M,mode=1777
-      - /app/.cache/camoufox/tmp:size=256M,mode=1777
+      - /tmp:size=512M,mode=1777
+      - /app/.cache/camoufox/tmp:size=512M,mode=1777
     environment:
       PORT: "8191"
       HOST: "0.0.0.0"
