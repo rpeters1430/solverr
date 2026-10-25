@@ -68,7 +68,7 @@ async def extract_sitekey(page: Page, selectors: List[str]) -> Optional[Tuple[st
 async def uses_recaptcha_enterprise(page: Page) -> bool:
     """reCAPTCHA Enterprise tokens come from a different endpoint; a standard one is rejected."""
     try:
-        return bool(await page.evaluate("""() => [...document.scripts].some((s) => /recaptcha\/enterprise\.js/.test(s.src || ''))"""))
+        return bool(await page.evaluate(r"""() => [...document.scripts].some((s) => /recaptcha\/enterprise\.js/.test(s.src || ''))"""))
     except Exception:
         return False
 

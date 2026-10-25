@@ -56,7 +56,7 @@ kernel; changing the container base does not change UGOS or its kernel.
 The included `compose.ugreen.yml` is tuned for the DXP4800 Pro (and other UGREEN / Synology / Unraid NAS systems) while running alongside Jellyfin/Plex and the `*arr` stack. It is configured for ultra-low idle impact:
 - **Idle Resource Reclamation**: Automatic shutdown of warm Camoufox browser instances after 120s of inactivity (`CAMOUFOX_POOL_IDLE_TIMEOUT_SECONDS=120`). Idle memory usage drops to **~60MB–80MB** with **0.0% CPU**.
 - **Lightweight Native Healthcheck**: Uses `curl` instead of Python, preventing periodic 50%–100% CPU spikes every healthcheck cycle.
-- **Resource Limits**: 1 browser worker (`MAX_BROWSER_WORKERS=1`), 1.5 CPU cores, 2GB memory limit, 512MB shared memory, RAM-backed tmpfs, and 256 PIDs limit.
+- **Resource Limits**: 1 browser worker (`MAX_BROWSER_WORKERS=1`), 2.0 CPU cores, 2GB memory limit, 1GB shared memory, RAM-backed tmpfs (512MB), and 512 PIDs limit.
 - **SSD/HDD Wear Protection**: Browser temporary files are held in RAM (`tmpfs`), and request history operates in SQLite WAL mode.
 - **UGOS Ownership**: Runs securely under your standard UGOS non-root ownership values (`PUID=1000`, `PGID=10`).
 
@@ -77,16 +77,16 @@ services:
     restart: unless-stopped
     ports:
       - "8191:8191"
-    cpus: "1.5"
+    cpus: "2.0"
     mem_limit: 2g
-    pids_limit: 256
+    pids_limit: 512
     stop_grace_period: 15s
-    shm_size: "512mb"
+    shm_size: "1gb"
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:size=128M,mode=1777
-      - /app/.cache/camoufox/tmp:size=256M,mode=1777
+      - /tmp:size=512M,mode=1777
+      - /app/.cache/camoufox/tmp:size=512M,mode=1777
     environment:
       PORT: "8191"
       HOST: "0.0.0.0"
@@ -136,13 +136,13 @@ services:
 docker run -d \
   --name solverr \
   --restart unless-stopped \
-  --cpus=1.5 \
+  --cpus=2.0 \
   --memory=2g \
-  --pids-limit=256 \
-  --shm-size=512m \
+  --pids-limit=512 \
+  --shm-size=1g \
   -p 8191:8191 \
-  --tmpfs /tmp:size=128M,mode=1777 \
-  --tmpfs /app/.cache/camoufox/tmp:size=256M,mode=1777 \
+  --tmpfs /tmp:size=512M,mode=1777 \
+  --tmpfs /app/.cache/camoufox/tmp:size=512M,mode=1777 \
   -v /volume1/docker/solverr/data:/app/data \
   -e NAS_MODE=true \
   -e MAX_BROWSER_WORKERS=1 \
