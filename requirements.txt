@@ -1,6 +1,6 @@
 fastapi==0.162.0
 uvicorn[standard]==0.54.0
-curl_cffi==0.16.3
+curl_cffi==0.17.0
 # Keep Playwright on the range supported by currently released Camoufox builds.
 playwright==1.62.0
 # Docker builds upgrade this minimum to the latest PyPI release, including prereleases.
