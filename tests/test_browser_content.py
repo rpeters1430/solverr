@@ -130,6 +130,9 @@ class TestSessionStorageInBrowser(unittest.IsolatedAsyncioTestCase):
     def test_context_options_restore_local_storage(self):
         from app.solver.browser.browser import _context_options
         self.assertEqual(_context_options(None), {"service_workers": "block"})
+        self.assertEqual(_context_options(None, {"server": "http://127.0.0.1:8193"}), {
+            "service_workers": "block", "proxy": {"server": "http://127.0.0.1:8193"}
+        })
         opts = _context_options({"local": {"https://a.test": {"k": "v"}}, "session": {}})
         self.assertEqual(opts["storage_state"]["origins"], [
             {"origin": "https://a.test", "localStorage": [{"name": "k", "value": "v"}]}

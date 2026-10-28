@@ -1,7 +1,8 @@
 import unittest
+import socket
 from unittest.mock import patch
 from app.config import settings
-from app.security import check_target_url, check_target_url_async, SSRFBlockedError
+from app.security import check_target_url, check_target_url_async, resolve_target_host_async, SSRFBlockedError, _is_blocked_ip
 
 
 class TestSSRFProtection(unittest.TestCase):
@@ -79,6 +80,37 @@ class TestAsyncSSRFProtection(unittest.IsolatedAsyncioTestCase):
             (2, 1, 6, "", ("93.184.216.34", 0))
         ]):
             await check_target_url_async("https://example.com/")
+
+    async def test_dns_results_reject_a_mixed_public_and_loopback_answer(self):
+        async def resolver(host, port, **kwargs):
+            return [
+                (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", port)),
+                (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", port)),
+            ]
+
+        with self.assertRaises(SSRFBlockedError):
+            await resolve_target_host_async("mixed.example", 443, resolver=resolver)
+
+    async def test_allow_private_networks_retains_precedence_but_denied_hosts_win(self):
+        async def private_resolver(host, port, **kwargs):
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("10.0.0.7", port))]
+
+        with patch.object(settings, "ALLOW_PRIVATE_NETWORKS", True):
+            result = await resolve_target_host_async("lan.example", 443, resolver=private_resolver)
+            self.assertEqual(result.addresses[0][4][0], "10.0.0.7")
+
+        with patch.object(settings, "ALLOW_PRIVATE_NETWORKS", True), \
+             patch.object(settings, "DENIED_HOSTS", {"lan.example"}):
+            with self.assertRaises(SSRFBlockedError):
+                await resolve_target_host_async("lan.example", 443, resolver=private_resolver)
+
+    def test_ipv4_ipv6_and_reserved_address_policy(self):
+        for address in ("127.0.0.1", "10.0.0.1", "169.254.1.1", "::1", "fe80::1", "240.0.0.1"):
+            with self.subTest(address=address):
+                self.assertTrue(_is_blocked_ip(address))
+        for address in ("93.184.216.34", "2606:4700:4700::1111"):
+            with self.subTest(address=address):
+                self.assertFalse(_is_blocked_ip(address))
 
 
 class TestProxySSRFProtection(unittest.IsolatedAsyncioTestCase):

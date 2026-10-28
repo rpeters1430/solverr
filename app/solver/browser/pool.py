@@ -5,6 +5,7 @@ from typing import Any, Callable, List, Optional, Tuple
 
 from app.config import cgroup_memory_usage, settings
 from app.solver.captcha_solver import captcha_solver
+from app.egress_proxy import egress_proxy
 from app.solver.browser.models import _PooledCamoufox
 
 try:
@@ -26,6 +27,8 @@ CAMOUFOX_CLOSE_TIMEOUT_SECONDS = 10
 PROXY_SAFETY_PREFS = {
     "network.proxy.failover_direct": False,
     "network.proxy.socks_remote_dns": True,
+    "network.proxy.allow_hijacking_localhost": True,
+    "network.proxy.no_proxies_on": "",
 }
 
 
@@ -44,7 +47,7 @@ def browser_is_connected(browser: Any) -> bool:
 
 
 class CamoufoxPool:
-    """Bounded pool of warm, no-proxy Camoufox processes, handing out a fresh context per solve.
+    """Bounded pool of warm Camoufox processes, handing out a fresh egress-routed context per solve.
 
     Instances are recycled after N uses or N seconds so one fingerprint isn't reused forever.
     """
@@ -288,6 +291,7 @@ class CamoufoxPool:
     async def _launch_instance(self) -> _PooledCamoufox:
         cm = AsyncCamoufox(
             headless=settings.HEADLESS,
+            proxy={"server": egress_proxy.url},
             humanize=True,
             disable_coop=True,
             os="linux",

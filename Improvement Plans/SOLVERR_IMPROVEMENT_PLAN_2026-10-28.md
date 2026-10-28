@@ -38,11 +38,11 @@
 - Create: `tests/test_egress_proxy.py`
 - Reference: `Improvement Plans/DNS_REBINDING_MITIGATION_PLAN.md`
 
-- [ ] Write deterministic tests using a controlled resolver that changes a hostname from public to loopback between lookups; assert the loopback listener receives no connection.
-- [ ] Cover public, loopback, RFC1918, link-local, reserved, IPv4, IPv6, mixed DNS answers, resolver errors, and the configured allow/deny precedence.
-- [ ] Implement one loopback-only policy-enforcing egress proxy. Resolve each destination once, validate every returned address, and connect directly to a validated address. Support HTTP absolute-form requests and HTTPS CONNECT tunnels while preserving end-to-end TLS.
-- [ ] Route default Fast TLS and Camoufox traffic, redirects, and browser subresources through that egress path. Keep explicit external proxies documented as trusted.
-- [ ] Test concurrent requests to the same hostname, DNS rotation, cancellation, redirects, HTTP, and HTTPS CONNECT.
+- [x] Write deterministic tests using a controlled resolver that changes a hostname from public to loopback between lookups; assert the loopback listener receives no connection.
+- [x] Cover public, loopback, RFC1918, link-local, reserved, IPv4, IPv6, mixed DNS answers, resolver errors, and the configured allow/deny precedence.
+- [x] Implement one loopback-only policy-enforcing egress proxy. Resolve each destination once, validate every returned address, and connect directly to a validated address. Support HTTP absolute-form requests and HTTPS CONNECT tunnels while preserving end-to-end TLS.
+- [x] Route default Fast TLS and Camoufox traffic, redirects, and browser subresources through that egress path. Keep explicit external proxies documented as trusted.
+- [x] Test concurrent requests to the same hostname, DNS rotation, cancellation, redirects, HTTP, and HTTPS CONNECT.
 - [ ] Build and exercise the container as root and with `PUID=1000` / `PGID=10`; verify FlareSolverr compatibility, user-supplied proxies, health checks, and shutdown.
 - [ ] Update the SSRF documentation and the status of CR-011 only after both egress paths pass the integration checks.
 
@@ -82,9 +82,9 @@
 **Files:**
 - Review: GitHub PR #127, `renovate/safe-non-major-dependencies`
 
-- [ ] Confirm PR #127's CI is green for pytest 9.2.0 and the GitHub Actions Python patch update.
-- [ ] Check benchmark/test compatibility and merge the PR if the checks pass; otherwise record the failing check and adjust the update in that PR.
-- [ ] Keep runtime browser dependencies pinned or version-reviewed separately; do not combine unrelated Camoufox, Playwright, or curl_cffi upgrades into this dependency-only change.
+- [x] Confirm PR #127's CI is green for pytest 9.2.0 and the GitHub Actions Python patch update.
+- [x] Check benchmark/test compatibility and merge the PR if the checks pass; otherwise record the failing check and adjust the update in that PR.
+- [x] Keep runtime browser dependencies pinned or version-reviewed separately; do not combine unrelated Camoufox, Playwright, or curl_cffi upgrades into this dependency-only change.
 
 **Done when:** PR #127 is merged or has a documented blocker and next action.
 

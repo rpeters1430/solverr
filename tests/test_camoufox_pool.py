@@ -381,10 +381,12 @@ class TestEphemeralCamoufoxGeoip(unittest.IsolatedAsyncioTestCase):
     async def test_geoip_enabled_when_proxy_set(self):
         await self._solve(pw_proxy={"server": "http://proxy.example.com:8080"})
         self.assertTrue(FakeAsyncCamoufoxCtx.captured_kwargs[-1]["geoip"])
+        self.assertEqual(FakeAsyncCamoufoxCtx.captured_kwargs[-1]["proxy"], {"server": "http://proxy.example.com:8080"})
 
     async def test_geoip_disabled_without_proxy(self):
         await self._solve(pw_proxy=None)
         self.assertFalse(FakeAsyncCamoufoxCtx.captured_kwargs[-1]["geoip"])
+        self.assertEqual(FakeAsyncCamoufoxCtx.captured_kwargs[-1]["proxy"], {"server": "http://127.0.0.1:8193"})
 
     async def test_user_prefs_are_passed_with_proxy_safety_enforced(self):
         prefs = {"network.dns.blockDotOnion": False, "network.proxy.failover_direct": True, "test.int": 7}
@@ -395,6 +397,8 @@ class TestEphemeralCamoufoxGeoip(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(passed["test.int"], 7)
         self.assertIs(passed["network.proxy.failover_direct"], False)
         self.assertIs(passed["network.proxy.socks_remote_dns"], True)
+        self.assertIs(passed["network.proxy.allow_hijacking_localhost"], True)
+        self.assertEqual(passed["network.proxy.no_proxies_on"], "")
         self.assertIsNot(passed, prefs)
 
     async def test_geoip_respects_config_toggle(self):
@@ -1063,6 +1067,23 @@ class TestIpBlockSkipsSameIpRetry(unittest.IsolatedAsyncioTestCase):
 
 
 class TestBrowserPoolCancellation(unittest.IsolatedAsyncioTestCase):
+    async def test_pooled_browser_context_uses_local_egress_for_all_page_requests(self):
+        pool = BrowserPool()
+        fake = FakeCamoufoxPoolWithBrowser(1)
+        pool.camoufox_pool = fake
+        FakeBrowser.context_kwargs.clear()
+        solution = SolutionModel(url="https://example.com", status=200, cookies=[], userAgent="fake-ua")
+
+        with patch.object(pool, "_execute_solve_flow", return_value=solution):
+            result = await pool._solve_with_pooled_camoufox(
+                url="https://example.com", method="GET", post_data=None, cookies=None,
+                timeout_ms=5000, headers=None, start_time=time.monotonic(),
+                wait_selector=None, wait_delay_ms=None, capture_screenshot=False,
+            )
+
+        self.assertEqual(result.status, 200)
+        self.assertEqual(FakeBrowser.context_kwargs[-1]["proxy"], {"server": "http://127.0.0.1:8193"})
+
     async def test_disconnect_after_setup_recycles_browser(self):
         pool = BrowserPool()
         fake = FakeCamoufoxPoolWithBrowser(1)

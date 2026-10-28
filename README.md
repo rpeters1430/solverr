@@ -442,6 +442,7 @@ On by default; set `ENABLE_MCP=false` to disable.
 | `RAM_PER_WORKER_GB` | `1.0` | RAM budgeted per browser worker when auto-tuning `MAX_BROWSER_WORKERS` |
 | `RAM_RESERVED_GB` | `2.0` | RAM reserved for the OS/other containers and excluded from auto-tuning's worker budget |
 | `ENABLE_FAST_TLS` | `true` | Enables 50ms TLS impersonation fast path |
+| `EGRESS_PROXY_PORT` | `8193` | Internal loopback-only port used to enforce outbound DNS/IP policy for Solverr HTTP clients and browser traffic. Keep this port private and unpublished. |
 | `FAST_TLS_ROTATE` | `true` | Rotate the TLS/UA fingerprint per-domain across a matched profile pool instead of one fixed fingerprint |
 | `CAMOUFOX_POOL_ENABLED` | `true` | Reuse warm Camoufox processes across no-proxy solves instead of spawning one per request |
 | `CAMOUFOX_POOL_RECYCLE_USES` | `40` | Recycle a pooled browser instance after this many solves |
@@ -486,6 +487,8 @@ On by default; set `ENABLE_MCP=false` to disable.
 | `MCP_ALLOWED_ORIGINS` | (empty) | Comma-separated Origin header values `/mcp` accepts beyond `localhost`/`127.0.0.1`. Only consulted when `API_KEY` is unset |
 | `HEADLESS` | `true` | Run browser in headless mode |
 | `LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+
+Caller-supplied or fallback external proxies are treated as trusted: Solverr cannot verify which address a remote proxy reaches after it resolves a target hostname. Fast TLS, Camoufox browser requests, and raw media downloads use the internal `EGRESS_PROXY_PORT` listener; keep this port unpublished.
 
 ---
 
