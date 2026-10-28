@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 15702)
-Total output lines: 1234
-
 import asyncio
 import base64
 import json
@@ -503,7 +500,310 @@ class BrowserPool:
         capture_screenshot: bool,
         screenshot_full_page: bool = False,
         screenshot_selector: Optional[str] = None,
-        extrac…3702 tokens truncated…if check_content and active_wall and active_challenge:
+        extract_records: Optional[Dict[str, Any]] = None,
+        follow_meta_refresh: bool = False,
+        browser_storage: Optional[Dict[str, Any]] = None,
+        capture_storage: bool = False,
+        disable_media: bool = False,
+        debug_capture: Optional[Tuple[str, ...]] = None,
+        solve_embedded_captchas: bool = True,
+    ) -> SolutionModel:
+        # Leave the ephemeral retry its minimum window (plus launch slack) out of the caller's budget.
+        remaining_s = timeout_ms / 1000.0 - (time.monotonic() - start_time)
+        wait_timeout = min(POOL_ACQUIRE_TIMEOUT_SECONDS, max(1.0, remaining_s - MIN_RETRY_TIMEOUT_MS / 1000.0 - 1.0))
+        try:
+            inst = await self.camoufox_pool.acquire(wait_timeout=wait_timeout)
+        except asyncio.TimeoutError as e:
+            raise TimeoutError(
+                f"No warm Camoufox instance became available within {wait_timeout:.0f}s"
+            ) from e
+        self._checkout_at[id(inst)] = time.monotonic()
+        context = None
+        page = None
+        setup_ok = False
+        disconnected = False
+        try:
+            logger.info(f"[CamoufoxPool] Checked out warm instance (use #{inst.uses}) for {url}...")
+            setup_started = time.monotonic()
+
+            async def open_page():
+                nonlocal context, page
+                if hasattr(inst.browser, "new_context"):
+                    context = await inst.browser.new_context(
+                        **_context_options(browser_storage, {"server": egress_proxy.url})
+                    )
+                elif inst.browser.contexts:
+                    context = inst.browser.contexts[0]
+                else:
+                    context = inst.browser
+                page = await context.new_page()
+                return await page.evaluate("() => navigator.userAgent")
+
+            try:
+                active_ua = await asyncio.wait_for(open_page(), timeout=POOLED_SETUP_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError as e:
+                raise TimeoutError(
+                    f"Pooled Camoufox instance did not open a page within {POOLED_SETUP_TIMEOUT_SECONDS}s"
+                ) from e
+            setup_s = time.monotonic() - setup_started
+            if setup_s > 5:
+                logger.info(f"[CamoufoxPool] Opening a page on the warm instance took {setup_s:.1f}s.")
+            # The process answered JS, so later failures are page-level and shouldn't evict it.
+            setup_ok = True
+            return await self._execute_solve_flow(
+                context=context,
+                page=page,
+                url=url,
+                method=method,
+                post_data=post_data,
+                cookies=cookies,
+                timeout_ms=timeout_ms,
+                deadline=start_time + timeout_ms / 1000.0,
+                active_ua=active_ua or settings.DEFAULT_USER_AGENT,
+                headers=headers,
+                start_time=start_time,
+                wait_selector=wait_selector,
+                wait_delay_ms=wait_delay_ms,
+                capture_screenshot=capture_screenshot, screenshot_full_page=screenshot_full_page,
+                screenshot_selector=screenshot_selector, extract_records=extract_records,
+                follow_meta_refresh=follow_meta_refresh,
+                browser_storage=browser_storage, capture_storage=capture_storage,
+                disable_media=disable_media, debug_capture=debug_capture,
+                solve_embedded_captchas=solve_embedded_captchas,
+            )
+        except BaseException as exc:
+            disconnected = _is_browser_disconnected(exc)
+            raise
+        finally:
+            # Shielded: a client disconnect followed by the tier timeout cancels this task twice,
+            # and a cancel landing mid-cleanup used to skip release() and leak the pool slot for good.
+            cleanup = asyncio.ensure_future(self._release_pooled(inst, context, page, setup_ok, disconnected))
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                if not cleanup.done():
+                    self._background_cleanups.add(cleanup)
+                    cleanup.add_done_callback(self._background_cleanups.discard)
+                raise
+
+    async def _release_pooled(self, inst: Any, context: Any, page: Any, setup_ok: bool, disconnected: bool):
+        try:
+            # An instance that never answered is recycled anyway; closing its page/context first
+            # would only add up to two more cleanup timeouts to the failed request.
+            if page and setup_ok:
+                try:
+                    await asyncio.wait_for(page.close(), timeout=POOLED_CLEANUP_TIMEOUT_SECONDS)
+                except Exception:
+                    disconnected = True
+            if context and context is not inst.browser and setup_ok:
+                try:
+                    await asyncio.wait_for(context.close(), timeout=POOLED_CLEANUP_TIMEOUT_SECONDS)
+                except Exception:
+                    disconnected = True
+            # A failure before setup_ok (or a close that hung) means the process may be wedged, so recycle it.
+            await self.camoufox_pool.release(
+                inst, force_recycle=not setup_ok or disconnected or not _browser_is_connected(inst.browser)
+            )
+        except Exception as e:
+            logger.warning(f"[CamoufoxPool] Release of pooled instance failed: {e}")
+        finally:
+            self._checkout_at.pop(id(inst), None)
+
+    async def _solve_with_ephemeral_camoufox(
+        self,
+        url: str,
+        method: str,
+        post_data: Optional[str],
+        cookies: Optional[List[CookieModel]],
+        pw_proxy: Optional[Dict[str, str]],
+        user_agent: Optional[str],
+        timeout_ms: int,
+        active_ua: str,
+        headers: Optional[Dict[str, str]],
+        start_time: float,
+        wait_selector: Optional[str],
+        wait_delay_ms: Optional[int],
+        capture_screenshot: bool,
+        screenshot_full_page: bool = False,
+        screenshot_selector: Optional[str] = None,
+        extract_records: Optional[Dict[str, Any]] = None,
+        follow_meta_refresh: bool = False,
+        browser_storage: Optional[Dict[str, Any]] = None,
+        capture_storage: bool = False,
+        disable_media: bool = False,
+        debug_capture: Optional[Tuple[str, ...]] = None,
+        solve_embedded_captchas: bool = True,
+    ) -> SolutionModel:
+        """Non-pooled launch for requests with their own proxy or user_agent, both fixed at launch."""
+        # timeout_ms is what's left when this attempt starts, so its clock starts here (launch included).
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        use_geoip = bool(pw_proxy) and settings.CAMOUFOX_GEOIP_ON_PROXY
+        logger.info(f"[CamoufoxEngine] Spawning ephemeral Camoufox stealth Firefox solve for {url} (proxy={'yes' if pw_proxy else 'no'}, custom_ua={'yes' if user_agent else 'no'}, geoip={'yes' if use_geoip else 'no'})...")
+        async with AsyncCamoufox(
+            headless=settings.HEADLESS,
+            proxy=pw_proxy or {"server": egress_proxy.url},
+            geoip=use_geoip,
+            humanize=True,
+            disable_coop=True,
+            os="linux",
+            config={'forceScopeAccess': True},
+            firefox_user_prefs=firefox_user_prefs(),
+            main_world_eval=captcha_solver.enabled,
+            i_know_what_im_doing=True
+        ) as browser_instance:
+            if hasattr(browser_instance, "new_context"):
+                context_opts: Dict[str, Any] = _context_options(
+                    browser_storage, pw_proxy or {"server": egress_proxy.url}
+                )
+                if user_agent:
+                    context_opts["user_agent"] = user_agent
+                context = await browser_instance.new_context(**context_opts)
+            elif hasattr(browser_instance, "contexts") and browser_instance.contexts:
+                context = browser_instance.contexts[0]
+            else:
+                context = browser_instance
+            page = await context.new_page()
+            # Report the UA the page really sent: Camoufox generates its own, and cf_clearance is bound to it.
+            # If it can't be read, report only a caller-pinned UA - never DEFAULT_USER_AGENT, which
+            # Camoufox didn't send and would get cached as a false clearance binding.
+            try:
+                active_ua = await page.evaluate("() => navigator.userAgent") or (user_agent or "")
+            except Exception:
+                active_ua = user_agent or ""
+            return await self._execute_solve_flow(
+                context=context,
+                page=page,
+                url=url,
+                method=method,
+                post_data=post_data,
+                cookies=cookies,
+                timeout_ms=timeout_ms,
+                deadline=deadline,
+                active_ua=active_ua,
+                proxy_url=pw_proxy["server"] if pw_proxy else None,
+                headers=headers,
+                start_time=start_time,
+                wait_selector=wait_selector,
+                wait_delay_ms=wait_delay_ms,
+                capture_screenshot=capture_screenshot, screenshot_full_page=screenshot_full_page,
+                screenshot_selector=screenshot_selector, extract_records=extract_records,
+                follow_meta_refresh=follow_meta_refresh,
+                browser_storage=browser_storage, capture_storage=capture_storage,
+                disable_media=disable_media, debug_capture=debug_capture,
+                solve_embedded_captchas=solve_embedded_captchas,
+            )
+
+    async def _preload_context(self, context, page, url, cookies, browser_storage, disable_media, debug_capture):
+        pw_cookies = build_playwright_cookies(url, cookies)
+        if pw_cookies:
+            try:
+                await context.add_cookies(pw_cookies)
+                logger.debug(f"[BrowserPool] Pre-loaded {len(pw_cookies)} cookie(s) into browser context")
+            except Exception as e:
+                logger.warning(f"[BrowserPool] Error pre-loading cookies: {e}")
+
+        await install_media_blocking(context, disable_media=disable_media)
+        cf_capture_key = await install_cloudflare_capture(context) if captcha_solver.enabled else None
+
+        capture = DebugCapture(debug_capture) if debug_capture else None
+        if capture:
+            capture.attach(page)
+
+        saved_session_storage = (browser_storage or {}).get("session") or {}
+        if saved_session_storage:
+            try:
+                await context.add_init_script(
+                    script=f"({_RESTORE_SESSION_STORAGE_JS})({json.dumps(saved_session_storage)})"
+                )
+            except Exception as e:
+                logger.debug(f"[BrowserPool] sessionStorage restore notice: {e}")
+
+        # Sensor cookies already in the context (cached ones replayed above) are not proof of a pass
+        # during this solve: if a wall is up despite them, the site has stopped honouring them.
+        target_host = host_of(url)
+        sensor_baseline = sensor_snapshot(await read_context_cookies(context), target_host)
+
+        return capture, cf_capture_key, target_host, sensor_baseline
+
+    async def _run_challenge_loop(
+        self, *, context, page, url, method, post_data, deadline, active_ua, proxy_url,
+        solve_embedded_captchas, cf_capture_key, target_host, sensor_baseline,
+        last_main_status, last_main_headers,
+    ) -> _ChallengeLoopResult:
+        step = 0.2
+        loop_start = time.monotonic()
+        loop_deadline = deadline - SOLVE_FINALIZE_RESERVE_SECONDS
+        iteration = 0
+        content_check_every = 4
+        next_click_at = 0.0
+        last_widget_report = 0.0
+        last_logged_step = 0.0
+        age_gate_clicked = False
+        last_detected_challenge: Optional[str] = None
+        # Wall verdict from the last pass that read the page content; title-only passes can't refresh it.
+        active_wall = False
+        widget_seen_at: Optional[float] = None
+        wall_seen = False
+        unsolvable_passes = 0
+        sensor_earned_at: Optional[float] = None
+        renavigated_at: Optional[float] = None
+        akamai_held = False
+        datadome_solver_tried = False
+        cloudflare_solver_tried = False
+        wall_seen_at: Optional[float] = None
+        cleared = False
+
+        while time.monotonic() < loop_deadline:
+            check_content = (iteration % content_check_every) == 0
+            iteration += 1
+
+            try:
+                title = await page.title()
+            except Exception:
+                title = ""
+
+            curr_url = page.url or ""
+            if is_browser_error(title, curr_url):
+                logger.warning(f"[BrowserPool] Browser error page encountered: '{title}' ({curr_url})")
+                break
+
+            content = ""
+            if check_content:
+                try:
+                    content = await asyncio.wait_for(page.content(), timeout=2.0)
+                except Exception:
+                    content = ""
+
+            content_lower = content.lower() if content else ""
+
+            if check_content:
+                _raise_if_ip_blocked(content, curr_url)
+                if anubis_state(content) == "blocked":
+                    raise ChallengeNotSolvedError("anubis", ANUBIS_REJECTED_REASON)
+
+            active_challenge = detect_challenge(
+                title, content, check_content, headers=last_main_headers, status=last_main_status["code"]
+            )
+            if check_content:
+                active_wall = is_challenge_wall(
+                    active_challenge, title, content, status=last_main_status["code"], headers=last_main_headers
+                )
+                if active_challenge and not active_wall and active_challenge not in WIDGET_CHALLENGES:
+                    # A provider's telemetry script on the real page, not a challenge.
+                    active_challenge = None
+                elif active_challenge and not active_wall and not solve_embedded_captchas:
+                    # A captcha in the real page's own form: the caller wants the page, not the token.
+                    active_challenge = None
+            if not active_challenge and is_anubis_verification_url(curr_url):
+                # Between a solved proof-of-work and the redirect back to the page asked for.
+                active_challenge = "anubis"
+            if active_challenge:
+                last_detected_challenge = active_challenge
+            elif not check_content and last_detected_challenge:
+                # Most markers live only in page content, so a content-skipped pass can't prove it cleared.
+                active_challenge = last_detected_challenge
+
+            if check_content and active_wall and active_challenge:
                 wall_cookies = await read_context_cookies(context)
                 if not wall_seen:
                     wall_seen = True
