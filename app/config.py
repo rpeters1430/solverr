@@ -217,6 +217,14 @@ class Settings:
     ALLOWED_HOSTS: set = {h.strip().lower() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()}
     DENIED_HOSTS: set = {h.strip().lower() for h in os.getenv("DENIED_HOSTS", "").split(",") if h.strip()}
 
+    # Optional HTTP/HTTPS forward proxy. HTTPS inspection requires clients to trust this CA.
+    MITM_ENABLED: bool = os.getenv("MITM_ENABLED", "false").lower() in ("true", "1", "yes")
+    MITM_HOST: str = os.getenv("MITM_HOST", "127.0.0.1")
+    MITM_PORT: int = int(os.getenv("MITM_PORT", "8192"))
+    MITM_CA_DIR: str = os.getenv("MITM_CA_DIR", "data/proxy-ca")
+    MITM_PROXY_USERNAME: Optional[str] = os.getenv("MITM_PROXY_USERNAME")
+    MITM_PROXY_PASSWORD: Optional[str] = os.getenv("MITM_PROXY_PASSWORD")
+
     # Size limits in MB; 0 disables the check.
     MAX_REQUEST_BODY_MB: float = float(os.getenv("MAX_REQUEST_BODY_MB", "10"))
     MAX_RESPONSE_BODY_MB: float = float(os.getenv("MAX_RESPONSE_BODY_MB", "50"))

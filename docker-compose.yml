@@ -8,6 +8,9 @@ services:
     restart: unless-stopped
     ports:
       - "8191:8191"
+      # Keep the proxy on host loopback by default. Same-network containers use http://solverr:8192.
+      # Set MITM_BIND_IP to the NAS LAN address only when separate LAN clients need access.
+      - "${MITM_BIND_IP:-127.0.0.1}:${MITM_PORT:-8192}:${MITM_PORT:-8192}"
     shm_size: '2gb' # Recommended 1gb-2gb for Camoufox multi-worker rendering
     security_opt:
       - no-new-privileges:true
@@ -27,6 +30,12 @@ services:
       - HEADLESS=true
       - ENABLE_FAST_TLS=true
       - COOKIE_CACHE_TTL=7200
+      - MITM_ENABLED=${MITM_ENABLED:-false}
+      - MITM_HOST=0.0.0.0
+      - MITM_PORT=${MITM_PORT:-8192}
+      - MITM_CA_DIR=/app/data/proxy-ca
+      - MITM_PROXY_USERNAME=${MITM_PROXY_USERNAME:-}
+      - MITM_PROXY_PASSWORD=${MITM_PROXY_PASSWORD:-}
       # - PUID=1000                      # Optional: run as this user ID (must be set with PGID)
       # - PGID=1000                      # Optional: run as this group ID (must be set with PUID)
       # - TZ=Etc/UTC

@@ -12,3 +12,4 @@ python-multipart==0.0.32
 beautifulsoup4==4.15.0
 redis==8.1.0
 mcp==2.3.0
+cryptography>=44.0.0,<50.0.0

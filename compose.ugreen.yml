@@ -5,6 +5,8 @@ services:
     restart: unless-stopped
     ports:
       - "8191:8191"
+      # Host loopback by default; set MITM_BIND_IP to the NAS LAN address for LAN clients.
+      - "${MITM_BIND_IP:-127.0.0.1}:8192:8192"
     cpus: "2.0"
     mem_limit: 2g
     pids_limit: 512
@@ -38,6 +40,12 @@ services:
       MAX_SCREENSHOT_MB: "4"
       HISTORY_MAX_RECORDS: "500"
       ENABLE_MCP: "false"
+      MITM_ENABLED: "${MITM_ENABLED:-false}"
+      MITM_HOST: "0.0.0.0"
+      MITM_PORT: "8192"
+      MITM_CA_DIR: "/app/data/proxy-ca"
+      MITM_PROXY_USERNAME: "${MITM_PROXY_USERNAME:-}"
+      MITM_PROXY_PASSWORD: "${MITM_PROXY_PASSWORD:-}"
       PUID: "1000"
       PGID: "10"
     volumes:

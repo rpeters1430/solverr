@@ -23,6 +23,8 @@ from app.metrics import generate_prometheus_metrics
 from app.logging_config import setup_logging, set_request_id
 from app.solver.sessions import session_manager
 from app.solver.cache import cookie_cache
+from app.forward_proxy import forward_proxy
+from app.proxy_certificates import ProxyCertificateAuthority
 
 setup_logging(settings.LOG_LEVEL)
 logger = logging.getLogger("solverr.main")
@@ -64,6 +66,7 @@ async def lifespan(app: FastAPI):
     async with contextlib.AsyncExitStack() as stack:
         logger.info(f"Initializing Solverr Engine v{settings.DISPLAY_VERSION}...")
         logger.info(f"Configuration | Host: {settings.HOST}:{settings.PORT} | Log Level: {settings.LOG_LEVEL.upper()} | Workers: {settings.MAX_BROWSER_WORKERS} | Fast TLS: {settings.ENABLE_FAST_TLS}")
+        await forward_proxy.start()
         cleanup_task = asyncio.create_task(periodic_session_cleanup())
         maintenance_task = asyncio.create_task(periodic_pool_maintenance())
         if CAMOUFOX_AVAILABLE:
@@ -75,6 +78,7 @@ async def lifespan(app: FastAPI):
             logger.info("MCP server ready at /mcp (set ENABLE_MCP=false to disable).")
         yield
         logger.info("Shutting down Solverr Engine...")
+        await forward_proxy.close()
         cleanup_task.cancel()
         maintenance_task.cancel()
         await browser_pool.close()
@@ -127,6 +131,7 @@ async def request_logging_middleware(request: Request, call_next):
 
     is_exempt_path = (
         request.url.path in _ALWAYS_UNAUTHENTICATED_PATHS
+        or request.url.path == "/proxy-ca.crt"
         or (request.url.path == "/metrics" and not settings.METRICS_REQUIRE_AUTH)
         or request.url.path.startswith("/static")
         or request.url.path == "/favicon.ico"
@@ -183,6 +188,17 @@ app.include_router(dashboard_router, prefix="/api")
 
 if mcp_asgi_app is not None:
     app.mount("/mcp", mcp_asgi_app)
+
+@app.get("/proxy-ca.crt", include_in_schema=False)
+async def proxy_ca_certificate():
+    if not settings.MITM_ENABLED:
+        return Response(status_code=404)
+    ca = ProxyCertificateAuthority(settings.MITM_CA_DIR)
+    return Response(
+        content=ca.public_certificate(),
+        media_type="application/x-x509-ca-cert",
+        headers={"Content-Disposition": 'attachment; filename="solverr-proxy-ca.crt"', "Cache-Control": "no-store"},
+    )
 
 _cached_dashboard_html: str | None = None
 
