@@ -17,7 +17,7 @@ instance health-checking, and the unbounded `_domain_scores` dict).
 ### CR-009 — `_execute_solve_flow` is a ~270-line monolith
 **File:** `app/solver/browser/browser.py`
 
-**Status (2026-10-28):** Implemented in the current CR-009 pull request. Added four fake-browser characterization cases and split setup, the challenge loop, captcha escalation, and finalization into dedicated helpers. The challenge loop returns a `_ChallengeLoopResult` carrying clearance, challenge, timing, and response status state.
+**Status (2026-10-28):** Implemented in [PR #133](https://github.com/rpeters1430/solverr/pull/133). Added four fake-browser characterization cases and split setup, the challenge loop, captcha escalation, and finalization into dedicated helpers. The challenge loop returns a `_ChallengeLoopResult` carrying clearance, challenge, timing, and response status state.
 
 Combines cookie preload, media-blocking wiring, a response listener, navigation, the
 full challenge-detection/interactive-click polling loop, Tier-3.5 captcha escalation,
