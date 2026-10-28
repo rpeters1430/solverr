@@ -145,7 +145,7 @@ RUN mkdir -p data /app/home /app/.cache/camoufox/tmp /app/.cache/camoufox/fontco
               /opt/venv/lib/python*/site-packages/setuptools* \
               /opt/venv/lib/python*/site-packages/pip*
 
-EXPOSE 8191
+EXPOSE 8191 8192
 
 HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
   CMD curl -fsS http://127.0.0.1:8191/health || exit 1

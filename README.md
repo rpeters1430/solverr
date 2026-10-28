@@ -227,6 +227,102 @@ Every request Solverr handles is a self-contained request/response - there's no 
    - **Max Timeout**: `60000`
 3. Click **Test** and **Save**.
 
+## 🔀 Optional HTTP/HTTPS Forward Proxy (Docker, NAS, and LAN)
+
+Solverr can also listen as an authenticated HTTP forward proxy. This is useful when a client needs
+to make its own follow-up requests to a forum after the initial challenge solve. The listener is
+off by default. When enabled, HTTPS connections are decrypted inside Solverr so requests can use
+the same tiered solver; clients must trust Solverr's generated CA certificate.
+
+Set these values in the Solverr Compose service (keep the credentials private):
+
+```yaml
+environment:
+  MITM_ENABLED: "true"
+  MITM_PROXY_USERNAME: "solverr-proxy"
+  MITM_PROXY_PASSWORD: "change-this-to-a-long-random-secret"
+```
+
+The proxy listens on port `8192`. Containers on the same Docker network connect to
+`http://solverr:8192`; no host port publishing is needed for that. The bundled Compose file maps
+the port to host loopback by default. To allow a separate LAN client, set `MITM_BIND_IP` to the NAS
+LAN address and restrict access with the NAS firewall. Do not expose the listener to the public
+Internet. The proxy connection uses plain HTTP; Basic credentials are not encrypted on the network,
+so use a trusted Docker network or trusted LAN segment.
+
+Solverr persists `ca.crt` and the signing key under `data/proxy-ca`. Back up this directory and do
+not share `ca.key`. On startup Solverr logs a SHA-256 fingerprint for the public CA. The public
+certificate is available at `http://<solverr-host>:8191/proxy-ca.crt`; compare its fingerprint
+with the startup log before installing it. The private key is never served.
+
+### Install the CA in a Linux client container
+
+Mount `scripts/install_proxy_ca.sh` into the client container's init hook and set:
+
+```yaml
+SOLVERR_PROXY_CA_URL: http://solverr:8191/proxy-ca.crt
+SOLVERR_PROXY_CA_SHA256: "<fingerprint from Solverr startup log>"
+```
+
+The helper refuses installation if the downloaded CA fingerprint does not match. It installs the
+CA into Debian/Ubuntu/Alpine-style system trust stores with `update-ca-certificates`. For a
+LinuxServer Prowlarr container, mount it under `/custom-cont-init.d/` so the CA is added on startup.
+For other images, use the image's init hook or bake the script and CA trust into a derived image.
+To remove the CA, run the helper with `SOLVERR_PROXY_CA_ACTION=remove` and restart the client.
+
+Example LinuxServer Prowlarr service additions:
+
+```yaml
+environment:
+  SOLVERR_PROXY_CA_URL: http://solverr:8191/proxy-ca.crt
+  SOLVERR_PROXY_CA_SHA256: "<fingerprint from Solverr startup log>"
+volumes:
+  - ./scripts/install_proxy_ca.sh:/custom-cont-init.d/10-solverr-proxy-ca:ro
+```
+
+### Prowlarr
+
+In **Settings → Indexer Proxies**, add an **HTTP** proxy with host `solverr` (or the NAS LAN address
+if Prowlarr is on a different Docker network), port `8192`, and the configured username/password.
+Add a tag and assign it only to forum indexers that need it. Ensure the Prowlarr container trusts
+the Solverr CA before testing the indexer.
+
+### yt-dlp
+
+Mount both helper scripts into the yt-dlp container, provide the proxy and CA settings, and use
+the wrapper as the entrypoint. It verifies and installs the CA at container start, then launches
+yt-dlp with the proxy and system certificate store enabled:
+
+```yaml
+services:
+  yt-dlp:
+    image: your-yt-dlp-image
+    entrypoint: ["/usr/local/bin/yt-dlp-with-solverr-proxy.sh"]
+    environment:
+      SOLVERR_PROXY_URL: "http://USER:PASSWORD@solverr:8192"
+      SOLVERR_PROXY_CA_URL: "http://solverr:8191/proxy-ca.crt"
+      SOLVERR_PROXY_CA_SHA256: "<fingerprint from Solverr startup log>"
+    volumes:
+      - ./scripts/install_proxy_ca.sh:/usr/local/bin/install_proxy_ca.sh:ro
+      - ./scripts/yt-dlp-with-solverr-proxy.sh:/usr/local/bin/yt-dlp-with-solverr-proxy.sh:ro
+    command: ["https://forum.example/topic/123"]
+```
+
+The image needs `yt-dlp`, `curl` or `wget`, and `update-ca-certificates`; the wrapper must run as
+root to add the CA. URL-encode special characters in the proxy username or password. The command
+and arguments after the entrypoint are passed directly to yt-dlp. Never use
+`--no-check-certificates` to work around a missing CA.
+
+### Current protocol boundaries
+
+The proxy streams download-shaped GET/HEAD responses as raw bytes, including `Range` requests, and
+sends page requests and HTML responses through Solverr's tiered challenge solver. It handles
+authenticated HTTP/1.1; it does not yet support WebSockets, HTTP/2, or chunked request uploads.
+Prowlarr should use its normal FlareSolverr `/v1` integration when that meets an indexer's needs;
+use the forward proxy for follow-up forum requests or yt-dlp media downloads. DNS rebinding
+protection remains subject to the existing SSRF time-of-check/time-of-use gap documented in the
+improvement plan.
+
 ---
 
 ## 🛠️ API Reference
@@ -368,6 +464,10 @@ On by default; set `ENABLE_MCP=false` to disable.
 | `ESCALATE_HTTP_429` | `true` | Send a 429 with no challenge markers to the browser tier. `false` returns plain rate limiting to the caller as-is, with `Retry-After` passed through on `/proxy`, so Prowlarr/Jackett can back off |
 | `FALLBACK_PROXY_URL` | `None` | Optional Tier 4 fallback proxy URL |
 | `FALLBACK_PROXY_URLS` | (empty) | More Tier 4 fallback proxies, comma-separated. Merged with `FALLBACK_PROXY_URL` and rotated round-robin; a proxy that fails cools down before it is picked again. Health is in `/api/stats` (`fallback_proxies`) and `/metrics` (`solverr_fallback_proxies`) |
+| `MITM_ENABLED` | `false` | Start the optional authenticated HTTP/HTTPS forward proxy on its separate listener |
+| `MITM_HOST` / `MITM_PORT` | `127.0.0.1` / `8192` | Proxy listener address and TCP port; bundled Docker Compose overrides the container address to `0.0.0.0` for same-network clients |
+| `MITM_CA_DIR` | `data/proxy-ca` | Persistent CA certificate and private signing key directory; keep `ca.key` private |
+| `MITM_PROXY_USERNAME` / `MITM_PROXY_PASSWORD` | unset | Both are required when the forward proxy is enabled; clients authenticate with HTTP Basic proxy auth |
 | `FALLBACK_PROXY_COOLDOWN_SECONDS` | `60` | How long a failed fallback proxy sits out, doubling per consecutive failure up to 8x. When every proxy is cooling down, the one that recovers first is used |
 | `FALLBACK_PROXY_MAX_ATTEMPTS` | `2` | Fallback proxies tried per request while its timeout budget lasts, each through a fresh browser |
 | `API_KEY` | `None` | When set, requires a matching `X-Api-Key` header (header only - never a query param) on every endpoint except `/health`, and `/metrics` unless `METRICS_REQUIRE_AUTH=true` |
