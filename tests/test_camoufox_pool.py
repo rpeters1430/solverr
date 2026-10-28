@@ -89,6 +89,33 @@ class TestCamoufoxPool(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pool.close_count, 2)
         self.assertEqual(pool._created, 0)
 
+    async def test_close_closes_a_checked_out_instance(self):
+        pool = FakeCamoufoxPool(1)
+        inst = await pool.acquire()
+
+        await pool.close()
+
+        self.assertEqual(pool.close_count, 1)
+        self.assertEqual(pool._created, 0)
+        self.assertNotIn(inst, pool._all_instances)
+
+    async def test_first_launch_failure_does_not_poison_pool_capacity(self):
+        class FirstLaunchFailsPool(FakeCamoufoxPool):
+            async def _launch_instance(self):
+                if self.launch_count == 0:
+                    self.launch_count += 1
+                    raise RuntimeError("simulated Firefox launch failure")
+                return await super()._launch_instance()
+
+        pool = FirstLaunchFailsPool(1)
+        with self.assertRaisesRegex(RuntimeError, "simulated Firefox launch failure"):
+            await pool.acquire()
+
+        self.assertEqual(pool._created, 0)
+        inst = await pool.acquire()
+        self.assertEqual(pool._created, 1)
+        self.assertIsNotNone(inst)
+
 
 class _DeadBrowser:
     def is_connected(self):
@@ -245,8 +272,10 @@ class TestCamoufoxPoolResilience(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_replacement_frees_its_slot(self):
         class FailingRelaunchPool(FakeCamoufoxPool):
+            fail_relaunch = True
+
             async def _launch_instance(self):
-                if self.launch_count:
+                if self.fail_relaunch and self.launch_count:
                     raise TimeoutError("Camoufox launch did not complete within 30s")
                 return await super()._launch_instance()
 
@@ -257,6 +286,9 @@ class TestCamoufoxPoolResilience(unittest.IsolatedAsyncioTestCase):
         await pool.wait_for_replacements()
         self.assertEqual(pool._created, 0)
         self.assertEqual(pool.idle_count, 0)
+        pool.fail_relaunch = False
+        self.assertIsNotNone(await pool.acquire())
+        self.assertEqual(pool._created, 1)
 
     async def test_maintain_replaces_idle_instance_that_fails_probe(self):
         class StalledContextBrowser:
@@ -1069,6 +1101,78 @@ class TestIpBlockSkipsSameIpRetry(unittest.IsolatedAsyncioTestCase):
 
 
 class TestBrowserPoolCancellation(unittest.IsolatedAsyncioTestCase):
+    async def test_worker_saturation_bounds_active_solves_and_tracks_waiters(self):
+        pool = BrowserPool()
+        pool.semaphore = asyncio.Semaphore(2)
+        pool.camoufox_pool = None
+        started = asyncio.Event()
+        release = asyncio.Event()
+        active = 0
+        peak_active = 0
+        solution = SolutionModel(url="https://example.com", status=200, cookies=[], userAgent="ua")
+
+        async def fake_solve(**kwargs):
+            nonlocal active, peak_active
+            active += 1
+            peak_active = max(peak_active, active)
+            if active == 2:
+                started.set()
+            try:
+                await release.wait()
+                return solution
+            finally:
+                active -= 1
+
+        pool._solve_with_ephemeral_camoufox = fake_solve
+        with patch.object(browser_module, "CAMOUFOX_AVAILABLE", True):
+            tasks = [
+                asyncio.create_task(pool.solve(f"https://example.com/{i}", timeout_ms=30000))
+                for i in range(4)
+            ]
+            await asyncio.wait_for(started.wait(), timeout=1)
+            async def wait_for_all_workers():
+                while pool.pool_stats()["queue_depth"] != 2:
+                    await asyncio.sleep(0)
+            await asyncio.wait_for(wait_for_all_workers(), timeout=1)
+            self.assertEqual(peak_active, 2)
+            release.set()
+            results = await asyncio.gather(*tasks)
+
+        self.assertEqual(results, [solution] * 4)
+        self.assertEqual(peak_active, 2)
+        self.assertEqual(pool.pool_stats()["queue_depth"], 0)
+        self.assertEqual(pool.pool_stats()["queue_wait_samples"], 4)
+
+    async def test_cancelled_active_solve_releases_worker_for_next_request(self):
+        pool = BrowserPool()
+        pool.semaphore = asyncio.Semaphore(1)
+        pool.camoufox_pool = None
+        started = asyncio.Event()
+        attempts = 0
+        solution = SolutionModel(url="https://example.com", status=200, cookies=[], userAgent="ua")
+
+        async def fake_solve(**kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                started.set()
+                await asyncio.Event().wait()
+            return solution
+
+        pool._solve_with_ephemeral_camoufox = fake_solve
+        with patch.object(browser_module, "CAMOUFOX_AVAILABLE", True):
+            cancelled = asyncio.create_task(pool.solve("https://example.com/cancel", timeout_ms=30000))
+            await asyncio.wait_for(started.wait(), timeout=1)
+            cancelled.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await cancelled
+
+            self.assertEqual(pool.semaphore._value, 1)
+            result = await asyncio.wait_for(pool.solve("https://example.com/next", timeout_ms=30000), timeout=1)
+
+        self.assertIs(result, solution)
+        self.assertEqual(attempts, 2)
+
     async def test_pooled_browser_context_uses_local_egress_for_all_page_requests(self):
         pool = BrowserPool()
         fake = FakeCamoufoxPoolWithBrowser(1)
