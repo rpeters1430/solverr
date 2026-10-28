@@ -10,12 +10,14 @@ instance health-checking, and the unbounded `_domain_scores` dict).
 
 > **Status (2026-10-18, v1.8.0):** CR-012, CR-013, CR-015, CR-018 and CR-020 had already been fixed
 > before this pass; CR-014, CR-016, CR-017 and CR-019 were closed in 1.8.0 (see `CHANGELOG.md`).
-> CR-009 and CR-011 remain open and are the planned focus for 1.9.
+> **Status (2026-10-28):** CR-011 egress mitigation merged in PR #132; root/PUID container validation remains open. CR-009 is covered by characterization tests and the helper refactor in the current PR.
 
 ## Important (not yet fixed)
 
 ### CR-009 — `_execute_solve_flow` is a ~270-line monolith
-**File:** `app/solver/browser/browser.py:337-606`
+**File:** `app/solver/browser/browser.py`
+
+**Status (2026-10-28):** Implemented in the current CR-009 pull request. Added four fake-browser characterization cases and split setup, the challenge loop, captcha escalation, and finalization into dedicated helpers. The challenge loop returns a `_ChallengeLoopResult` carrying clearance, challenge, timing, and response status state.
 
 Combines cookie preload, media-blocking wiring, a response listener, navigation, the
 full challenge-detection/interactive-click polling loop, Tier-3.5 captcha escalation,
@@ -23,24 +25,23 @@ selector/delay waits, screenshot capture, and final state extraction/status
 resolution in one function, threading shared mutable state (`last_main_status`,
 `cleared`, `last_detected_challenge`) through all of it.
 
-**Why not fixed yet:** this is a pure maintainability refactor with no existing test
-coverage that exercises the actual challenge-solve loop against a real (or realistically
-mocked) browser/page. Splitting it blind risks introducing exactly the kind of subtle
-bug this review exists to catch — the CR-001 loop bug (already fixed) went undetected
-for this exact reason.
+**Why it was open:** this is a pure maintainability refactor, and the challenge-solve
+loop had no characterization coverage. Splitting it without coverage risked subtle
+behavior changes; the CR-001 loop bug (already fixed) went undetected for this reason.
 
-**Suggested approach when picked up:** write characterization tests first (a fake
+**Approach used:** wrote characterization tests first (a fake
 `Page`/`BrowserContext` double driving the loop through the interesting cases —
 clean load, WAF challenge → clears, WAF challenge → never clears/times out, browser
 error page) so the refactor has something to prove it preserved behavior against.
-Then split into `_preload_context()`, `_run_challenge_loop()` (returning a small
+The flow is split into `_preload_context()`, `_run_challenge_loop()` (returning a small
 result object: cleared / last_challenge / last_status), `_maybe_captcha_escalate()`,
 and `_finalize_solution()`, mirroring the decomposition already done for
 `challenges.py`/`navigation.py`/`interactions.py`.
 
-### CR-011 — No IP pinning between SSRF validation and the actual connection (DNS rebinding)
-**File:** `app/security.py:65-88` (validation) vs. `app/solver/fast_tls.py` (curl_cffi)
-and `app/solver/browser/navigation.py`/Camoufox launch (independent DNS resolution)
+### CR-011 — DNS rebinding egress gap (mitigated; container validation pending)
+**Files:** `app/egress_proxy.py`, `app/security.py`, and outbound client wiring.
+
+**Status (2026-10-28):** Default Fast TLS and Camoufox egress now use the loopback policy proxy merged in PR #132. The proxy validates DNS answers and connects to a validated IP. Root and `PUID=1000`/`PGID=10` container validation remains in the improvement plan.
 
 `check_target_url`/`check_target_url_async` resolve a hostname once and validate that
 IP, but curl_cffi and Camoufox/Firefox each perform their **own independent DNS
