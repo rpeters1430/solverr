@@ -44,7 +44,7 @@
 - [x] Route default Fast TLS and Camoufox traffic, redirects, and browser subresources through that egress path. Keep explicit external proxies documented as trusted.
 - [x] Test concurrent requests to the same hostname, DNS rotation, cancellation, redirects, HTTP, and HTTPS CONNECT.
 - [ ] Build and exercise the container as root and with `PUID=1000` / `PGID=10`; verify FlareSolverr compatibility, user-supplied proxies, health checks, and shutdown.
-- [ ] Update the SSRF documentation and the status of CR-011 only after both egress paths pass the integration checks.
+- [ ] Complete root and `PUID=1000` / `PGID=10` container integration checks; then finalize the CR-011 status and SSRF deployment docs.
 
 **Done when:** Default HTTP and browser egress cannot perform a second unvalidated DNS resolution between policy validation and connection.
 
@@ -55,11 +55,11 @@
 - Create: `tests/test_browser_solve_flow.py`
 - Modify: `Improvement Plans/CODE_REVIEW_2026-09-22_OPEN_FINDINGS.md`
 
-- [ ] Add fake Page/BrowserContext characterization tests for clean load, WAF challenge cleared, WAF challenge still present at timeout, and browser error page.
-- [ ] Run the new tests against the current implementation and record the expected outcomes before changing control flow.
-- [ ] Split `_execute_solve_flow` into focused helpers for context preload, challenge loop, captcha escalation, and solution finalization. Return the challenge loop state in a small result object instead of threading mutable locals through the full method.
-- [ ] Run the characterization tests and the complete existing unit suite; confirm API response and challenge error behavior remain unchanged.
-- [ ] Update CR-009 status with the test coverage and implementation commit.
+- [x] Add fake Page/BrowserContext characterization tests for clean load, WAF challenge cleared, WAF challenge still present at timeout, and browser error page.
+- [x] Run the new tests against the current implementation and record the expected outcomes before changing control flow; all four passed before the refactor.
+- [x] Split `_execute_solve_flow` into focused helpers for context preload, challenge loop, captcha escalation, and solution finalization. Return the challenge loop state in a small result object instead of threading mutable locals through the full method.
+- [ ] Run the characterization tests and complete existing unit suite; the four new cases and 32 browser-focused tests pass. The full suite ran 481 tests; 478 passed and three unrelated API stats/auth tests failed because this runner has no process with the PID expected by the existing psutil fixture.
+- [x] Update CR-009 status with the test coverage; record the final PR/commit link after publication.
 
 **Done when:** The extracted helpers are independently understandable and the four key browser states remain covered by automated tests.
 
