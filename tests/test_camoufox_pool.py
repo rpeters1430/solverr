@@ -272,7 +272,8 @@ class TestCamoufoxPoolResilience(unittest.IsolatedAsyncioTestCase):
             inst = await pool.acquire()
             await pool.release(inst)
             inst.browser = StalledContextBrowser()
-            inst.last_used_at = inst.created_at = time.monotonic() - 120
+            old_probe_time = time.monotonic() - 120
+            inst.last_used_at = inst.created_at = inst.last_probe_at = old_probe_time
             await pool.maintain()
             await pool.wait_for_replacements()
             self.assertEqual(pool.probe_failures_total, 1)
@@ -289,7 +290,8 @@ class TestCamoufoxPoolResilience(unittest.IsolatedAsyncioTestCase):
             inst = await pool.acquire()
             await pool.release(inst)
             inst.browser = FakeBrowser()
-            inst.last_used_at = inst.created_at = time.monotonic() - 120
+            old_probe_time = time.monotonic() - 120
+            inst.last_used_at = inst.created_at = inst.last_probe_at = old_probe_time
             await pool.maintain()
             self.assertEqual(pool.probe_failures_total, 0)
             self.assertGreater(inst.last_probe_at, 0)
