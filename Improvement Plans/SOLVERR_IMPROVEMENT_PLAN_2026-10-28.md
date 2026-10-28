@@ -59,7 +59,7 @@
 - [x] Run the new tests against the current implementation and record the expected outcomes before changing control flow; all four passed before the refactor.
 - [x] Split `_execute_solve_flow` into focused helpers for context preload, challenge loop, captcha escalation, and solution finalization. Return the challenge loop state in a small result object instead of threading mutable locals through the full method.
 - [ ] Run the characterization tests and complete existing unit suite; the four new cases and 32 browser-focused tests pass. The full suite ran 481 tests; 478 passed and three unrelated API stats/auth tests failed because this runner has no process with the PID expected by the existing psutil fixture.
-- [x] Update CR-009 status with the test coverage; record the final PR/commit link after publication.
+- [x] Update CR-009 status with test coverage and link [PR #133](https://github.com/rpeters1430/solverr/pull/133).
 
 **Done when:** The extracted helpers are independently understandable and the four key browser states remain covered by automated tests.
 
