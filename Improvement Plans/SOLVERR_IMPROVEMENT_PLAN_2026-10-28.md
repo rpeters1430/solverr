@@ -70,10 +70,10 @@
 - Create: `scripts/load_test.py` (or a benchmark-local equivalent if it fits the existing benchmark conventions better)
 - Modify: `Improvement Plans/UNIFIED_IMPROVEMENT_PLAN.md`
 
-- [ ] Add failure-mode tests for worker saturation, failed browser launch/relaunch, request cancellation, and graceful shutdown.
-- [ ] Add an opt-in local load scenario that reports throughput, latency percentiles, timeout rate, and peak worker/process count for a fixed concurrency and request mix.
-- [ ] Document a small NAS-sized run profile and a larger CI/developer profile; keep load tests out of normal CI until their runtime and stability are established.
-- [ ] Record baseline results before changing worker sizing or pool behavior.
+- [x] Add failure-mode tests for worker saturation, failed browser launch/relaunch, request cancellation, and graceful shutdown.
+- [x] Add an opt-in local load scenario that reports throughput, latency percentiles, timeout rate, and peak worker/process count for a fixed concurrency and request mix.
+- [x] Document a small NAS-sized run profile and a larger CI/developer profile; keep load tests out of normal CI until their runtime and stability are established.
+- [x] Record baseline results before changing worker sizing or pool behavior.
 
 **Done when:** Pool failure behavior has regression coverage and load results can be compared across revisions without relying on live protected sites.
 
