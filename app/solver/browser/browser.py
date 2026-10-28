@@ -10,6 +10,7 @@ from app.config import settings
 from app.models.flaresolverr import CookieModel, SolutionModel
 from app.solver.captcha_solver import captcha_solver
 from app.logging_config import sanitize_proxy_url
+from app.egress_proxy import egress_proxy
 
 from app.solver.browser.pool import CamoufoxPool, CAMOUFOX_AVAILABLE, browser_is_connected, firefox_user_prefs
 from app.solver.browser.challenges import (
@@ -107,10 +108,12 @@ def _describe_solve_error(e: BaseException, tier_timeout: float, tier_label: str
     return e
 
 
-def _context_options(browser_storage: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _context_options(browser_storage: Optional[Dict[str, Any]], proxy: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """new_context() options; a session's saved localStorage is restored through storage_state,
     which applies it once at context creation exactly as a returning browser would have it."""
     opts: Dict[str, Any] = {"service_workers": "block"}
+    if proxy:
+        opts["proxy"] = proxy
     local = (browser_storage or {}).get("local") or {}
     if local:
         opts["storage_state"] = {
@@ -400,7 +403,7 @@ class BrowserPool:
                     "no browser engine can service this request."
                 )
 
-            # A warm process's UA and proxy are fixed at launch, so custom-UA/proxy requests skip the pool.
+            # The warm pool uses Solverr's egress proxy; caller-selected proxies and UAs use a fresh process.
             use_pool = self.camoufox_pool is not None and not pw_proxy and not user_agent
             last_error: Optional[BaseException] = None
 
@@ -517,7 +520,9 @@ class BrowserPool:
             async def open_page():
                 nonlocal context, page
                 if hasattr(inst.browser, "new_context"):
-                    context = await inst.browser.new_context(**_context_options(browser_storage))
+                    context = await inst.browser.new_context(
+                        **_context_options(browser_storage, {"server": egress_proxy.url})
+                    )
                 elif inst.browser.contexts:
                     context = inst.browser.contexts[0]
                 else:
@@ -627,7 +632,7 @@ class BrowserPool:
         logger.info(f"[CamoufoxEngine] Spawning ephemeral Camoufox stealth Firefox solve for {url} (proxy={'yes' if pw_proxy else 'no'}, custom_ua={'yes' if user_agent else 'no'}, geoip={'yes' if use_geoip else 'no'})...")
         async with AsyncCamoufox(
             headless=settings.HEADLESS,
-            proxy=pw_proxy,
+            proxy=pw_proxy or {"server": egress_proxy.url},
             geoip=use_geoip,
             humanize=True,
             disable_coop=True,
@@ -638,7 +643,9 @@ class BrowserPool:
             i_know_what_im_doing=True
         ) as browser_instance:
             if hasattr(browser_instance, "new_context"):
-                context_opts: Dict[str, Any] = _context_options(browser_storage)
+                context_opts: Dict[str, Any] = _context_options(
+                    browser_storage, pw_proxy or {"server": egress_proxy.url}
+                )
                 if user_agent:
                     context_opts["user_agent"] = user_agent
                 context = await browser_instance.new_context(**context_opts)

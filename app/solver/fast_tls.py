@@ -12,6 +12,7 @@ from app.solver.browser import WIDGET_CHALLENGES, detect_challenge, is_challenge
 from app.config import settings
 from app.logging_config import sanitize_proxy_url
 from app.security import check_target_url_async
+from app.egress_proxy import egress_proxy
 from app.solver.meta_refresh import MAX_REFRESH_HOPS, meta_refresh_target
 
 logger = logging.getLogger("solverr.fast_tls")
@@ -275,6 +276,7 @@ class FastTLSEngine:
             impersonate_target, active_ua = self._profile_for_domain(url)
 
         domain = self._normalize_domain(url)
+        effective_proxy = proxy or egress_proxy.url
         # Include the caller's FlareSolverr session id in the pool key - the
         # pooled AsyncSession carries its own persistent cookie jar, so two
         # concurrent callers hitting the same domain under different (or no)
@@ -282,7 +284,7 @@ class FastTLSEngine:
         # other's requests/responses. A tuple key (rather than colon-joined
         # string) avoids ambiguous collisions between fields that can
         # themselves contain colons (e.g. a proxy URL's port).
-        pool_key = (domain, impersonate_target, proxy or "", session_id or "")
+        pool_key = (domain, impersonate_target, effective_proxy, session_id or "")
 
         cookie_dict = self._select_cookies_for_url(cookies, url)
 
@@ -302,9 +304,7 @@ class FastTLSEngine:
                     del req_headers[existing_key]
                 req_headers[k] = v
 
-        proxies = None
-        if proxy:
-            proxies = {"http": proxy, "https": proxy}
+        proxies = {"http": effective_proxy, "https": effective_proxy}
 
         proxy_desc = f" | Proxy: {sanitize_proxy_url(proxy)}" if proxy else ""
         logger.info(f"[FastTLS] Executing async {method.upper()} -> {url} (impersonate='{impersonate_target}', timeout={timeout}s{proxy_desc})")

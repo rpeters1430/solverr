@@ -20,6 +20,7 @@ from app.config import settings
 from app.models.flaresolverr import V1Request
 from app.proxy_certificates import ProxyCertificateAuthority
 from app.security import check_target_url_async
+from app.egress_proxy import egress_proxy
 from app.solver.engine import solver_engine
 
 logger = logging.getLogger("solverr.forward_proxy")
@@ -58,6 +59,7 @@ class ForwardProxyServer:
         self._upstream = httpx.AsyncClient(
             follow_redirects=False,
             timeout=httpx.Timeout(connect=15, read=120, write=30, pool=15),
+            proxy=egress_proxy.url,
             trust_env=False,
         )
 

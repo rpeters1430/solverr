@@ -301,6 +301,28 @@ class TestFastTLSSessionPool(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(session_ctor.call_count, 1)
             self.assertIn("example.com", list(engine._sessions.keys())[0])
 
+    async def test_outbound_requests_use_local_egress_unless_external_proxy_is_set(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        response = MagicMock()
+        response.status_code = 200
+        response.text = "ok"
+        response.headers = {}
+        response.cookies = {}
+        response.url = "https://example.com/"
+
+        for proxy, expected in ((None, "http://127.0.0.1:8193"), ("http://proxy.test:3128", "http://proxy.test:3128")):
+            session = AsyncMock()
+            session.get = AsyncMock(return_value=response)
+            session.close = AsyncMock()
+            engine = FastTLSEngine()
+            engine._pool_enabled = False
+            with patch("app.solver.fast_tls.AsyncSession", return_value=session):
+                await engine.request("https://example.com/", proxy=proxy)
+            self.assertEqual(session.get.await_args.kwargs["proxies"], {
+                "http": expected, "https": expected
+            })
+
     async def test_session_evicted_on_failure(self):
         from unittest.mock import AsyncMock, patch
         mock_session = AsyncMock()

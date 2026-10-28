@@ -23,6 +23,7 @@ from app.metrics import generate_prometheus_metrics
 from app.logging_config import setup_logging, set_request_id
 from app.solver.sessions import session_manager
 from app.solver.cache import cookie_cache
+from app.egress_proxy import egress_proxy
 from app.forward_proxy import forward_proxy
 from app.proxy_certificates import ProxyCertificateAuthority
 
@@ -66,7 +67,10 @@ async def lifespan(app: FastAPI):
     async with contextlib.AsyncExitStack() as stack:
         logger.info(f"Initializing Solverr Engine v{settings.DISPLAY_VERSION}...")
         logger.info(f"Configuration | Host: {settings.HOST}:{settings.PORT} | Log Level: {settings.LOG_LEVEL.upper()} | Workers: {settings.MAX_BROWSER_WORKERS} | Fast TLS: {settings.ENABLE_FAST_TLS}")
+        await egress_proxy.start()
+        stack.push_async_callback(egress_proxy.close)
         await forward_proxy.start()
+        stack.push_async_callback(forward_proxy.close)
         cleanup_task = asyncio.create_task(periodic_session_cleanup())
         maintenance_task = asyncio.create_task(periodic_pool_maintenance())
         if CAMOUFOX_AVAILABLE:
@@ -78,7 +82,6 @@ async def lifespan(app: FastAPI):
             logger.info("MCP server ready at /mcp (set ENABLE_MCP=false to disable).")
         yield
         logger.info("Shutting down Solverr Engine...")
-        await forward_proxy.close()
         cleanup_task.cancel()
         maintenance_task.cancel()
         await browser_pool.close()

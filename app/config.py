@@ -217,6 +217,9 @@ class Settings:
     ALLOWED_HOSTS: set = {h.strip().lower() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()}
     DENIED_HOSTS: set = {h.strip().lower() for h in os.getenv("DENIED_HOSTS", "").split(",") if h.strip()}
 
+    # Internal policy-enforcing egress proxy. It always binds to loopback; do not publish this port.
+    EGRESS_PROXY_PORT: int = int(os.getenv("EGRESS_PROXY_PORT", "8193"))
+
     # Optional HTTP/HTTPS forward proxy. HTTPS inspection requires clients to trust this CA.
     MITM_ENABLED: bool = os.getenv("MITM_ENABLED", "false").lower() in ("true", "1", "yes")
     MITM_HOST: str = os.getenv("MITM_HOST", "127.0.0.1")

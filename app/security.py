@@ -1,6 +1,8 @@
 import asyncio
+import inspect
 import ipaddress
 import socket
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from app.config import settings
@@ -16,6 +18,15 @@ _METADATA_HOSTNAMES = {"metadata.google.internal", "metadata.goog"}
 _ALLOWED_TARGET_SCHEMES = {"http", "https"}
 _ALLOWED_PROXY_SCHEMES = {"http", "https", "socks5", "socks5h", "socks4", "socks4a"}
 _SAFE_BROWSER_PSEUDO_SCHEMES = {"data", "blob", "about"}
+
+
+@dataclass(frozen=True)
+class ResolvedTarget:
+    """A policy-approved DNS result. `sockaddr` contains only numeric IPs."""
+
+    host: str
+    port: int
+    addresses: tuple
 
 
 def _is_blocked_ip(ip_str: str) -> bool:
@@ -43,6 +54,17 @@ def _is_blocked_ip(ip_str: str) -> bool:
             or v4.is_unspecified
         ):
             return True
+    return False
+
+
+def _host_policy_allows_private(host: str, label: str) -> bool:
+    host_lower = host.rstrip(".").lower()
+    if host_lower in settings.DENIED_HOSTS:
+        raise SSRFBlockedError(f"{label} host '{host}' is explicitly denied by DENIED_HOSTS")
+    if settings.ALLOW_PRIVATE_NETWORKS or host_lower in settings.ALLOWED_HOSTS:
+        return True
+    if host_lower == "localhost" or host_lower in _METADATA_HOSTNAMES:
+        raise SSRFBlockedError(f"{label} host '{host}' is not allowed (blocked hostname)")
     return False
 
 
@@ -83,13 +105,8 @@ def _validated_host(url: str, label: str) -> str | None:
     if not host:
         raise SSRFBlockedError(f"{label} URL '{url}' is missing a valid hostname")
 
-    host_lower = host.lower()
-    if host_lower in settings.DENIED_HOSTS:
-        raise SSRFBlockedError(f"{label} host '{host}' is explicitly denied by DENIED_HOSTS")
-    if settings.ALLOW_PRIVATE_NETWORKS or host_lower in settings.ALLOWED_HOSTS:
+    if _host_policy_allows_private(host, label):
         return None
-    if host_lower == "localhost" or host_lower in _METADATA_HOSTNAMES:
-        raise SSRFBlockedError(f"{label} host '{host}' is not allowed (blocked hostname)")
     return host
 
 
@@ -104,18 +121,53 @@ def _reject_blocked_addresses(host: str, infos, label: str) -> None:
             )
 
 
+def _resolve_sync(host: str, port: int, label: str, resolver=None) -> ResolvedTarget:
+    allow_private = _host_policy_allows_private(host, label)
+    resolve = resolver or socket.getaddrinfo
+    try:
+        infos = resolve(host, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise SSRFBlockedError(f"{label} host '{host}' could not be resolved safely") from exc
+    infos = tuple(info for info in infos if info[0] in (socket.AF_INET, socket.AF_INET6))
+    if not infos:
+        raise SSRFBlockedError(f"{label} host '{host}' did not resolve to a usable address")
+    if not allow_private:
+        _reject_blocked_addresses(host, infos, label)
+    return ResolvedTarget(host=host, port=port, addresses=infos)
+
+
+async def resolve_target_host_async(host: str, port: int, label: str = "Target", resolver=None) -> ResolvedTarget:
+    """Resolve once, apply the SSRF policy to every answer, and retain numeric socket addresses.
+
+    The caller must connect using one of ``addresses`` directly. Passing ``host`` to a second
+    resolver or to ``open_connection(host=...)`` would reopen the DNS rebinding gap.
+    """
+    allow_private = _host_policy_allows_private(host, label)
+    if not 1 <= int(port) <= 65535:
+        raise SSRFBlockedError(f"{label} port must be between 1 and 65535")
+    loop = asyncio.get_running_loop()
+    try:
+        if resolver is None:
+            infos = await loop.getaddrinfo(host, int(port), type=socket.SOCK_STREAM)
+        else:
+            result = resolver(host, int(port), type=socket.SOCK_STREAM)
+            infos = await result if inspect.isawaitable(result) else result
+    except OSError as exc:
+        raise SSRFBlockedError(f"{label} host '{host}' could not be resolved safely") from exc
+    infos = tuple(info for info in infos if info[0] in (socket.AF_INET, socket.AF_INET6))
+    if not infos:
+        raise SSRFBlockedError(f"{label} host '{host}' did not resolve to a usable address")
+    if not allow_private:
+        _reject_blocked_addresses(host, infos, label)
+    return ResolvedTarget(host=host, port=int(port), addresses=infos)
+
+
 def check_target_url(url: str, label: str = "Target") -> None:
     """Validate a target synchronously for compatibility with existing callers."""
     host = _validated_host(url, label)
     if not host:
         return
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror as exc:
-        raise SSRFBlockedError(
-            f"{label} host '{host}' could not be resolved safely"
-        ) from exc
-    _reject_blocked_addresses(host, infos, label)
+    _resolve_sync(host, 443, label)
 
 
 async def check_target_url_async(url: str, label: str = "Target") -> None:
@@ -123,10 +175,4 @@ async def check_target_url_async(url: str, label: str = "Target") -> None:
     host = _validated_host(url, label)
     if not host:
         return
-    try:
-        infos = await asyncio.get_running_loop().getaddrinfo(host, None)
-    except socket.gaierror as exc:
-        raise SSRFBlockedError(
-            f"{label} host '{host}' could not be resolved safely"
-        ) from exc
-    _reject_blocked_addresses(host, infos, label)
+    await resolve_target_host_async(host, 443, label)
