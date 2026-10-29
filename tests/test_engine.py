@@ -297,6 +297,35 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(asyncio.shield(joiner_task), timeout=1)
             joiner_task.cancel()
 
+    async def test_cancelling_coalesced_waiter_does_not_cancel_owner(self):
+        import asyncio
+
+        started = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def slow_browser_solve(*args, **kwargs):
+            started.set()
+            await finish.wait()
+            return _sol(200)
+
+        with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock(side_effect=slow_browser_solve)) as browser_mock:
+            req = V1Request(cmd="request.get", url="https://example.com/cancel-joiner")
+            owner = asyncio.create_task(self.engine.process_request(req))
+            await asyncio.wait_for(started.wait(), timeout=1)
+            joiner = asyncio.create_task(self.engine.process_request(req))
+            await asyncio.sleep(0.01)
+            joiner.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await joiner
+
+            self.assertFalse(owner.done())
+            finish.set()
+            result = await asyncio.wait_for(owner, timeout=1)
+
+        self.assertEqual(result.status, 200)
+        browser_mock.assert_awaited_once()
+
     async def test_cookie_merge_keys_by_domain_path_name_not_name_alone(self):
         input_cookie = _cookie("session", "input-value", domain="other.example.com")
         cached_cookie = _cookie("session", "cached-value", domain="example.com")

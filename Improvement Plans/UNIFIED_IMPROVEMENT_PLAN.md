@@ -138,6 +138,17 @@ scoping it as its own follow-up rather than folding it into further
   handled this correctly; added a regression test rather than new code.
 - `solverr_browser_queue_wait_seconds` exposed in `/metrics`.
 
+Operational baseline (2026-10-28), collected before changing worker sizing or pool behavior:
+
+| Profile | Workers | Requests | Mix (`fast/slow/failure/timeout`) | Throughput | p50 / p95 / p99 latency | Timeout rate | Peak workers / process tree |
+|---|---:|---:|---|---:|---|---:|---:|
+| NAS-sized | 2 | 100 | 80/15/3/2 | 9.32 req/s | 5014 / 9831 / 10139 ms | 2% | 2 / 1 |
+| CI/developer | 8 | 1000 | 80/15/3/2 | 37.57 req/s | 12859 / 25197 / 25702 ms | 2% | 8 / 1 |
+
+These are synthetic `BrowserPool` admission-semaphore measurements on the development runner. They use fixed 100 ms fast, 700 ms slow, and 1000 ms timeout-delay cases; no Camoufox processes or target sites are started. The process-tree column therefore counts only the runner and its children. Treat the results as reproducibility checks, not hardware performance expectations. Use the same script/profile on a NAS to establish its actual browser-process baseline before changing `MAX_BROWSER_WORKERS` or pool behavior.
+
+Run with `python scripts/load_test.py --workers 2 --requests 100` for the NAS-sized profile, or `python scripts/load_test.py --workers 8 --requests 1000` for the CI/developer profile. The script prints throughput, latency percentiles, outcome and timeout rates, peak active workers, queue depth, and process-tree count as JSON.
+
 ## Phase 3 — Observability (done)
 
 - Per-tier Prometheus histograms (`solverr_request_duration_seconds_bucket`,
