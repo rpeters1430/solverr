@@ -8,7 +8,7 @@ camoufox>=0.5.8
 pydantic==2.14.2
 psutil==7.2.2
 httpx==0.28.1
-python-multipart==0.0.32
+python-multipart==0.0.33
 beautifulsoup4==4.15.0
 redis==8.1.0
 mcp==2.3.0
