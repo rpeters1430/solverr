@@ -62,7 +62,7 @@ services:
   # Optional shared Redis cache for multi-replica horizontal scaling
   # Run with: docker compose --profile distributed up -d --scale solverr=3
   redis:
-    image: redis:8-alpine@sha256:71885d8cc6e42f2bc0aa2eb853bfc4be200b5108a46ac50e117ae1df0531fb80
+    image: redis:8-alpine@sha256:7958cfbb9d152f87dadfbc89f1b0b15938f0b81ff8982feb327476f4911935c3
     container_name: solverr-redis
     restart: unless-stopped
     profiles: ["distributed"]
