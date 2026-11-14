@@ -145,6 +145,8 @@ class Settings:
 
     HEADLESS: bool = os.getenv("HEADLESS", "true").lower() in ("true", "1", "yes")
     BROWSER_TIMEOUT_MS: int = int(os.getenv("BROWSER_TIMEOUT", "30000"))
+    # Opt-in browser cookie handoff for stateless FlareSolverr GET requests.
+    FLARESOLVERR_COOKIE_FALLBACK: bool = os.getenv("FLARESOLVERR_COOKIE_FALLBACK", "false").lower() in ("true", "1", "yes")
     ENABLE_FAST_TLS: bool = os.getenv("ENABLE_FAST_TLS", "true").lower() in ("true", "1", "yes")
     FALLBACK_PROXY_URL: Optional[str] = os.getenv("FALLBACK_PROXY_URL", None)
     # More Tier 4 proxies, comma-separated; merged with FALLBACK_PROXY_URL and rotated (app/solver/proxy_pool.py).

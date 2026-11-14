@@ -326,7 +326,7 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, 200)
         browser_mock.assert_awaited_once()
 
-    async def test_cookie_merge_keys_by_domain_path_name_not_name_alone(self):
+    async def test_imported_cookies_are_isolated_from_shared_cache(self):
         input_cookie = _cookie("session", "input-value", domain="other.example.com")
         cached_cookie = _cookie("session", "cached-value", domain="example.com")
         with patch("app.solver.engine.cookie_cache.get_cookies_with_user_agent_async", new=AsyncMock(return_value=([cached_cookie], None))), \
@@ -336,9 +336,8 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
             await self.engine.process_request(req)
             called_cookies = fast_mock.call_args.kwargs["cookies"]
             seen = {(c.domain, c.name, c.value) for c in called_cookies}
-            # Same-name cookies on different domains must both survive the merge.
-            self.assertIn(("other.example.com", "session", "input-value"), seen)
-            self.assertIn(("example.com", "session", "cached-value"), seen)
+            # Imported cookies mark a private request; never merge another client's cached state.
+            self.assertEqual(seen, {("other.example.com", "session", "input-value")})
 
     async def test_skip_cache_bypasses_cookie_cache(self):
         with patch("app.solver.engine.cookie_cache.get_cookies_with_user_agent_async", new=AsyncMock()) as cache_mock, \

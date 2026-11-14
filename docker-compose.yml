@@ -29,6 +29,7 @@ services:
       - NAS_MODE=true            # Conservative worker budgeting for UGREEN NASync / Synology / Unraid
       - HEADLESS=true
       - ENABLE_FAST_TLS=true
+      - FLARESOLVERR_COOKIE_FALLBACK=${FLARESOLVERR_COOKIE_FALLBACK:-false}
       - COOKIE_CACHE_TTL=7200
       - MITM_ENABLED=${MITM_ENABLED:-false}
       - MITM_HOST=0.0.0.0

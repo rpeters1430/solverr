@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Any, Tuple
@@ -413,7 +414,7 @@ class BrowserPool:
                 )
 
             # The warm pool uses Solverr's egress proxy; caller-selected proxies and UAs use a fresh process.
-            use_pool = self.camoufox_pool is not None and not pw_proxy and not user_agent
+            use_pool = self.camoufox_pool is not None and not pw_proxy and not user_agent and method.upper() in {"GET", "HEAD"}
             last_error: Optional[BaseException] = None
 
             if use_pool:
@@ -822,6 +823,8 @@ class BrowserPool:
                             # Tier 3.5 for the slider: only through a proxy, which the service must share.
                             datadome_solver_tried = True
                             if await try_datadome_slider_solver(page, context, url, active_ua, proxy_url, solver_window):
+                                if method.upper() not in {"GET", "HEAD"}:
+                                    raise ChallengeNotSolvedError(active_challenge, "refusing automatic POST replay after CAPTCHA solving")
                                 await navigate_to_target(
                                     page, url, method, post_data, max(1000, int((deadline - time.monotonic()) * 1000))
                                 )
@@ -859,6 +862,8 @@ class BrowserPool:
                         logger.info(f"[BrowserPool] {active_challenge} clearance cookie issued; waiting for the site to redirect.")
                     elif now_wall - sensor_earned_at >= SENSOR_REDIRECT_GRACE_SECONDS and loop_deadline - now_wall > 2.0:
                         # The check passed but the provider's own redirect never fired: load the target ourselves.
+                        if method.upper() not in {"GET", "HEAD"}:
+                            raise ChallengeNotSolvedError(active_challenge, "refusing automatic POST replay after clearance")
                         logger.info(f"[BrowserPool] {active_challenge} cookie set but still on the challenge page; reloading {url}")
                         await navigate_to_target(
                             page, url, method, post_data, max(1000, int((deadline - now_wall) * 1000))
@@ -1189,6 +1194,9 @@ class BrowserPool:
         nav_timeout_ms = max(1000, int((deadline - time.monotonic()) * 1000))
         response, initial_status = await navigate_to_target(page, url, method, post_data, nav_timeout_ms)
 
+        proxy_status = _header_value(last_main_headers, "proxy-status")
+        if re.search(r"\bSolverr\s*;\s*error=", proxy_status, re.I):
+            raise RuntimeError("Upstream Solverr proxy failed; refusing to accept its error as target content")
         curr_page_url = page.url or ""
         if response is None and initial_status == 0 and (not curr_page_url or curr_page_url.startswith("about:blank")):
             logger.warning(f"[BrowserPool] Browser navigation failed to reach target URL '{url}'")

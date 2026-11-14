@@ -179,6 +179,8 @@ class V1Request(BaseModel):
         return None
 
 class SolutionModel(BaseModel):
+    # HTTP redirect provenance protects an already submitted POST from tier replay.
+    http_redirected: bool = Field(default=False, exclude=True)
     url: str
     status: int
     headers: Dict[str, str] = Field(default_factory=dict)

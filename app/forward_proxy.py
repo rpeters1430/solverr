@@ -17,7 +17,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from app.config import settings
-from app.models.flaresolverr import V1Request
+from app.models.flaresolverr import CookieModel, V1Request
 from app.proxy_certificates import ProxyCertificateAuthority
 from app.security import check_target_url_async
 from app.egress_proxy import egress_proxy
@@ -282,8 +282,16 @@ class ForwardProxyServer:
             key: value for key, value in inbound_headers.items()
             if key not in PROXY_HOP_HEADERS and key not in {"host", "expect"}
         }
+        imported = SimpleCookie()
+        try:
+            imported.load(inbound_headers.get("cookie", ""))
+        except Exception as exc:
+            raise ProxyProtocolError(400, "Invalid Cookie header") from exc
+        host = urlsplit(url).hostname
+        cookies = [CookieModel(name=name, value=value.value, domain=host, path="/") for name, value in imported.items()]
         request = V1Request(
             cmd=f"request.{method.lower()}",
+            cookies=cookies or None,
             url=url,
             postData=body,
             headers=forward_headers,
@@ -305,7 +313,8 @@ class ForwardProxyServer:
             body_bytes = payload.encode(encoding, errors="replace")
         except LookupError:
             body_bytes = payload.encode("utf-8")
-        if method.upper() == "HEAD":
+        no_body = method.upper() == "HEAD" or status in {204, 304}
+        if no_body:
             body_bytes = b""
 
         headers_out = []
@@ -334,7 +343,12 @@ class ForwardProxyServer:
                 morsel["samesite"] = cookie.sameSite
             value = morsel.OutputString()
             headers_out.append(("set-cookie", value))
-        headers_out.append(("content-length", str(len(body_bytes))))
+        if no_body:
+            original_length = next((str(v) for k, v in (solution.headers or {}).items() if str(k).lower() == "content-length"), "")
+            if status != 204 and original_length.isdigit():
+                headers_out.append(("content-length", original_length))
+        else:
+            headers_out.append(("content-length", str(len(body_bytes))))
         headers_out.append(("connection", "close"))
         try:
             reason = HTTPStatus(status).phrase
@@ -380,7 +394,9 @@ class ForwardProxyServer:
         }
         # Keep byte ranges stable and avoid a decompression/recompression cycle.
         request_headers.setdefault("accept-encoding", "identity")
-        request = self._upstream.build_request(method, url, headers=request_headers, content=body)
+        # Build a Request directly: AsyncClient.build_request would merge its cookie jar,
+        # leaking a previous proxy client's Set-Cookie into this client's request.
+        request = httpx.Request(method, url, headers=request_headers, content=body)
         upstream_response = await self._upstream.send(request, stream=True)
         content_type = upstream_response.headers.get("content-type", "").lower()
         if any(content_type.startswith(value) for value in STREAMABLE_CONTENT_TYPES):
@@ -407,7 +423,7 @@ class ForwardProxyServer:
             # framing is removed by httpx, so those responses end at connection close.
             writer.write(b"Connection: close\r\n\r\n")
             await writer.drain()
-            if method.upper() != "HEAD":
+            if method.upper() != "HEAD" and status not in {204, 304}:
                 try:
                     async for chunk in upstream_response.aiter_raw():
                         if chunk:
@@ -433,6 +449,7 @@ class ForwardProxyServer:
         headers = [
             f"HTTP/1.1 {status} {reason}\r\n",
             "Content-Type: text/plain; charset=utf-8\r\n",
+            "Proxy-Status: Solverr; error=http_request_error\r\n",
             "Proxy-Authenticate: Basic realm=\"Solverr\"\r\n" if status == 407 else "",
             f"Content-Length: {len(body)}\r\n",
             "Connection: close\r\n\r\n",

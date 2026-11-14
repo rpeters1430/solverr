@@ -13,6 +13,7 @@ from app.config import settings
 from app.logging_config import sanitize_proxy_url
 from app.security import check_target_url_async
 from app.egress_proxy import egress_proxy
+from app.solver.browser.challenges import active_challenge_markup
 from app.solver.meta_refresh import MAX_REFRESH_HOPS, meta_refresh_target
 
 logger = logging.getLogger("solverr.fast_tls")
@@ -213,6 +214,7 @@ class FastTLSEngine:
         proxies: Optional[Dict[str, str]],
         deadline: float,
         first_label: str = "Target",
+        request_state: Optional[Dict[str, bool]] = None,
     ):
         """Follow HTTP redirects by hand so every hop gets the SSRF check, within one deadline."""
         current_url = url
@@ -237,6 +239,8 @@ class FastTLSEngine:
             }
             if current_method == "POST":
                 resp = await session.post(current_url, data=current_post_data, **request_kwargs)
+            elif current_method == "HEAD":
+                resp = await session.head(current_url, **request_kwargs)
             else:
                 resp = await session.get(current_url, **request_kwargs)
 
@@ -246,6 +250,8 @@ class FastTLSEngine:
             if redirect_count >= MAX_REDIRECTS:
                 raise RuntimeError(f"Redirect limit ({MAX_REDIRECTS}) exceeded")
 
+            if request_state is not None:
+                request_state["redirected"] = True
             next_url = urljoin(str(resp.url), location)
             await check_target_url_async(next_url, label="Redirect target")
             if resp.status_code == 303 or (resp.status_code in (301, 302) and current_method == "POST"):
@@ -263,7 +269,7 @@ class FastTLSEngine:
         cookies: Optional[List[CookieModel]] = None,
         headers: Optional[Dict[str, str]] = None,
         proxy: Optional[str] = None,
-        timeout: int = 15,
+        timeout: float = 15,
         user_agent: Optional[str] = None,
         session_id: Optional[str] = None,
         follow_meta_refresh: bool = False,
@@ -309,12 +315,15 @@ class FastTLSEngine:
         proxy_desc = f" | Proxy: {sanitize_proxy_url(proxy)}" if proxy else ""
         logger.info(f"[FastTLS] Executing async {method.upper()} -> {url} (impersonate='{impersonate_target}', timeout={timeout}s{proxy_desc})")
 
+        private_request = bool(session_id or cookies or any(str(k).lower() in {"authorization", "cookie"} for k in (headers or {})))
+        own_session = private_request or not self._pool_enabled
         session = None
         deadline = time.monotonic() + timeout
+        request_state = {"redirected": False}
         try:
-            session = await self._get_session(pool_key, impersonate_target)
+            session = AsyncSession(impersonate=impersonate_target) if own_session else await self._get_session(pool_key, impersonate_target)
             resp = await self._fetch_following_redirects(
-                session, url, method.upper(), post_data, req_headers, cookie_dict, proxies, deadline
+                session, url, method.upper(), post_data, req_headers, cookie_dict, proxies, deadline, request_state=request_state
             )
 
             # Opt-in: a short-delay <meta http-equiv="refresh"> is followed like any other redirect.
@@ -328,6 +337,7 @@ class FastTLSEngine:
                 if not refresh or refresh[1] in visited:
                     break
                 visited.add(refresh[1])
+                request_state["redirected"] = True
                 logger.info(f"[FastTLS] Following meta refresh (hop {hop}/{MAX_REFRESH_HOPS}) -> {refresh[1]}")
                 resp = await self._fetch_following_redirects(
                     session, refresh[1], "GET", None, req_headers, None, proxies, deadline, first_label="Redirect target"
@@ -337,7 +347,7 @@ class FastTLSEngine:
             is_cf_challenge = False
             matched_marker = None
             body_text = resp.text or ""
-            body_lower = body_text.lower()
+            body_lower = active_challenge_markup(body_text).lower()
             content_type = (resp.headers.get("content-type") or "").lower()
             is_non_html_api = any(
                 ct in content_type for ct in [
@@ -446,18 +456,20 @@ class FastTLSEngine:
                 headers=dict(resp.headers),
                 response=resp.text,
                 cookies=captured_cookies,
-                userAgent=active_ua
+                userAgent=active_ua,
+                http_redirected=request_state["redirected"],
             )
 
             return is_cf_challenge, solution
 
         except Exception as e:
-            await self._evict_session(pool_key)
+            if not own_session:
+                await self._evict_session(pool_key)
             self.record_outcome(url, impersonate_target, False)
             logger.warning(f"[FastTLS] Fast TLS request failed or timed out for {url}: {type(e).__name__} - {sanitize_proxy_url(str(e))}")
             return True, None
         finally:
-            if session is not None and not self._pool_enabled:
+            if session is not None and own_session:
                 try:
                     await session.close()
                 except Exception:

@@ -3,6 +3,20 @@
 Solverr follows [semantic versioning](https://semver.org). Releases are published as Docker images on
 `ghcr.io/rpeters1430/solverr`; pushing a `vX.Y.Z` tag also produces the matching semver image tags.
 
+## Unreleased
+
+### Added
+- Optional `FLARESOLVERR_COOKIE_FALLBACK` for stateless FlareSolverr GET cookie handoff, with
+  scoped/expiry validation and the exact Prowlarr public connectivity-check exception.
+
+### Fixed
+- Prevent ambiguous POST replay across solver tiers and browser retries; isolate authenticated,
+  imported-cookie and named-session requests from shared clearance state and HTTP cookie jars.
+- Include session IO, browser queueing and tier work in request deadlines; reserve fallback proxy time.
+- Ignore inert Cloudflare examples/comments and ordinary verification phrases while retaining live walls.
+- Import forward-proxy Cookie headers for browser escalation, prevent cross-client upstream cookie reuse,
+  mark generated proxy failures with `Proxy-Status`, and preserve HEAD/204/304 response semantics.
+
 ## 1.8.0 — 2026-10-18
 
 ### Added

@@ -1,4 +1,5 @@
 import time
+import asyncio
 import re
 import logging
 from typing import Dict, Any, Optional
@@ -20,6 +21,16 @@ except ImportError:
 
 logger = logging.getLogger("solverr.api.flaresolverr")
 router = APIRouter()
+
+async def _solve_with_session(req: V1Request, require_cookies: bool = False):
+    # Session IO, solving and persistence share the client's original maxTimeout.
+    async with asyncio.timeout(max(0.001, (req.maxTimeout or settings.BROWSER_TIMEOUT_MS) / 1000)):
+        storage = await apply_session(req)
+        options = {"require_cookies": True} if require_cookies else {}
+        solution = await solver_engine.process_request(req, browser_storage=storage, **options)
+        await persist_session(req, solution)
+        return solution
+
 
 def _extract_data(html: str, rules: Dict[str, str]) -> Dict[str, Any]:
     """Helper to extract data from HTML via CSS selectors or regex patterns."""
@@ -85,11 +96,8 @@ async def flaresolverr_api(req: V1Request):
                 endTimestamp=int(time.time() * 1000)
             )
         
-        storage = await apply_session(req)
-
         try:
-            solution = await solver_engine.process_request(req, browser_storage=storage)
-            await persist_session(req, solution)
+            solution = await _solve_with_session(req, require_cookies=settings.FLARESOLVERR_COOKIE_FALLBACK and cmd == "request.get")
 
             if req.returnOnlyCookies:
                 solution.response = ""
@@ -115,6 +123,8 @@ async def flaresolverr_api(req: V1Request):
             # plus the reason when it's an unsolved challenge (whose text we compose ourselves).
             if isinstance(e, ChallengeNotSolvedError):
                 detail = f"Error solving the challenge: {e}"
+            elif isinstance(e, TimeoutError):
+                detail = "Error: request maxTimeout exhausted (including session setup and browser queue)"
             elif isinstance(e, RequestConfigError):
                 detail = f"Error: {e}"
             else:
@@ -196,9 +206,7 @@ async def native_scrape_api(req: ScrapeRequest):
     v1_req = req.to_v1_request()
 
     try:
-        storage = await apply_session(v1_req)
-        solution = await solver_engine.process_request(v1_req, browser_storage=storage)
-        await persist_session(v1_req, solution)
+        solution = await _solve_with_session(v1_req)
         duration_ms = round((time.time() - start_ts) * 1000, 2)
 
         tier_used = solution.tier or "tier1_fast_tls"
@@ -283,9 +291,7 @@ async def transparent_proxy(
     )
 
     try:
-        storage = await apply_session(v1_req)
-        solution = await solver_engine.process_request(v1_req, browser_storage=storage)
-        await persist_session(v1_req, solution)
+        solution = await _solve_with_session(v1_req)
         media_type = solution.headers.get("content-type", "text/html")
         if ";" in media_type:
             media_type = media_type.split(";")[0].strip()

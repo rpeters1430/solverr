@@ -8,10 +8,8 @@ from urllib.parse import urlparse
 # brand name: "datadome" or "geetest" alone also appears in telemetry tags and ordinary prose.
 CHALLENGE_MARKERS: Dict[str, List[str]] = {
     "cloudflare_turnstile": [
-        "just a moment...",
         "cf-turnstile",
         "cf-challenge",
-        "checking your browser",
         "challenges.cloudflare.com",
         "_cf_chl_opt",
     ],
@@ -94,7 +92,7 @@ _ANUBIS_PATH = "/.within.website/x/cmd/anubis/"
 _ANUBIS_BOOTSTRAP_RE = re.compile(r"/\.within\.website/x/cmd/anubis/static/js/main\.mjs(?:[?#]|$)", re.I)
 _ANUBIS_REJECT_IMG_RE = re.compile(r"/\.within\.website/x/cmd/anubis/static/img/reject\.webp(?:[?#]|$)", re.I)
 # Markup inside these is never executed or shown, so a wall quoted there (docs, a code sample) doesn't count.
-_INERT_BLOCK_RE = re.compile(r"<(template|noscript|textarea|style)\b[^>]*>.*?</\1\s*>", re.I | re.S)
+_INERT_BLOCK_RE = re.compile(r"<(template|noscript|textarea|style|pre|code)\b[^>]*>.*?</\1\s*>", re.I | re.S)
 _SCRIPT_RE = re.compile(r"<script\b([^>]*)>(.*?)</script\s*>", re.I | re.S)
 _IMG_RE = re.compile(r"<img\b([^>]*)>", re.I)
 # reCAPTCHA v2 shows a checkbox (or an invisible v2 binds to a form); v3 only scores in the
@@ -263,6 +261,11 @@ def _is_imperva_bot_wall(title_lower: str, content_lower: str) -> bool:
     return _IMPERVA_BOT_WALL_TITLE in title_lower or _IMPERVA_BOT_WALL_TITLE in content_lower
 
 
+def active_challenge_markup(content: str) -> str:
+    """Ignore quoted examples and comments; retain executable scripts and live elements."""
+    return _INERT_BLOCK_RE.sub("", re.sub(r"<!--.*?-->", "", content or "", flags=re.S))
+
+
 def detect_challenge(
     title: str,
     content: str,
@@ -277,7 +280,9 @@ def detect_challenge(
     if declared:
         return declared
     title_lower = title.lower() if title else ""
-    content_lower = content.lower() if content else ""
+    content_lower = active_challenge_markup(content).lower()
+    if is_challenge_title(title) and not any(t in title_lower for t in ("ddos-guard", "ddos protection by cloudflare")):
+        return "cloudflare_5s" if title_lower.startswith("attention required") else "cloudflare_turnstile"
     for ctype, markers in CHALLENGE_MARKERS.items():
         if any(m in title_lower or (check_content and m in content_lower) for m in markers):
             return ctype
@@ -315,7 +320,7 @@ def is_challenge_wall(
         return True
     if status in WALL_STATUS_CODES:
         return True
-    content_lower = content.lower() if content else ""
+    content_lower = active_challenge_markup(content).lower()
     if challenge == "datadome" and _DATADOME_OBJECT_RE.search(content_lower):
         return True
     if any(m in content_lower for m in WALL_MARKERS.get(challenge, ())):
@@ -391,13 +396,15 @@ def needs_unsolvable_captcha(
 
 
 def is_challenge_title(title: str) -> bool:
-    title_lower = title.lower() if title else ""
-    if any(t in title_lower for t in CHALLENGE_TITLE_MARKERS):
+    title_lower = (title or "").strip().lower()
+    base = re.sub(r"\s*\|\s*cloudflare\s*$", "", title_lower).rstrip(".!… ")
+    if base in {"just a moment", "checking your browser", "attention required", "ddos-guard", "ddos protection by cloudflare", "please wait 5 seconds"}:
         return True
-    # Cloudflare's "Loading https://..." title appears mid-redirect, before the real page arrives.
-    if title_lower.startswith("loading ") and "://" in title_lower:
+    if re.fullmatch(r"checking your browser(?: before accessing .+|\s+-\s+.+)", base):
         return True
-    return False
+    if base == "ddos-guard protection":
+        return True
+    return title_lower.startswith("loading ") and "://" in title_lower
 
 
 def is_browser_error(title: str, url: str = "") -> bool:

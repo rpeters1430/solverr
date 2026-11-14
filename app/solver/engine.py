@@ -3,9 +3,14 @@ import json
 import hashlib
 import asyncio
 import logging
+import uuid
+import re
+from http.cookies import SimpleCookie
+from urllib.parse import urlsplit
 from typing import Any, Dict, List, Optional
 from app.models.flaresolverr import V1Request, SolutionModel, CookieModel
 from app.solver.cache import cookie_cache
+from app.solver.cookie_handoff import usable_cookies, is_prowlarr_ping
 from app.solver.fast_tls import fast_tls_engine
 from app.solver.browser import IP_BLOCKED_REASON, ChallengeNotSolvedError, browser_pool, is_google_sorry_url
 from app.solver.captcha_solver import captcha_solver
@@ -143,7 +148,7 @@ metrics = PerformanceMetrics()
 class RequestBudget:
     """Tracks remaining timeout budget across multi-tier solve stages using a monotonic clock."""
     def __init__(self, timeout_ms: int):
-        self.total_timeout_s = max(1.0, timeout_ms / 1000.0)
+        self.total_timeout_s = max(0.001, timeout_ms / 1000.0)
         self.start_mono = time.monotonic()
         self.deadline = self.start_mono + self.total_timeout_s
 
@@ -203,10 +208,21 @@ class HybridSolverEngine:
             logger.warning("Request history could not be persisted", exc_info=True)
 
     async def process_request(
+        self, req: V1Request, bypass_cookie_cache: bool = False,
+        browser_storage: Optional[Dict[str, Dict[str, Dict[str, str]]]] = None,
+        require_cookies: bool = False,
+    ) -> SolutionModel:
+        # Includes validation, queueing, coalesced waits and all tier work. Cancellation
+        # propagates to the owned browser operation so its finally blocks release slots.
+        async with asyncio.timeout(max(0.001, (req.maxTimeout or settings.BROWSER_TIMEOUT_MS) / 1000)):
+            return await self._process_request(req, bypass_cookie_cache, browser_storage, require_cookies)
+
+    async def _process_request(
         self,
         req: V1Request,
         bypass_cookie_cache: bool = False,
         browser_storage: Optional[Dict[str, Dict[str, Dict[str, str]]]] = None,
+        require_cookies: bool = False,
     ) -> SolutionModel:
         """`browser_storage` is the request's session web storage (from apply_session()), restored
         into the browser tiers; it is never taken from the client."""
@@ -228,6 +244,7 @@ class HybridSolverEngine:
         # Dedup key: every field that can change the outcome, so differing requests never coalesce.
         fingerprint = {
             "method": method,
+            "unsafe_request": uuid.uuid4().hex if method not in {"GET", "HEAD"} else None,
             "url": url,
             "postData": req.postData,
             "cookies": [(c.name, c.value, c.domain, c.path) for c in (req.cookies or [])],
@@ -245,6 +262,7 @@ class HybridSolverEngine:
             "extract_records": req.extract_records,
             "maxTimeout": req.maxTimeout,
             "bypassCookieCache": bypass_cookie_cache,
+            "requireCookies": require_cookies,
             "followMetaRefresh": req.follows_meta_refresh(),
             "forceFallbackProxy": req.forceFallbackProxy,
             "capture": req.debug_capture(),
@@ -272,7 +290,7 @@ class HybridSolverEngine:
         self._inflight[inflight_key] = future
 
         try:
-            res = await self._do_process_request(req, budget, url, method, bypass_cookie_cache, browser_storage)
+            res = await self._do_process_request(req, budget, url, method, bypass_cookie_cache, browser_storage, require_cookies)
             _cap_response_body(res)
             await self._record_history(url, budget, solution=res)
             if not future.done():
@@ -306,13 +324,21 @@ class HybridSolverEngine:
         method: str,
         bypass_cookie_cache: bool = False,
         browser_storage: Optional[Dict[str, Dict[str, Dict[str, str]]]] = None,
+        require_cookies: bool = False,
     ) -> SolutionModel:
         proxy_url = req.get_proxy_url()
+        private_request = bool(req.session or req.cookies or any(
+            str(k).lower() in {"authorization", "cookie"} for k in (req.headers or {})
+        ))
+        authorization = any(str(k).lower() == "authorization" for k in (req.headers or {}))
+        safe_method = method in {"GET", "HEAD"}
+        require_cookies = require_cookies and method == "GET" and not private_request and not req.fastTlsOnly
+        share_cache = not (private_request or bypass_cookie_cache or getattr(req, "skip_cache", False))
 
         combined_cookies: List[CookieModel] = []
         cached_cookies = []
         cached_ua: Optional[str] = None
-        if not (bypass_cookie_cache or getattr(req, "skip_cache", False)):
+        if share_cache:
             # Only cookies earned over this request's own route: clearance is bound to the egress IP.
             cached_cookies, cached_ua = await cookie_cache.get_cookies_with_user_agent_async(url, proxy=proxy_url)
             metrics.record_cookie_cache_lookup(hit=bool(cached_cookies))
@@ -326,6 +352,20 @@ class HybridSolverEngine:
             for c in req.cookies:
                 combined_cookies.append(c)
                 input_cookie_ids.add(_cookie_identity(c))
+
+        # Cookie headers supplied by proxy/API clients also need to survive browser escalation.
+        raw_cookie = next((v for k, v in (req.headers or {}).items() if str(k).lower() == "cookie"), "")
+        if raw_cookie:
+            imported = SimpleCookie()
+            try:
+                imported.load(raw_cookie)
+            except Exception as exc:
+                raise RequestConfigError("Invalid Cookie header") from exc
+            for name, morsel in imported.items():
+                c = CookieModel(name=name, value=morsel.value, domain=urlsplit(url).hostname, path="/")
+                if _cookie_identity(c) not in input_cookie_ids:
+                    combined_cookies.append(c)
+                    input_cookie_ids.add(_cookie_identity(c))
 
         had_cache = False
         for cc in cached_cookies:
@@ -346,7 +386,7 @@ class HybridSolverEngine:
 
         # Tiers 1 and 2
         if settings.ENABLE_FAST_TLS and not req.forceBrowser:
-            tls_timeout = max(1, min(10, int(budget.remaining_s)))
+            tls_timeout = max(0.001, min(10, budget.remaining_s))
             logger.info(f"[HybridEngine] Level 1/2 Fast TLS: Attempting direct HTTP request (timeout={tls_timeout}s, remaining_budget={budget.remaining_s:.1f}s)...")
             
             is_cf_challenge, solution = await fast_tls_engine.request(
@@ -362,12 +402,37 @@ class HybridSolverEngine:
                 follow_meta_refresh=req.follows_meta_refresh(),
             )
 
+            if solution and any(str(k).lower() == "proxy-status" and re.search(r"\bSolverr\s*;\s*error=", str(v), re.I) for k, v in (solution.headers or {}).items()):
+                raise RuntimeError("Upstream Solverr proxy failed; refusing to accept its error as target content")
+
+            # A transport failure says nothing about whether the server committed a POST.
+            # Only an explicit provider rejection can authorize a browser submission.
+            if not safe_method:
+                if solution is None:
+                    raise RuntimeError(f"{method} result is ambiguous; refusing automatic replay")
+                if solution.http_redirected and is_cf_challenge:
+                    raise RuntimeError("POST followed a redirect before a follow-up challenge; refusing automatic replay")
+                from app.solver.browser import challenge_from_headers, detect_challenge, is_challenge_wall
+                title_match = re.search(r"<title[^>]*>(.*?)</title>", solution.response or "", re.I | re.S)
+                title = title_match.group(1) if title_match else ""
+                challenge = detect_challenge(title, solution.response or "", True, solution.headers, solution.status)
+                rejected = (
+                    solution.status in {403, 429, 503} or bool(challenge_from_headers(solution.headers, solution.status))
+                ) and is_challenge_wall(challenge, title, solution.response or "", solution.status, solution.headers)
+                if not rejected:
+                    is_cf_challenge = False
+
             is_valid_http_response = (
-                solution.status < 400
+                not safe_method or solution.status < 400
                 or solution.status in (400, 401, 404, 405, 410, 422)
                 or (solution.status == 429 and not settings.ESCALATE_HTTP_429)
             ) if solution else False
-            if not is_cf_challenge and solution and is_valid_http_response:
+            needs_handoff = bool(
+                require_cookies and solution and 200 <= solution.status < 300
+                and not usable_cookies(solution.cookies or combined_cookies, url)
+                and not is_prowlarr_ping(url, solution)
+            )
+            if not is_cf_challenge and solution and is_valid_http_response and not needs_handoff:
                 elapsed_ms = budget.elapsed_ms
                 tier_name = "tier2_cache" if had_cache else "tier1_fast_tls"
                 if had_cache:
@@ -380,7 +445,7 @@ class HybridSolverEngine:
                 if not solution.cookies and combined_cookies:
                     solution.cookies = list(combined_cookies)
 
-                if solution.cookies:
+                if solution.cookies and share_cache:
                     await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent, proxy=proxy_url)
                 event_broadcaster.emit("solve", {
                     "url": url,
@@ -399,7 +464,7 @@ class HybridSolverEngine:
                     solution.tier = "tier1_fast_tls"
                     if not solution.cookies and combined_cookies:
                         solution.cookies = list(combined_cookies)
-                    if solution.cookies:
+                    if solution.cookies and share_cache:
                         await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent, proxy=proxy_url)
                     event_broadcaster.emit("solve", {
                         "url": url,
@@ -427,8 +492,12 @@ class HybridSolverEngine:
             reason = "forceBrowser=True requested" if req.forceBrowser else "ENABLE_FAST_TLS=false"
             logger.info(f"[HybridEngine] Skipping Level 1/2 Fast TLS ({reason}). Proceeding directly to Level 3 Stealth Browser...")
 
+        # Browser headers are not a supported Authorization transport; never drop it silently.
+        if authorization:
+            raise RequestConfigError("Browser escalation with Authorization is unsupported; use cookies or the HTTP tier")
+
         # Tier 3
-        if budget.is_expired or budget.remaining_s < 1.0:
+        if budget.is_expired:
             raise TimeoutError(f"Request timeout budget exhausted ({budget.elapsed_ms:.0f}ms elapsed)")
 
         def _browser_kwargs(proxy: Optional[str], timeout_ms: int) -> Dict[str, Any]:
@@ -457,20 +526,28 @@ class HybridSolverEngine:
 
         if req.forceFallbackProxy:
             logger.info("[HybridEngine] forceFallbackProxy=True requested. Going straight to Tier 4 Fallback Proxy...")
-            return await self._solve_via_fallback_proxies(url, budget, _browser_kwargs, TimeoutError("Request timeout budget exhausted before a Tier 4 attempt"))
+            return await self._solve_via_fallback_proxies(url, budget, _browser_kwargs, share_cache, TimeoutError("Request timeout budget exhausted before a Tier 4 attempt"), allow_retry=safe_method, require_cookies=require_cookies)
 
+        can_fallback = safe_method and fallback_proxy_pool.enabled and not proxy_url
+        # Reserve a real Tier 4 window instead of handing Tier 3 the whole deadline.
+        reserve_ms = min(10000, int(budget.remaining_ms * 0.30)) if can_fallback else 0
+        direct_timeout_ms = max(1, budget.remaining_ms - reserve_ms)
         try:
             if tier1_ip_block:
                 logger.info(f"[HybridEngine] {tier1_ip_block} refused this IP at Tier 1; skipping the same-IP browser solve.")
                 raise ChallengeNotSolvedError(tier1_ip_block, IP_BLOCKED_REASON, ip_blocked=True)
-            solution = await browser_pool.solve(**_browser_kwargs(proxy_url, max(3000, budget.remaining_ms)))
+            solution = await asyncio.wait_for(
+                browser_pool.solve(**_browser_kwargs(proxy_url, direct_timeout_ms)), direct_timeout_ms / 1000
+            )
 
+            if require_cookies and not usable_cookies(solution.cookies, url):
+                raise RequestConfigError("FlareSolverr cookie handoff failed: no usable cookies returned by the browser")
             elapsed_ms = budget.elapsed_ms
             metrics.record_browser(elapsed_ms, solution.challengeType)
             logger.info(f"[HybridEngine] Level 3 Stealth Browser SUCCESS in {elapsed_ms:.1f}ms | Status: {solution.status} | Challenge: {solution.challengeType or 'none'}")
             solution.tier = "tier3_stealth_browser"
 
-            if solution.cookies:
+            if solution.cookies and share_cache:
                 await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent, proxy=proxy_url)
 
             event_broadcaster.emit("solve", {
@@ -488,22 +565,23 @@ class HybridSolverEngine:
             if isinstance(e, (asyncio.TimeoutError, TimeoutError)):
                 metrics.record_timeout()
             # Tier 4: retry through the fallback proxy pool, unless the caller chose its own proxy.
-            if fallback_proxy_pool.enabled and not proxy_url and not budget.is_expired and budget.remaining_s >= 2.0:
+            if can_fallback and not isinstance(e, RequestConfigError) and not budget.is_expired and budget.remaining_s >= 2.0:
                 logger.warning(f"[HybridEngine] Level 3 direct solve failed ({e}). Escalating to Tier 4 Fallback Proxy (remaining budget: {budget.remaining_s:.1f}s)...")
-                return await self._solve_via_fallback_proxies(url, budget, _browser_kwargs, e)
+                return await self._solve_via_fallback_proxies(url, budget, _browser_kwargs, share_cache, e, require_cookies=require_cookies)
 
             metrics.record_failure()
             event_broadcaster.emit("solve_error", {"url": url, "error": str(e)})
             logger.error(f"[HybridEngine] Level 3 Stealth Browser solve FAILED for {url}: {type(e).__name__} - {e}")
             raise e
 
-    async def _solve_via_fallback_proxies(self, url: str, budget: RequestBudget, browser_kwargs, last_error: BaseException) -> SolutionModel:
+    async def _solve_via_fallback_proxies(self, url: str, budget: RequestBudget, browser_kwargs, share_cache: bool, last_error: BaseException,
+                                          allow_retry: bool = True, require_cookies: bool = False) -> SolutionModel:
         """Tier 4: a fresh Camoufox through each pooled fallback proxy in turn while the budget lasts."""
         if not fallback_proxy_pool.enabled:
             metrics.record_failure()
             raise ValueError("No fallback proxy is configured (FALLBACK_PROXY_URL / FALLBACK_PROXY_URLS)")
         tried: List[str] = []
-        attempts = min(len(fallback_proxy_pool), settings.FALLBACK_PROXY_MAX_ATTEMPTS)
+        attempts = min(len(fallback_proxy_pool), settings.FALLBACK_PROXY_MAX_ATTEMPTS) if allow_retry else 1
         while len(tried) < attempts and not budget.is_expired and budget.remaining_s >= 2.0:
             fallback_proxy = fallback_proxy_pool.pick(exclude=tried)
             if fallback_proxy is None:
@@ -512,18 +590,21 @@ class HybridSolverEngine:
             await check_target_url_async(fallback_proxy, label="Fallback proxy")
             logger.info(f"[HybridEngine] Tier 4 attempt {len(tried)}/{attempts} via {fallback_proxy} (remaining budget: {budget.remaining_s:.1f}s)")
             try:
-                solution = await browser_pool.solve(**browser_kwargs(fallback_proxy, max(3000, budget.remaining_ms)))
+                attempt_ms = max(1, budget.remaining_ms)
+                solution = await asyncio.wait_for(browser_pool.solve(**browser_kwargs(fallback_proxy, attempt_ms)), attempt_ms / 1000)
             except Exception as fallback_err:
                 fallback_proxy_pool.report(fallback_proxy, ok=False)
                 logger.warning(f"[HybridEngine] Tier 4 Fallback Proxy attempt via {fallback_proxy} failed for {url}: {type(fallback_err).__name__} - {fallback_err}")
                 last_error = fallback_err
                 continue
+            if require_cookies and not usable_cookies(solution.cookies, url):
+                raise RequestConfigError("FlareSolverr cookie handoff failed: no usable cookies returned by the fallback browser")
             fallback_proxy_pool.report(fallback_proxy, ok=True)
             elapsed_ms = budget.elapsed_ms
             metrics.record_fallback_proxy(elapsed_ms)
             logger.info(f"[HybridEngine] Tier 4 Fallback Proxy SUCCESS in {elapsed_ms:.1f}ms | Status: {solution.status}")
             solution.tier = "tier4_fallback_proxy"
-            if solution.cookies:
+            if solution.cookies and share_cache:
                 # Earned through the fallback proxy, so replaying them direct would never validate.
                 await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent, proxy=fallback_proxy)
             event_broadcaster.emit("solve", {
