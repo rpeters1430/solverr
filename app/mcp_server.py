@@ -2,6 +2,7 @@
 
 Tools share the HTTP routes' singletons, so MCP solves appear in /metrics and the dashboard.
 """
+import asyncio
 import base64
 import logging
 from typing import Any, Dict, List, Optional
@@ -48,9 +49,10 @@ async def _solve(action: str, url: str, build_request) -> tuple:
         problems = "; ".join(f"{'.'.join(str(p) for p in err['loc']) or 'request'}: {err['msg']}" for err in e.errors())
         raise ToolError(f"Invalid arguments: {problems}") from e
     try:
-        storage = await apply_session(req)
-        solution: SolutionModel = await solver_engine.process_request(req, browser_storage=storage)
-        await persist_session(req, solution)
+        async with asyncio.timeout(max(0.001, (req.maxTimeout or settings.BROWSER_TIMEOUT_MS) / 1000)):
+            storage = await apply_session(req)
+            solution: SolutionModel = await solver_engine.process_request(req, browser_storage=storage)
+            await persist_session(req, solution)
     except Exception as e:
         logger.error(f"[MCP] {action} failed for {url}: {type(e).__name__}: {e}", exc_info=True)
         if isinstance(e, (ChallengeNotSolvedError, RequestConfigError)):

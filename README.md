@@ -95,6 +95,7 @@ services:
       NAS_MODE: "true"
       MAX_BROWSER_WORKERS: "1"
       ENABLE_FAST_TLS: "true"
+      FLARESOLVERR_COOKIE_FALLBACK: "${FLARESOLVERR_COOKIE_FALLBACK:-false}"
       FAST_TLS_POOL_ENABLED: "true"
       FAST_TLS_POOL_SIZE: "16"
       CAMOUFOX_POOL_ENABLED: "true"
@@ -226,6 +227,33 @@ Every request Solverr handles is a self-contained request/response - there's no 
    - **FlareSolverr Host**: `http://localhost:8191` (or `http://YOUR-NAS-IP:8191`)
    - **Max Timeout**: `60000`
 3. Click **Test** and **Save**.
+
+### Optional Prowlarr / Jackett cookie handoff
+
+If Solverr successfully returns a page but Prowlarr still reports missing cookies, add
+`FLARESOLVERR_COOKIE_FALLBACK: "true"` to Solverr's Compose environment and recreate the container.
+The bundled Compose files also accept `FLARESOLVERR_COOKIE_FALLBACK=true` in `.env`.
+The default is `false` to avoid launching a browser for sites that do not need cookie handoff.
+
+For stateless `/v1` and `/v2` GET requests, this option tries browser solving when a successful
+HTTP response has no non-empty, unexpired cookies matching the requested domain, path and HTTPS
+requirements. Browser work uses the original `maxTimeout`, including session setup and queueing.
+If no usable cookies are returned, Solverr reports an explicit error instead of inventing one.
+Prowlarr's exact public `https://prowlarr.servarr.com/v1/ping` check remains on the HTTP path when
+it returns `Pong` at the same final URL. Indexer URLs do not receive this exemption.
+
+Named sessions, imported cookies, authenticated requests and the native `/scrape` API keep their
+existing cookie-handoff behavior. Private requests bypass the shared clearance cache; forward-proxy
+`Cookie` headers are imported into the browser context for logged-in forum requests. Browser
+escalation with an `Authorization` header returns an explicit unsupported-transport error; use
+cookies for browser requests. Cookies tied to Solverr's IP or User-Agent may still be unsuitable
+for another client's direct connection; the forward proxy keeps those follow-up requests on Solverr.
+
+Automatic retries never resubmit a POST after an ambiguous transport failure. A POST explicitly
+rejected by a provider challenge may enter one browser attempt; browser fingerprint retries,
+clearance reloads and fallback-proxy retries cannot resubmit it. Ordinary origin error responses
+are returned as received. Safe GET/HEAD requests reserve up to 30% (at most 10 seconds) of the
+remaining browser budget for a configured fallback proxy.
 
 ## 🔀 Optional HTTP/HTTPS Forward Proxy (Docker, NAS, and LAN)
 
