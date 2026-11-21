@@ -68,6 +68,24 @@ class TestHybridSolverEngine(unittest.IsolatedAsyncioTestCase):
             req = V1Request(cmd="request.get", url="https://example.com", fastTlsOnly=True)
             sol = await self.engine.process_request(req)
             self.assertEqual(sol.status, 503)
+            self.assertEqual(sol.tier, "tier1_fast_tls")
+            browser_mock.assert_not_called()
+
+    async def test_fast_tls_only_with_cached_cookies_reports_tier2_cache(self):
+        from app.models.flaresolverr import CookieModel
+        from app.solver.engine import metrics
+        cached = ([CookieModel(name="cf_clearance", value="tok", domain="example.com")], None)
+        cache_hits_before = metrics.cache_hits
+        fast_hits_before = metrics.fast_tls_hits
+        with patch("app.solver.engine.cookie_cache.get_cookies_with_user_agent_async", new=AsyncMock(return_value=cached)), \
+             patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, _sol(403)))), \
+             patch("app.solver.engine.browser_pool.solve", new=AsyncMock()) as browser_mock:
+            req = V1Request(cmd="request.get", url="https://example.com", fastTlsOnly=True)
+            sol = await self.engine.process_request(req)
+            self.assertEqual(sol.status, 403)
+            self.assertEqual(sol.tier, "tier2_cache")
+            self.assertEqual(metrics.cache_hits, cache_hits_before + 1)
+            self.assertEqual(metrics.fast_tls_hits, fast_hits_before)
             browser_mock.assert_not_called()
 
     async def test_tier4_moves_to_the_next_pooled_proxy_after_a_failure(self):

@@ -459,6 +459,44 @@ class CookieCache:
         async with self._async_lock:
             await asyncio.to_thread(self.clear)
 
+    def clear_domain(self, url_or_domain: str, schedule_save: bool = True) -> int:
+        """Remove all cached cookies for a single normalized domain. Returns entries removed."""
+        domain = self._normalize_domain(url_or_domain)
+        if not domain:
+            return 0
+        removed = 0
+        if self._redis():
+            try:
+                keys = self._scan_keys(f"solverr:cookie:{domain}:*")
+                pipe = self.redis_client.pipeline(transaction=False)
+                if keys:
+                    pipe.delete(*keys)
+                pipe.zrem(DOMAIN_INDEX_KEY, domain)
+                pipe.execute()
+                removed = len(keys)
+            except Exception as e:
+                logger.debug(f"[CookieCache] Redis clear_domain error for '{domain}': {e}")
+                self._invalidate_redis()
+
+        for key in (domain, f".{domain}"):
+            entries = self._store.pop(key, None)
+            if entries:
+                removed += len(entries)
+
+        if removed:
+            self._domain_count_cache_at = 0.0
+            if schedule_save and not self.redis_client:
+                self._schedule_save()
+            logger.info(f"[CookieCache] Cleared {removed} cached cookie(s) for domain '{domain}'")
+        return removed
+
+    async def clear_domain_async(self, url_or_domain: str) -> int:
+        async with self._async_lock:
+            removed = await asyncio.to_thread(self.clear_domain, url_or_domain, False)
+            if removed and not self.redis_client:
+                self._schedule_save()
+            return removed
+
     async def export_netscape_async(self, domain_filter: Optional[str] = None) -> str:
         async with self._async_lock:
             return await asyncio.to_thread(self.export_netscape, domain_filter)

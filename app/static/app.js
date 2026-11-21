@@ -98,6 +98,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (tabName === 'cookies') {
             fetchCookies();
+            fetchSessions();
         } else if (tabName === 'history') {
             fetchHistory();
         }
@@ -184,6 +185,19 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('val-max-workers').textContent = workerLabel;
             document.getElementById('val-host-hardware').textContent = `${data.total_cpu_cores || 4} Cores / ${data.total_ram_gb || 8}GB RAM`;
             document.getElementById('val-cached-domains').textContent = `${data.cached_domains_count || 0} Domains`;
+
+            const fallbackEl = document.getElementById('val-fallback-proxies');
+            if (fallbackEl) {
+                const proxies = Array.isArray(data.fallback_proxies) ? data.fallback_proxies : [];
+                if (proxies.length === 0) {
+                    fallbackEl.textContent = 'None Configured';
+                    fallbackEl.className = 'badge badge-neutral';
+                } else {
+                    const healthy = proxies.filter(p => p.healthy).length;
+                    fallbackEl.textContent = `${healthy}/${proxies.length} Healthy`;
+                    fallbackEl.className = healthy === proxies.length ? 'badge badge-success' : (healthy > 0 ? 'badge badge-primary' : 'badge badge-neutral');
+                }
+            }
 
             if (data.cache_backend && document.getElementById('val-cache-backend')) {
                 document.getElementById('val-cache-backend').textContent = data.cache_backend;
@@ -450,7 +464,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             testResults.classList.remove('hidden');
-            document.getElementById('test-status-badge').textContent = `${data.http_status} OK (${elapsed}ms)`;
+            document.getElementById('test-status-badge').textContent = `HTTP ${data.http_status} (${elapsed}ms)`;
 
             const tbody = document.getElementById('res-cookies-body');
             tbody.innerHTML = '';
@@ -535,7 +549,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 `).join('');
 
                 card.innerHTML = `
-                    <h4 style="margin-bottom: 12px; color: var(--accent-cyan); word-break: break-all;">🌐 ${escapeHtml(domain)}</h4>
+                    <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px;">
+                        <h4 style="margin: 0; color: var(--accent-cyan); word-break: break-all;">🌐 ${escapeHtml(domain)}</h4>
+                        <button type="button" class="btn btn-secondary btn-sm btn-clear-domain" data-domain="${escapeHtml(domain)}" style="font-size: 0.75rem; padding: 4px 10px;">Clear</button>
+                    </div>
                     <div class="table-responsive">
                         <table class="data-table">
                             <thead>
@@ -545,11 +562,65 @@ document.addEventListener('DOMContentLoaded', () => {
                         </table>
                     </div>
                 `;
+                card.querySelector('.btn-clear-domain').addEventListener('click', async () => {
+                    const res = await fetch(`/api/cookies/${encodeURIComponent(domain)}`, { method: 'DELETE' });
+                    if (res.ok) {
+                        fetchCookies();
+                        fetchStats();
+                    }
+                });
                 container.appendChild(card);
             }
         } catch (e) {
             container.innerHTML = '<div style="color: var(--accent-rose);">Error loading cookie cache</div>';
         }
+    }
+
+    async function fetchSessions() {
+        const container = document.getElementById('sessions-list-container');
+        if (!container) return;
+        container.innerHTML = '<div style="color: var(--text-muted);">Loading active sessions...</div>';
+        try {
+            const res = await fetch('/api/sessions');
+            const data = await res.json();
+            const sessions = data.sessions || [];
+            if (sessions.length === 0) {
+                container.innerHTML = '<div style="color: var(--text-muted); padding: 12px 0;">No active sessions.</div>';
+                return;
+            }
+            const table = document.createElement('div');
+            table.className = 'table-responsive';
+            table.innerHTML = `
+                <table class="data-table">
+                    <thead><tr><th>Session ID</th><th style="text-align: right;">Action</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            `;
+            const tbody = table.querySelector('tbody');
+            for (const sid of sessions) {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td><code>${escapeHtml(sid)}</code></td>
+                    <td style="text-align: right;"><button type="button" class="btn btn-secondary btn-sm btn-delete-session" style="font-size: 0.75rem; padding: 4px 10px;">Destroy</button></td>
+                `;
+                tr.querySelector('.btn-delete-session').addEventListener('click', async () => {
+                    const delRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}`, { method: 'DELETE' });
+                    if (delRes.ok) {
+                        fetchSessions();
+                        fetchStats();
+                    }
+                });
+                tbody.appendChild(tr);
+            }
+            container.replaceChildren(table);
+        } catch (e) {
+            container.innerHTML = '<div style="color: var(--accent-rose);">Error loading active sessions</div>';
+        }
+    }
+
+    const refreshSessionsBtn = document.getElementById('btn-refresh-sessions');
+    if (refreshSessionsBtn) {
+        refreshSessionsBtn.addEventListener('click', fetchSessions);
     }
 
     document.getElementById('btn-clear-cookies').addEventListener('click', async () => {

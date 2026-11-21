@@ -6,13 +6,14 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import PlainTextResponse, JSONResponse
 from app.models.flaresolverr import TestRequestModel, V1Request
-from app.solver.engine import metrics, solver_engine
+from app.solver.engine import RequestConfigError, metrics, solver_engine
 from app.solver.cache import cookie_cache
 from app.solver.sessions import session_manager
 from app.solver.fast_tls import fast_tls_engine
 from app.solver.proxy_pool import fallback_proxy_pool
 from app.config import settings
 from app.logging_config import get_request_id
+from app.security import SSRFBlockedError
 from app.history import request_history
 
 logger = logging.getLogger("solverr.api.dashboard")
@@ -90,6 +91,13 @@ async def clear_cookies():
     await cookie_cache.clear_async()
     return {"status": "ok", "message": "Cookie cache cleared"}
 
+@router.delete("/cookies/{domain}")
+async def delete_domain_cookies(domain: str):
+    removed = await cookie_cache.clear_domain_async(domain)
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"No cached cookies found for domain '{domain}'")
+    return {"status": "ok", "domain": domain, "removed": removed}
+
 @router.get("/sessions")
 async def list_sessions():
     return {"sessions": await session_manager.list_sessions_async()}
@@ -134,6 +142,11 @@ async def test_solver(req: TestRequestModel):
             "headers": sol.headers,
             "screenshot": sol.screenshot
         }
+    except SSRFBlockedError as e:
+        logger.warning(f"[DashboardTest] SSRF validation blocked for {req.url}: {e}")
+        raise HTTPException(status_code=400, detail=f"SSRF validation failed: {e}")
+    except RequestConfigError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"[DashboardTest] Test solve failed for {req.url}: {e}", exc_info=True)
         # Exception text can carry proxy credentials; clients get only the request_id.

@@ -3,8 +3,17 @@ import asyncio
 import re
 import logging
 from typing import Dict, Any, Optional
+from urllib.parse import unquote
 from fastapi import APIRouter, HTTPException, Request as FastAPIRequest, Response
-from app.models.flaresolverr import V1Request, V1Response, ScrapeRequest, ScrapeResponse
+from app.models.flaresolverr import (
+    BatchScrapeItemResult,
+    BatchScrapeRequest,
+    BatchScrapeResponse,
+    ScrapeRequest,
+    ScrapeResponse,
+    V1Request,
+    V1Response,
+)
 from app.solver.engine import RequestConfigError, solver_engine
 from app.content_format import convert_content
 from app.solver.sessions import apply_session, persist_session, session_manager
@@ -199,37 +208,40 @@ async def flaresolverr_api(req: V1Request):
             version=settings.VERSION
         )
 
+async def _execute_scrape(req: ScrapeRequest) -> ScrapeResponse:
+    """Shared scrape execution used by both /scrape and /scrape/batch."""
+    start_ts = time.time()
+    v1_req = req.to_v1_request()
+    solution = await _solve_with_session(v1_req)
+    duration_ms = round((time.time() - start_ts) * 1000, 2)
+    tier_used = solution.tier or "tier1_fast_tls"
+
+    extracted = None
+    if solution.extracted is not None:
+        extracted = solution.extracted
+    elif req.extract_rules and solution.response:
+        extracted = _extract_data(solution.response, req.extract_rules)
+
+    return ScrapeResponse(
+        status="ok",
+        url=solution.url,
+        http_status=solution.status,
+        tier_used=tier_used,
+        duration_ms=duration_ms,
+        cookies=solution.cookies,
+        headers=solution.headers,
+        content=convert_content(solution.response, solution.headers.get("content-type", ""), req.format),
+        extracted=extracted,
+        screenshot=solution.screenshot,
+        debug=solution.debug,
+    )
+
+
 @router.post("/scrape", response_model=ScrapeResponse)
 async def native_scrape_api(req: ScrapeRequest):
     """Native scrape API with tier overrides, selector waiting, extraction rules, and screenshots."""
-    start_ts = time.time()
-    v1_req = req.to_v1_request()
-
     try:
-        solution = await _solve_with_session(v1_req)
-        duration_ms = round((time.time() - start_ts) * 1000, 2)
-
-        tier_used = solution.tier or "tier1_fast_tls"
-
-        extracted = None
-        if solution.extracted is not None:
-            extracted = solution.extracted
-        elif req.extract_rules and solution.response:
-            extracted = _extract_data(solution.response, req.extract_rules)
-
-        return ScrapeResponse(
-            status="ok",
-            url=solution.url,
-            http_status=solution.status,
-            tier_used=tier_used,
-            duration_ms=duration_ms,
-            cookies=solution.cookies,
-            headers=solution.headers,
-            content=convert_content(solution.response, solution.headers.get("content-type", ""), req.format),
-            extracted=extracted,
-            screenshot=solution.screenshot,
-            debug=solution.debug,
-        )
+        return await _execute_scrape(req)
     except SSRFBlockedError as e:
         logger.warning(f"[ScrapeAPI] SSRF validation blocked for {req.url}: {e}")
         raise HTTPException(status_code=400, detail=f"SSRF validation failed: {e}")
@@ -239,6 +251,66 @@ async def native_scrape_api(req: ScrapeRequest):
         logger.error(f"[ScrapeAPI] Scrape failed for {req.url}: {e}", exc_info=True)
         detail = f"Scrape failed: {e}" if isinstance(e, ChallengeNotSolvedError) else "Scrape failed"
         raise HTTPException(status_code=500, detail=f"{detail} (request_id: {get_request_id()})")
+
+
+@router.post("/scrape/batch", response_model=BatchScrapeResponse)
+async def batch_scrape_api(req: BatchScrapeRequest):
+    """Scrape multiple URLs with bounded concurrency and per-item error isolation."""
+    start_ts = time.time()
+    semaphore = asyncio.Semaphore(req.concurrency)
+
+    async def _run_one(target_url: str) -> BatchScrapeItemResult:
+        async with semaphore:
+            try:
+                res = await _execute_scrape(req.to_scrape_request(target_url))
+                return BatchScrapeItemResult(url=target_url, status="ok", result=res)
+            except SSRFBlockedError as e:
+                logger.warning(f"[BatchScrapeAPI] SSRF validation blocked for {target_url}: {e}")
+                return BatchScrapeItemResult(url=target_url, status="error", error=f"SSRF validation failed: {e}")
+            except RequestConfigError as e:
+                return BatchScrapeItemResult(url=target_url, status="error", error=str(e))
+            except ChallengeNotSolvedError as e:
+                return BatchScrapeItemResult(url=target_url, status="error", error=f"Scrape failed: {e}")
+            except TimeoutError:
+                return BatchScrapeItemResult(url=target_url, status="error", error="Request maxTimeout exhausted")
+            except Exception as e:
+                logger.error(f"[BatchScrapeAPI] Scrape failed for {target_url}: {e}", exc_info=True)
+                return BatchScrapeItemResult(
+                    url=target_url,
+                    status="error",
+                    error=f"Scrape failed (request_id: {get_request_id()})",
+                )
+
+    results = await asyncio.gather(*(_run_one(u) for u in req.urls))
+    succeeded = sum(1 for r in results if r.status == "ok")
+    failed = len(results) - succeeded
+    duration_ms = round((time.time() - start_ts) * 1000, 2)
+    return BatchScrapeResponse(
+        status="ok",
+        total=len(results),
+        succeeded=succeeded,
+        failed=failed,
+        duration_ms=duration_ms,
+        results=list(results),
+    )
+
+
+def _extract_proxy_target_url(raw_query: str, fallback_url: Optional[str]) -> str:
+    """Extract `url=` from the raw query string without truncating unescaped '&' in the target,
+    while stripping trailing `/proxy` control parameters (`session`, `proxy`)."""
+    match = re.search(r"(?:^|&)url=", raw_query)
+    if not match:
+        return fallback_url or ""
+    target = raw_query[match.end():]
+    while True:
+        stripped = re.sub(r"&(?:session|proxy)=[^&]*$", "", target)
+        if stripped == target:
+            break
+        target = stripped
+    if "%" in target:
+        target = unquote(target)
+    return target
+
 
 @router.get("/proxy")
 @router.post("/proxy")
@@ -251,13 +323,7 @@ async def transparent_proxy(
     """Transparent proxy: solves the target through the tiered engine and returns its response."""
     cmd = f"request.{request.method.lower()}"
     # The target often has its own unescaped "&" query, which query_params would truncate.
-    raw_query = str(request.url.query)
-    target_url = url or ""
-    if "url=" in raw_query:
-        target_url = raw_query.split("url=", 1)[1]
-        if "%" in target_url:
-            from urllib.parse import unquote
-            target_url = unquote(target_url)
+    target_url = _extract_proxy_target_url(str(request.url.query), url)
 
     if not target_url:
         raise HTTPException(status_code=400, detail="Missing target 'url' parameter")

@@ -267,6 +267,10 @@
                                 <span class="key">Cached Domains</span>
                                 <span class="badge badge-neutral" id="val-cached-domains">0 Domains</span>
                             </li>
+                            <li>
+                                <span class="key">Fallback Proxies</span>
+                                <span class="badge badge-neutral" id="val-fallback-proxies">None Configured</span>
+                            </li>
                         </ul>
                     </div>
                 </div>
@@ -427,6 +431,19 @@
                     </div>
 
                     <div id="cookie-domains-container" class="cookie-domains-list">
+                    </div>
+                </div>
+
+                <div class="panel" style="margin-top: 24px;">
+                    <div class="panel-header panel-header-actions">
+                        <div>
+                            <h3>Active Browser Sessions</h3>
+                            <p>Pinned FlareSolverr sessions carrying cookies, proxy bindings, and browser storage.</p>
+                        </div>
+                        <button class="btn btn-secondary" id="btn-refresh-sessions">Refresh</button>
+                    </div>
+                    <div id="sessions-list-container" class="cookie-domains-list">
+                        <div style="color: var(--text-muted);">Loading active sessions...</div>
                     </div>
                 </div>
             </section>

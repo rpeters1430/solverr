@@ -292,6 +292,19 @@ class TestAPIEndpoints(unittest.TestCase):
             res = self.client.get("/proxy?url=https://example.com/api&session=sess123&proxy=http://user:pass@proxy.com:8080")
             self.assertEqual(res.status_code, 200)
             called_req = mock_proc.call_args[0][0]
+            self.assertEqual(called_req.url, "https://example.com/api")
+            self.assertEqual(called_req.session, "sess123")
+            self.assertEqual(called_req.proxy, "http://user:pass@proxy.com:8080")
+
+    def test_proxy_preserves_target_query_before_session_and_proxy(self):
+        from unittest.mock import patch, AsyncMock
+        from app.models.flaresolverr import SolutionModel
+        fake_sol = SolutionModel(url="https://example.com/api?a=1&b=2", status=200, headers={}, response="ok")
+        with patch("app.api.flaresolverr.solver_engine.process_request", new=AsyncMock(return_value=fake_sol)) as mock_proc:
+            res = self.client.get("/proxy?url=https://example.com/api?a=1&b=2&session=sess123&proxy=http://user:pass@proxy.com:8080")
+            self.assertEqual(res.status_code, 200)
+            called_req = mock_proc.call_args[0][0]
+            self.assertEqual(called_req.url, "https://example.com/api?a=1&b=2")
             self.assertEqual(called_req.session, "sess123")
             self.assertEqual(called_req.proxy, "http://user:pass@proxy.com:8080")
 
@@ -355,6 +368,71 @@ class TestAPIEndpoints(unittest.TestCase):
         data = res.json()
         self.assertEqual(data.get("status"), "error")
         self.assertIn("Validation error", data.get("message", ""))
+
+    def test_dashboard_test_ssrf_returns_400(self):
+        res = self.client.post("/api/test", json={"url": "file:///etc/passwd"})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("SSRF validation failed", res.json().get("detail", ""))
+
+    def test_delete_domain_cookies_endpoint(self):
+        from app.models.flaresolverr import CookieModel
+        from app.solver.cache import cookie_cache
+        cookie_cache.set_cookies("https://one.example", [CookieModel(name="cf_clearance", value="v1", domain="one.example")], schedule_save=False)
+        cookie_cache.set_cookies("https://two.example", [CookieModel(name="cf_clearance", value="v2", domain="two.example")], schedule_save=False)
+        try:
+            res = self.client.delete("/api/cookies/one.example")
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.json()["domain"], "one.example")
+            self.assertGreaterEqual(res.json()["removed"], 1)
+            self.assertEqual(cookie_cache.get_cookies("https://one.example"), [])
+            self.assertEqual(len(cookie_cache.get_cookies("https://two.example")), 1)
+
+            missing = self.client.delete("/api/cookies/missing.example")
+            self.assertEqual(missing.status_code, 404)
+        finally:
+            cookie_cache.clear_domain("one.example", schedule_save=False)
+            cookie_cache.clear_domain("two.example", schedule_save=False)
+
+    def test_batch_scrape_endpoint_partial_success_and_ssrf_isolation(self):
+        from app.security import SSRFBlockedError
+        ok_sol = SolutionModel(
+            url="https://example.com/a",
+            status=200,
+            headers={"content-type": "text/html"},
+            response="<h1>Hello</h1>",
+            tier="tier1_fast_tls",
+        )
+
+        async def fake_process(req, **_kwargs):
+            if req.url == "file:///etc/passwd":
+                raise SSRFBlockedError("Blocked scheme")
+            if req.url == "https://example.com/fail":
+                raise RuntimeError("proxy http://user:secret@10.0.0.1:8080 failed")
+            return ok_sol
+
+        with patch("app.api.flaresolverr.solver_engine.process_request", new=AsyncMock(side_effect=fake_process)):
+            res = self.client.post("/scrape/batch", json={
+                "urls": [
+                    "https://example.com/a",
+                    "file:///etc/passwd",
+                    "https://example.com/fail",
+                ],
+                "concurrency": 2,
+                "format": "markdown",
+            })
+
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["total"], 3)
+        self.assertEqual(data["succeeded"], 1)
+        self.assertEqual(data["failed"], 2)
+        self.assertEqual(data["results"][0]["status"], "ok")
+        self.assertEqual(data["results"][0]["result"]["content"], "# Hello\n")
+        self.assertEqual(data["results"][1]["status"], "error")
+        self.assertIn("SSRF validation failed", data["results"][1]["error"])
+        self.assertEqual(data["results"][2]["status"], "error")
+        self.assertNotIn("secret", data["results"][2]["error"])
+        self.assertIn("request_id:", data["results"][2]["error"])
 
 
 if __name__ == "__main__":

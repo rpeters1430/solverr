@@ -548,6 +548,15 @@ class TestCookieCache(unittest.TestCase):
         self.assertEqual(paths["/"], "root")
         self.assertEqual(paths["/admin"], "admin")
 
+    def test_clear_domain_removes_only_target_domain(self):
+        self.cache.set_cookies("https://a.com", [CookieModel(name="c1", value="v1", domain="a.com")])
+        self.cache.set_cookies("https://b.com", [CookieModel(name="c2", value="v2", domain="b.com")])
+        removed = self.cache.clear_domain("https://a.com")
+        self.assertEqual(removed, 1)
+        self.assertEqual(self.cache.get_cookies("https://a.com"), [])
+        self.assertEqual(len(self.cache.get_cookies("https://b.com")), 1)
+        self.assertEqual(self.cache.clear_domain("a.com"), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

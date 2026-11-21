@@ -303,6 +303,101 @@ class ScrapeResponse(BaseModel):
     screenshot: Optional[str] = None
     debug: Optional[Dict[str, Any]] = None
 
+
+class BatchScrapeRequest(BaseModel):
+    urls: List[str] = Field(..., min_length=1, max_length=50)
+    concurrency: int = Field(default=3, ge=1, le=10)
+    method: str = "GET"
+    postData: Optional[str] = None
+    headers: Optional[Dict[str, Any]] = None
+    cookies: Optional[List[CookieModel]] = None
+    proxy: Optional[Union[ProxyConfig, Dict[str, Any], str]] = None
+    session: Optional[str] = None
+    tier: Optional[str] = "auto"
+    wait_selector: Optional[str] = None
+    wait_delay_ms: Optional[int] = None
+    extract_rules: Optional[Dict[str, str]] = None
+    screenshot: Optional[bool] = False
+    screenshot_full_page: bool = False
+    screenshot_selector: Optional[str] = None
+    extract_records: Optional[Dict[str, Any]] = None
+    maxTimeout: Optional[int] = 60000
+    userAgent: Optional[str] = None
+    skip_cache: Optional[bool] = False
+    followMetaRefresh: Optional[bool] = None
+    capture: Optional[List[str]] = None
+    disable_media: bool = False
+    solve_embedded_captchas: bool = True
+    format: Literal["html", "markdown", "text"] = "html"
+
+    @field_validator("headers", mode="before")
+    @classmethod
+    def _coerce_headers(cls, v):
+        if isinstance(v, dict):
+            return {str(k): str(val) if val is not None else "" for k, val in v.items()}
+        return v
+
+    @field_validator("capture")
+    @classmethod
+    def _check_capture(cls, v):
+        return _validate_capture(v)
+
+    @field_validator("proxy", mode="before")
+    @classmethod
+    def _coerce_proxy(cls, v):
+        return _drop_empty_proxy(v)
+
+    @field_validator("tier")
+    @classmethod
+    def _check_tier(cls, v):
+        if v is not None and v not in SCRAPE_TIERS:
+            raise ValueError(f"unknown tier '{v}'; allowed: {sorted(SCRAPE_TIERS)}")
+        return v
+
+    def to_scrape_request(self, target_url: str) -> ScrapeRequest:
+        return ScrapeRequest(
+            url=target_url,
+            method=self.method,
+            postData=self.postData,
+            headers=self.headers,
+            cookies=self.cookies,
+            proxy=self.proxy,
+            session=self.session,
+            tier=self.tier,
+            wait_selector=self.wait_selector,
+            wait_delay_ms=self.wait_delay_ms,
+            extract_rules=self.extract_rules,
+            screenshot=self.screenshot,
+            screenshot_full_page=self.screenshot_full_page,
+            screenshot_selector=self.screenshot_selector,
+            extract_records=self.extract_records,
+            maxTimeout=self.maxTimeout,
+            userAgent=self.userAgent,
+            skip_cache=self.skip_cache,
+            followMetaRefresh=self.followMetaRefresh,
+            capture=self.capture,
+            disable_media=self.disable_media,
+            solve_embedded_captchas=self.solve_embedded_captchas,
+            format=self.format,
+        )
+
+
+class BatchScrapeItemResult(BaseModel):
+    url: str
+    status: Literal["ok", "error"]
+    result: Optional[ScrapeResponse] = None
+    error: Optional[str] = None
+
+
+class BatchScrapeResponse(BaseModel):
+    status: str = "ok"
+    total: int
+    succeeded: int
+    failed: int
+    duration_ms: float
+    results: List[BatchScrapeItemResult]
+
+
 class TestRequestModel(BaseModel):
     url: str
     method: str = "GET"

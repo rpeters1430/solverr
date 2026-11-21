@@ -459,16 +459,20 @@ class HybridSolverEngine:
             if req.fastTlsOnly:
                 elapsed_ms = budget.elapsed_ms
                 if solution:
-                    metrics.record_fast(elapsed_ms)
-                    logger.info("[HybridEngine] fastTlsOnly=True requested. Returning Fast TLS solution without browser escalation.")
-                    solution.tier = "tier1_fast_tls"
+                    tier_name = "tier2_cache" if had_cache else "tier1_fast_tls"
+                    if had_cache:
+                        metrics.record_cache(elapsed_ms)
+                    else:
+                        metrics.record_fast(elapsed_ms)
+                    logger.info(f"[HybridEngine] fastTlsOnly=True requested. Returning {tier_name} solution without browser escalation.")
+                    solution.tier = tier_name
                     if not solution.cookies and combined_cookies:
                         solution.cookies = list(combined_cookies)
                     if solution.cookies and share_cache:
                         await cookie_cache.set_cookies_async(url, solution.cookies, user_agent=solution.userAgent, proxy=proxy_url)
                     event_broadcaster.emit("solve", {
                         "url": url,
-                        "tier": "tier1_fast_tls",
+                        "tier": tier_name,
                         "status": solution.status,
                         "duration_ms": round(elapsed_ms, 1),
                         "cookies_count": len(solution.cookies) if solution.cookies else 0
