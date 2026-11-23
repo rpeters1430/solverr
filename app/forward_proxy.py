@@ -19,8 +19,8 @@ import httpx
 from app.config import settings
 from app.models.flaresolverr import CookieModel, V1Request
 from app.proxy_certificates import ProxyCertificateAuthority
-from app.security import check_target_url_async
-from app.egress_proxy import egress_proxy
+from app.security import SSRFBlockedError, check_target_url_async
+from app.egress_proxy import EgressProxyServer, egress_proxy
 from app.solver.engine import solver_engine
 
 logger = logging.getLogger("solverr.forward_proxy")
@@ -117,6 +117,9 @@ class ForwardProxyServer:
                 hostname, port = self._parse_connect_target(target)
                 if port != 443:
                     raise ProxyProtocolError(403, "Only HTTPS CONNECT on port 443 is supported")
+                if self._is_passthrough_host(hostname):
+                    await self._tunnel(reader, writer, hostname, port)
+                    return
                 context = self.certificates.issue_server_context(hostname)
                 writer.write(b"HTTP/1.1 200 Connection Established\r\nProxy-Agent: Solverr\r\n\r\n")
                 await writer.drain()
@@ -130,6 +133,8 @@ class ForwardProxyServer:
             logger.debug("Forward proxy client disconnected or timed out: %s", peer)
         except ProxyProtocolError as exc:
             await self._write_error(writer, exc.status, str(exc))
+        except SSRFBlockedError:
+            await self._write_error(writer, 403, "Destination is blocked by Solverr network policy")
         except Exception as exc:
             logger.warning("Forward proxy request failed from %s: %s", peer, type(exc).__name__)
             await self._write_error(writer, 502, "Solverr could not process this proxy request")
@@ -221,6 +226,28 @@ class ForwardProxyServer:
             raise ProxyProtocolError(407, "Invalid proxy credentials")
 
     @staticmethod
+    def _is_passthrough_host(hostname: str) -> bool:
+        host = (hostname or "").lower().rstrip(".")
+        return any(host == d or host.endswith(f".{d}") for d in settings.MITM_PASSTHROUGH_HOSTS)
+
+    async def _tunnel(self, reader, writer, hostname: str, port: int) -> None:
+        """Relay a CONNECT byte-for-byte, so the client's own TLS reaches the origin untouched.
+
+        The destination goes through the egress proxy's validation (SSRF policy, DNS pinning).
+        """
+        upstream_reader, upstream_writer = await egress_proxy._open_validated(hostname, port)
+        try:
+            writer.write(b"HTTP/1.1 200 Connection Established\r\nProxy-Agent: Solverr\r\n\r\n")
+            await writer.drain()
+            await EgressProxyServer._relay(reader, writer, upstream_reader, upstream_writer)
+        finally:
+            upstream_writer.close()
+            try:
+                await upstream_writer.wait_closed()
+            except (ConnectionError, OSError):
+                pass
+
+    @staticmethod
     def _parse_connect_target(target: str) -> tuple[str, int]:
         host, sep, port_text = target.rpartition(":")
         if not sep or not host or not port_text.isdigit():
@@ -289,6 +316,10 @@ class ForwardProxyServer:
             raise ProxyProtocolError(400, "Invalid Cookie header") from exc
         host = urlsplit(url).hostname
         cookies = [CookieModel(name=name, value=value.value, domain=host, path="/") for name, value in imported.items()]
+        # The engine hands input cookies back as the solution's cookies when the origin set none.
+        # Echoing those to the client as Set-Cookie would re-scope them (host-only, path=/, no
+        # Secure or expiry) and give it duplicates of its own cookies, so only new values go back.
+        sent_cookies = {(name, morsel.value) for name, morsel in imported.items()}
         request = V1Request(
             cmd=f"request.{method.lower()}",
             cookies=cookies or None,
@@ -322,6 +353,8 @@ class ForwardProxyServer:
             if re.fullmatch(r"[!#$%&'*+.^_`|~0-9a-z-]+", name, re.I) and "\r" not in value and "\n" not in value:
                 headers_out.append((name, value))
         for cookie in solution.cookies or []:
+            if (cookie.name, cookie.value) in sent_cookies:
+                continue
             if any(ch in f"{cookie.name}{cookie.value}{cookie.domain or ''}{cookie.path or ''}" for ch in "\r\n"):
                 continue
             morsels = SimpleCookie()

@@ -497,6 +497,7 @@ On by default; set `ENABLE_MCP=false` to disable.
 | `MITM_HOST` / `MITM_PORT` | `127.0.0.1` / `8192` | Proxy listener address and TCP port; bundled Docker Compose overrides the container address to `0.0.0.0` for same-network clients |
 | `MITM_CA_DIR` | `data/proxy-ca` | Persistent CA certificate and private signing key directory; keep `ca.key` private |
 | `MITM_PROXY_USERNAME` / `MITM_PROXY_PASSWORD` | unset | Both are required when the forward proxy is enabled; clients authenticate with HTTP Basic proxy auth |
+| `MITM_PASSTHROUGH_HOSTS` | Google/YouTube domains | Comma-separated domains (subdomains included) whose HTTPS CONNECTs are tunnelled untouched instead of intercepted, so signed-in Google sessions keep the client's own TLS and IP. Empty string intercepts everything |
 | `FALLBACK_PROXY_COOLDOWN_SECONDS` | `60` | How long a failed fallback proxy sits out, doubling per consecutive failure up to 8x. When every proxy is cooling down, the one that recovers first is used |
 | `FALLBACK_PROXY_MAX_ATTEMPTS` | `2` | Fallback proxies tried per request while its timeout budget lasts, each through a fresh browser |
 | `API_KEY` | `None` | When set, requires a matching `X-Api-Key` header (header only - never a query param) on every endpoint except `/health`, and `/metrics` unless `METRICS_REQUIRE_AUTH=true` |
