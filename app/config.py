@@ -229,6 +229,17 @@ class Settings:
     MITM_CA_DIR: str = os.getenv("MITM_CA_DIR", "data/proxy-ca")
     MITM_PROXY_USERNAME: Optional[str] = os.getenv("MITM_PROXY_USERNAME")
     MITM_PROXY_PASSWORD: Optional[str] = os.getenv("MITM_PROXY_PASSWORD")
+    # CONNECT targets on these domains (and their subdomains) are tunnelled byte-for-byte instead of
+    # intercepted. Google binds signed-in sessions to the client that uses them: the same cookies seen
+    # through Solverr's TLS stack, Chrome impersonation or browser gets the session rotated or revoked.
+    # None of these sites sit behind a challenge Solverr can solve. Set to an empty string to intercept all.
+    MITM_PASSTHROUGH_HOSTS: set = {
+        h.strip().lower().lstrip(".") for h in os.getenv(
+            "MITM_PASSTHROUGH_HOSTS",
+            "google.com,youtube.com,youtu.be,youtube-nocookie.com,googlevideo.com,ytimg.com,ggpht.com,"
+            "googleapis.com,gstatic.com,googleusercontent.com",
+        ).split(",") if h.strip()
+    }
 
     # Size limits in MB; 0 disables the check.
     MAX_REQUEST_BODY_MB: float = float(os.getenv("MAX_REQUEST_BODY_MB", "10"))

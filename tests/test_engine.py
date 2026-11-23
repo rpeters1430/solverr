@@ -517,5 +517,28 @@ class TestResponseBodyCap(unittest.TestCase):
             self.assertLessEqual(len(solution.response.encode("utf-8")), 10)
 
 
+
+class TestPrivateRequestFallbackSafety(unittest.IsolatedAsyncioTestCase):
+    async def test_requests_with_caller_cookies_never_use_fallback_proxies(self):
+        from unittest.mock import AsyncMock, patch
+        from app.config import settings
+        from app.models.flaresolverr import CookieModel, V1Request
+        from app.solver.engine import HybridSolverEngine
+
+        engine = HybridSolverEngine()
+        cookie = CookieModel(name="SID", value="login", domain="example.com")
+        for req in (
+            V1Request(cmd="request.get", url="https://example.com", cookies=[cookie]),
+            V1Request(cmd="request.get", url="https://example.com", headers={"Cookie": "SID=login"}),
+        ):
+            with patch("app.solver.engine.fast_tls_engine.request", new=AsyncMock(return_value=(True, None))), \\
+                 patch("app.solver.engine.browser_pool.solve", new=AsyncMock(side_effect=RuntimeError("boom"))) as browser_mock, \\
+                 patch.object(settings, "FALLBACK_PROXY_URL", "http://example.com:8080"):
+                with self.assertRaises(Exception):
+                    await engine.process_request(req)
+                self.assertEqual(browser_mock.call_count, 1)
+                self.assertIsNone(browser_mock.call_args.kwargs["proxy"])
+
+
 if __name__ == "__main__":
     unittest.main()

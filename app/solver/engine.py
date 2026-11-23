@@ -529,10 +529,14 @@ class HybridSolverEngine:
             )
 
         if req.forceFallbackProxy:
+            if private_request:
+                raise RequestConfigError(
+                    "forceFallbackProxy is unsupported for requests with caller cookies, sessions, or credentials"
+                )
             logger.info("[HybridEngine] forceFallbackProxy=True requested. Going straight to Tier 4 Fallback Proxy...")
             return await self._solve_via_fallback_proxies(url, budget, _browser_kwargs, share_cache, TimeoutError("Request timeout budget exhausted before a Tier 4 attempt"), allow_retry=safe_method, require_cookies=require_cookies)
 
-        can_fallback = safe_method and fallback_proxy_pool.enabled and not proxy_url
+        can_fallback = safe_method and fallback_proxy_pool.enabled and not proxy_url and not private_request
         # Reserve a real Tier 4 window instead of handing Tier 3 the whole deadline.
         reserve_ms = min(10000, int(budget.remaining_ms * 0.30)) if can_fallback else 0
         direct_timeout_ms = max(1, budget.remaining_ms - reserve_ms)
